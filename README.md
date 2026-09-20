@@ -23,6 +23,9 @@ Three ideas:
    statically typed. A function that can fail returns a result, one that
    prints is an IO function, and the compiler works that out from the body.
 
+> [!WARNING]
+> This is an experimental proof of concept, not production-ready software.
+
 ## Install and run
 
 You need Rust, [Bend](https://bend-lang.com) (`curl -fsSL https://bend-lang.com/install.sh | sh`)
