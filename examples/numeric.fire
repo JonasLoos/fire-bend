@@ -1,0 +1,118 @@
+# Number theory and matrices: sieve over a list of booleans, gcd/lcm, base
+# conversion both ways, matrix transpose/multiply/power with nested
+# comprehensions, fibonacci with a memo dictionary threaded through the
+# recursion, and integer square roots.
+
+def sieve(limit)
+    var flags = $lists.repeat(true, limit + 1)
+    flags[0] = false
+    flags[1] = false
+    var i = 2
+    while i * i <= limit
+        if flags[i]
+            var j = i * i
+            while j <= limit
+                flags[j] = false
+                j += i
+        i += 1
+    for n, is_prime in 0.., flags if is_prime do n
+
+def gcd(a, b)
+    if b == 0 do a else gcd(b, a % b)
+
+def lcm(a, b)
+    (a / gcd(a, b)) * b
+
+def to_base(n, base)
+    digits = "0123456789ABCDEF"
+    if n == 0 do return "0"
+    var v = n
+    var out = ""
+    while v > 0
+        out = digits[v % base] + out
+        v = int(v / base)
+    out
+
+def from_base(s, base)
+    digits = "0123456789ABCDEF"
+    var acc = 0
+    for c in s.chars()
+        d = match digits.index_of(c)
+            nothing => 0
+            k => k
+        acc = acc * base + d
+    acc
+
+def transpose(m)
+    cols = for j in 0..len(m[0]) do for i in 0..len(m) do m[i][j]
+    cols
+
+def matmul(a, b)
+    bt = transpose(b)
+    product = for row in a do for col in bt do sum(for x, y in row, col do x * y)
+    product
+
+def identity(n)
+    eye = for i in 0..n do for j in 0..n do if i == j do 1 else 0
+    eye
+
+def mat_pow(m, p)
+    if p == 0 do return identity(len(m))
+    if p % 2 == 0
+        half = mat_pow(m, int(p / 2))
+        return matmul(half, half)
+    matmul(m, mat_pow(m, p - 1))
+
+def fib_memo(n, memo)
+    if n <= 1 do return {value: n, memo: memo}
+    key = "{n}"
+    cached = memo[key] or 0
+    if cached > 0 do return {value: cached, memo: memo}
+    r1 = fib_memo(n - 1, memo)
+    r2 = fib_memo(n - 2, r1.memo)
+    v = r1.value + r2.value
+    table = r2.memo
+    table[key] = v
+    {value: v, memo: table}
+
+def isqrt(n)
+    if n < 2 do return n
+    var x = n
+    var y = int((x + 1) / 2)
+    while y < x
+        x = y
+        y = int((x + int(n / x)) / 2)
+    x
+
+def digit_sum(n)
+    if n < 10 do n else n % 10 + digit_sum(int(n / 10))
+
+def collatz_len(n)
+    var v = n
+    var steps = 0
+    while v != 1
+        v = if v % 2 == 0 do int(v / 2) else 3 * v + 1
+        steps += 1
+    steps
+
+primes = sieve(100)
+print(len(primes), primes[..10], primes[-3..])
+print(sum(primes), primes ?> $ % 10 == 3)
+print(gcd(462, 1071), gcd(17, 5), gcd(0, 9), lcm(4, 6), lcm(21, 6))
+print([12, 18, 24, 60].reduce(gcd), [2, 3, 4, 5].reduce(lcm))
+for n in [0, 5, 255, 4096, 1000000]
+    print("{n}: bin={to_base(n, 2)} oct={to_base(n, 8)} hex={to_base(n, 16)}")
+print(from_base("11111111", 2), from_base("FF", 16), from_base("777", 8), from_base(to_base(123456, 7), 7))
+
+a = [[1, 2, 3], [4, 5, 6]]
+b = [[7, 8], [9, 10], [11, 12]]
+print(transpose(a))
+print(matmul(a, b))
+print(matmul(identity(2), matmul(a, b)) == matmul(a, b))
+fibm = [[1, 1], [1, 0]]
+print(mat_pow(fibm, 10), mat_pow(fibm, 40)[0][1])
+result = fib_memo(40, {})
+print(result.value, len(result.memo.keys()), result.memo["30"])
+print(for n in [0, 1, 15, 16, 17, 99, 100, 1000000, 2147395600] do isqrt(n))
+print(digit_sum(0), digit_sum(9875), digit_sum(2147483647))
+print(for n in [1, 6, 7, 27, 97] do collatz_len(n))

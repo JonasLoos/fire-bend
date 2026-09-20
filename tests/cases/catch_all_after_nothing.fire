@@ -1,0 +1,6 @@
+# an identifier arm after `nothing =>` on a T | nothing binds the T
+xs = [1, 2]
+x = match xs.first()
+    nothing => -1
+    n => n * 100
+print(x)

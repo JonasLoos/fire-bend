@@ -1,0 +1,30 @@
+# Indexing and slicing: lists, strings, ranges, and lazy streams
+# all answer `[i]` and `[a..b]`. Slices clamp to the bounds; plain
+# indexes abort when out of range.
+
+letters = ["a", "b", "c", "d", "e"]
+print(letters[0], letters[-1])       # negative counts from the end
+print(letters[1..3])                 # a slice is a new list
+print(letters[2..])                  # open ends reach to the boundary
+print(letters[..2])
+print(letters[-2..])
+
+# bounds can be any expression
+i = 1
+print(letters[i..i+3])
+
+# strings slice by character
+word = "pipeline"
+print(word[..4], word[4..])
+
+# ranges index and slice arithmetically — a slice of a range is a range
+r = 10..20
+print(r[0], r[-1], r[2..5])
+print((3..)[2])                      # open ranges too: no end needed
+
+# streams pull through their pipeline stages, like take/drop
+evens = 0.. ?> $ % 2 == 0
+print(evens[..4])                    # a closed end materializes a list
+print(evens[3])
+rest = evens[2..]                    # an open end stays lazy
+print(rest.take(3))

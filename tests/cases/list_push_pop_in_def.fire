@@ -1,0 +1,15 @@
+# push/pop rebind their container: at top level, from a binding, and inside a loop in a def
+xs = []
+xs.push(1)
+print(xs)
+ys = [1, 2, 3]
+y = ys.pop()
+print(y, ys)
+def build(n)
+    var out = []
+    var i = 0
+    while i < n
+        out.push(i)
+        i += 1
+    out
+print(build(3))

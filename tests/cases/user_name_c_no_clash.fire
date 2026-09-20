@@ -1,0 +1,7 @@
+# a user variable named `c` does not collide with generated names
+def first_big(cards)
+    for c in cards
+        if c > 5 do return c
+    -1
+
+print(first_big([3, 9, 4, 7]))

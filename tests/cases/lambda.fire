@@ -1,0 +1,6 @@
+square = x => x**2
+print(square(4))
+
+cube_maybe = (x, really: bool = false) => if really do x**3 else 42
+print(cube_maybe(3))
+print(cube_maybe(3, true))

@@ -1,0 +1,14 @@
+# a mutating method whose body ends in an if statement
+def Game()
+    public var state = 'lobby'
+    public var round = 0
+    public advance = () =>
+        round += 1
+        if round > 2
+            state = 'over'
+
+var g = Game()
+g.advance()
+g.advance()
+g.advance()
+print(g.state, g.round)

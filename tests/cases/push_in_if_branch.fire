@@ -1,0 +1,5 @@
+# a push inside an if branch flows out of the branch
+tokens = []
+c = "a"
+if c != " " do tokens.push(c)
+print(tokens)

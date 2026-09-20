@@ -1,0 +1,13 @@
+# a method calling a sibling mutating method, by bare name and via self.
+def Acc(public var balance: int = 0)
+    public deposit = n => balance += n
+    public deposit_twice = n =>
+        deposit(n)
+        deposit(n)
+    public bonus = () => self.deposit(1)
+
+var a = Acc(10)
+a.deposit_twice(5)
+print(a.balance)
+a.bonus()
+print(a.balance)

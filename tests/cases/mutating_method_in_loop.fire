@@ -1,0 +1,8 @@
+# a mutating method called on an outer var object inside a loop body
+def Acc(public var balance: int = 0)
+    public deposit = n => balance += n
+
+var a = Acc(0)
+for i in 1..4
+    a.deposit(i)
+print(a.balance)

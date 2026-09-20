@@ -1,0 +1,6 @@
+# index assignment on a local list inside a pure def
+def f()
+    var out = [1, 2, 3]
+    out[0] = 9
+    out
+print(f())

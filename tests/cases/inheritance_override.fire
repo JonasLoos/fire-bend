@@ -1,0 +1,13 @@
+def Animal(name: str)
+    public say_hi = () => "Hello, I'm an animal named {name}."
+
+def Dog(name: str = "Doggy")
+    # hold a reference to the parent to call the overridden method
+    parent = Animal(name)
+    self.{...} = parent
+    public say_hi = () => parent.say_hi() + " Wuff!"
+
+dog = Dog("Buddy")
+print(dog.say_hi())
+default_dog = Dog()
+print(default_dog.say_hi())

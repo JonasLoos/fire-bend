@@ -1,0 +1,19 @@
+# Using a def as a namespace for static-like utility methods.
+# Sibling members are plain lexical names: `fib(...)` and `self.fib(...)`
+# are the same call — `self.` is optional style.
+def MathUtils
+    public fib = (n: int) =>
+        if n <= 1
+            1
+        else
+            fib(n - 1) + fib(n - 2)
+
+    public fact = (n: int) =>
+        if n == 0
+            1
+        else
+            n * self.fact(n - 1)
+
+
+print(MathUtils.fib(6))   # 13
+print(MathUtils.fact(5))  # 120

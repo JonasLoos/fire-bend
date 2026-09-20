@@ -1,0 +1,8 @@
+exit 17 5
+ada hp=10 gold=24 potions=0
+5 4 2 1 nothing
+enter     5
+fight     4
+loot      2
+rest      1
+true false

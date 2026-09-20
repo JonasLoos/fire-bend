@@ -1,0 +1,96 @@
+# A token substitution engine: `{{name}}` placeholders, `{{#list}}...{{/list}}`
+# repetition, filters (`{{name|upper}}`), dictionaries, .keys()/.has(),
+# comprehensions and nested loops with break/continue.
+
+def Template(public source: str)
+    public var missing = []
+
+    public tokens = () =>
+        # split the source into literal and placeholder chunks
+        var chunks = []
+        var buf = ""
+        var i = 0
+        n = len(source)
+        while i < n
+            if i + 1 < n and source[i] == '{' and source[i + 1] == '{'
+                close = source[i..].index_of('}}')
+                match close
+                    nothing =>
+                        buf = buf + source[i..]
+                        i = n
+                    k =>
+                        if buf != "" do chunks.push({kind: "text", body: buf})
+                        buf = ""
+                        chunks.push({kind: "tag", body: source[(i + 2)..(i + k)].trim()})
+                        i = i + k + 2
+                continue
+            buf = buf + source[i]
+            i += 1
+        if buf != "" do chunks.push({kind: "text", body: buf})
+        chunks
+
+    public render = vars =>
+        var out = []
+        for chunk in tokens()
+            match chunk
+                {kind: "text", body} => out.push(body)
+                {kind: "tag", body} => out.push(expand(body, vars))
+                other => out.push("?")
+        out.join("")
+
+    public expand = (tag, vars) =>
+        parts = tag.split("|") *> $.trim()
+        name = parts[0]
+        if not vars.has(name)
+            missing.push(name)
+            return "<{name}?>"
+        var value = vars[name] or ""
+        for f in parts[1..]
+            value = apply_filter(f, value)
+        value
+
+def apply_filter(f, value)
+    match f
+        "upper" => value.upper()
+        "lower" => value.lower()
+        "title" => (value.split(" ") *> cap |> $.join(" "))
+        "len" => "{len(value)}"
+        "reverse" => value.chars().reversed().join("")
+        other => "{value}|{other}?"
+
+def cap(w)
+    if w == "" do w else w[0].upper() + w[1..]
+
+vars = {}
+vars["name"] = "ada lovelace"
+vars["role"] = "engineer"
+vars["city"] = "London"
+
+var tpl = Template('Dear {{ name | title }}, welcome to {{city|upper}} as {{role}}. Your id is {{ name|reverse|len }} chars; {{unknown}} and {{ role | shout }}.')
+print(tpl.render(vars))
+print("missing: {tpl.missing}")
+print("tags: {tpl.tokens() ?> $.kind == 'tag' *> $.body}")
+
+# repeated substitution over rows with a limit and a skip rule
+rows = for i in 1..8 do {id: i, label: "item-{i}"}
+var lines = []
+for row in rows
+    if row.id % 3 == 0 do continue
+    if len(lines) >= 4 do break
+    v = {}
+    v["id"] = "{row.id}"
+    v["label"] = row.label
+    lines.push(Template('#{{id}}: {{label|upper}}').render(v))
+print(lines.join("; "))
+
+# which variables does a template need? A comprehension over its tags
+needed = t => (t.tokens() ?> $.kind == "tag" *> $.body.split("|")[0].trim())
+print(needed(tpl))
+unknowns = for k in needed(tpl) if not vars.has(k) do k
+print("unknown: {unknowns}")
+available = sorted(vars.keys()) *> "{$}={vars[$] or '-'}"
+print(available.join(" "))
+
+# escaping: a `{{` with no close is kept literally
+print(Template('open {{oops and {{name}} ok').render(vars))
+print(Template("").render(vars) == "", Template("plain").tokens())

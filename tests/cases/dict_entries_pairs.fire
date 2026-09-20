@@ -1,0 +1,6 @@
+# entries() yields [key, value] pairs: destructured in a sort key, indexed in a stage
+counts = {}
+counts["a"] = 2
+counts["b"] = 1
+print(sorted(counts.entries(), ([k, v]) => -v))
+print(counts.entries() *> $[0])

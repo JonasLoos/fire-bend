@@ -1,0 +1,6 @@
+# a dictionary threaded through a function parameter: lookup, default, assignment
+def bump(counts, w)
+    counts[w] = (counts[w] or 0) + 1
+    counts
+c = bump(bump({}, "a"), "a")
+print(c["a"])

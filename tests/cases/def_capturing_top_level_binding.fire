@@ -1,0 +1,11 @@
+# a top-level def that captures a top-level binding, passed as a bare function value from another def
+punctuation = ".,;:!?"
+
+def clean(word)
+    kept = word.chars() ?> not punctuation.contains($)
+    kept.join("")
+
+def tokenize(text)
+    text.split(" ") *> clean
+
+print(tokenize("a, b."))

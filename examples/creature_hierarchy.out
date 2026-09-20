@@ -1,0 +1,19 @@
+slime the creature [5 hp]
+wolf the creature [20 hp] on 4 legs
+smaug the creature [20 hp] on 4 legs and 3 fire charges
+4 4 20 true
+wolf the creature [5 hp] on 4 legs true
+wolf the creature [0 hp] on 4 legs false
+4 false
+15
+0 false
+smaug breathes fire (2 left)
+smaug breathes fire (1 left)
+smaug breathes fire (0 left)
+smaug is out of fire
+0
+smaug dragon beast creature
+Creature{name: 'slime', hp: 5, alive: true}
+Beast{legs: 4, name: 'wolf', hp: 4, alive: false}
+Dragon{legs: 4, name: 'smaug', hp: 0, alive: false, fire: 0}
+true false

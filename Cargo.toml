@@ -1,0 +1,18 @@
+[package]
+name = "fire_bend"
+version = "0.1.0"
+edition = "2024"
+description = "Fire: an indentation-based pipeline language that compiles to Bend 2"
+
+[[bin]]
+name = "fire"
+path = "src/main.rs"
+
+[dependencies]
+pest = "2.8"
+pest_derive = "2.8"
+clap = { version = "4.5", features = ["derive"] }
+stacker = "0.1"
+
+[dev-dependencies]
+walkdir = "2"

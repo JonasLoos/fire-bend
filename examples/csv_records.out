@@ -1,0 +1,19 @@
+columns: name | dept | age | salary
+parsed 4 rows, 3 errors
+  ! line 4: bad age 'x1'
+  ! line 5: bad salary ''
+  ! line 7: name is empty
+  Ada Lovelace (eng, 36) earns 120000
+  Bob Smith (ops, 41) earns 88000
+  Eve Adams (eng, 25) earns 105000
+  Fay Wong (sales, 52) earns 99000
+dept   count   total   average
+eng        2  225000    112500
+ops        1   88000     88000
+sales      1   99000     99000
+ages: [36, 41, -1, 29, 25, 33, 52]
+mean age: 36.0
+youngest: Eve Adams, oldest: Fay Wong
+eng names: Ada, Eve
+8250 per month
+unknown: not found

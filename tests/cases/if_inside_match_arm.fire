@@ -1,0 +1,9 @@
+# a statement match whose arm block contains an if statement
+var state = 'a'
+var n = 0
+match state
+    'a' =>
+        n += 1
+        if n > 0 do state = 'b'
+    other => state = 'z'
+print(state, n)

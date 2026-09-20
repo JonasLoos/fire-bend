@@ -1,0 +1,69 @@
+# Inheritance hierarchy: self.{...} = parent, overriding, calling the parent
+# through the stored reference, inherited members read through children,
+# inherited mutating methods, and a list of mixed-depth objects.
+def Creature(public name: str, public var hp: int = 10)
+    public var alive = true
+    public kind = () => "creature"
+    public take_damage = amount =>
+        hp -= amount
+        if hp <= 0
+            hp = 0
+            alive = false
+    public heal = amount => hp += amount
+    public describe = () => "{name} the {kind()} [{hp} hp]"
+
+def Beast(name: str, public legs: int = 4)
+    parent = Creature(name, 20)
+    self.{...} = parent
+    public kind = () => "beast"
+    public describe = () => parent.describe() + " on {legs} legs"
+
+def Dragon(name: str)
+    parent = Beast(name, 4)
+    self.{...} = parent
+    public var fire = 3
+    public kind = () => "dragon"
+    public breathe = () =>
+        if fire > 0
+            fire -= 1
+            return "{name} breathes fire ({fire} left)"
+        "{name} is out of fire"
+    # override: armor halves damage, then delegates to the parent
+    public take_damage = amount => parent.take_damage(amount / 2)
+    public describe = () => parent.describe() + " and {fire} fire charges"
+
+var c = Creature("slime", 5)
+var b = Beast("wolf")
+var d = Dragon("smaug")
+print(c.describe())
+print(b.describe())
+print(d.describe())
+print(b.legs, d.legs, d.hp, d.alive)
+
+# inherited mutating method called on the child directly
+b.take_damage(15)
+print(b.describe(), b.alive)
+b.take_damage(15)
+print(b.describe(), b.alive)
+b.heal(4)
+print(b.hp, b.alive)
+
+# overriding method that delegates to the parent's mutating method
+d.take_damage(10)
+print(d.hp)
+d.take_damage(40)
+print(d.hp, d.alive)
+
+# child's own state, own method with early return
+print(d.breathe())
+print(d.breathe())
+print(d.breathe())
+print(d.breathe())
+print(d.fire)
+
+# inherited members through two levels, printed objects
+print(d.name, d.kind(), b.kind(), c.kind())
+print(c)
+print(b)
+print(d)
+print(Beast("x") == Beast("x"), Beast("x") == Beast("y"))

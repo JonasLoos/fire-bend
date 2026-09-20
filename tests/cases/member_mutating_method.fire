@@ -1,0 +1,12 @@
+# a method calling a mutating method on a member object
+def Wallet(public var coins: int = 0)
+    public add = n => coins += n
+
+def Player()
+    public var wallet = Wallet(0)
+    public earn = n => wallet.add(n)
+
+var p = Player()
+p.earn(5)
+p.wallet.add(3)
+print(p.wallet.coins)

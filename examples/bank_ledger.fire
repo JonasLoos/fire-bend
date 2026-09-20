@@ -1,0 +1,80 @@
+# Bank ledger: accounts as value objects, mutating methods that also return
+# values, a list of accounts updated in a loop, results for failures.
+def Account(public id: int, public owner: str, public var balance: int = 0)
+    public var history = []
+
+    public deposit = amount =>
+        balance += amount
+        history.push(amount)
+
+    # mutates AND returns a result
+    public withdraw = amount =>
+        if amount <= 0 do return {err: "invalid amount {amount}"}
+        if amount > balance do return {err: "{owner}: insufficient funds ({balance} < {amount})"}
+        balance -= amount
+        history.push(-amount)
+        {ok: balance}
+
+    public summary = () => "#{id} {owner:<6} {balance:>6}"
+
+def Bank(public name: str)
+    public var accounts = []
+    public var next_id = 1
+    public var failures = 0
+
+    public open = (owner, initial) =>
+        acct = Account(next_id, owner, initial)
+        next_id += 1
+        accounts.push(acct)
+        acct
+
+    public total = () => accounts.reduce((s, a) => s + a.balance, 0)
+
+    public apply_interest = pct =>
+        var updated = []
+        for a in accounts
+            var acc = a
+            acc.deposit(acc.balance * pct / 100)
+            updated.push(acc)
+        accounts = updated
+
+var bank = Bank("First National")
+bank.open("ada", 100)
+bank.open("bob", 50)
+bank.open("cy", 0)
+print(bank.name, len(bank.accounts), bank.total())
+
+# mutate a copy pulled out of the list, then write it back
+var a0 = bank.accounts[0]
+r1 = a0.withdraw(30)
+print(r1, a0.balance)
+r2 = a0.withdraw(500)
+print(r2, a0.balance)
+r3 = a0.withdraw(0)
+print(r3)
+bank.accounts[0] = a0
+print(bank.total())
+
+bank.apply_interest(10)
+print(bank.accounts *> $.balance)
+print(bank.accounts *> $.history)
+
+# results ride the pipeline
+var b1 = bank.accounts[1]
+msg = b1.withdraw(20) |> "left {$}" !> err => "failed: {err}"
+print(msg)
+msg2 = b1.withdraw(2000) |> "left {$}" !> err => "failed: {err}"
+print(msg2)
+
+# transfers in a loop with a running failure count
+var bob = bank.accounts[1]
+var cy = bank.accounts[2]
+for amount in [10, 10, 100, 10]
+    match bob.withdraw(amount)
+        {ok} => cy.deposit(amount)
+        {err} => bank.failures += 1
+print(bob.balance, cy.balance, bank.failures)
+print(bob.summary())
+print(cy.summary())
+print(sorted([a0, bob, cy], a => a.balance) *> $.owner)
+print(a0 == bank.accounts[0], bob == bank.accounts[1])

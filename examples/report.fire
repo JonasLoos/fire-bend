@@ -1,0 +1,82 @@
+# Formatting a sales report: a Table class with mutating methods, computed
+# column widths, f-string width/alignment/.2f specs, join and repeat.
+
+def pad(s, w)
+    if len(s) >= w do s else s + " ".repeat(w - len(s))
+
+def Table(public title: str)
+    public var headers = []
+    public var rows = []
+    public var widths = []
+
+    public set_headers = hs =>
+        headers = hs
+        widths = hs *> len($)
+
+    public add_row = cells =>
+        rows.push(cells)
+        widths = for i, w in 0.., widths do max(w, len(cells[i]))
+
+    public rule = ch => (widths *> ch.repeat($) |> $.join("-+-"))
+
+    public format_row = cells =>
+        parts = for i, c in 0.., cells do pad(c, widths[i])
+        parts.join(" | ")
+
+    public render = () =>
+        var out = [title, rule("=")]
+        out.push(format_row(headers))
+        out.push(rule("-"))
+        for r in rows do out.push(format_row(r))
+        out.push(rule("="))
+        out.join("\n")
+
+def money(cents)
+    dollars = float(cents) / 100.0
+    "{dollars:.2f}"
+
+def pct(part, whole)
+    if whole == 0 do "n/a" else "{(100.0 * float(part) / float(whole)):.1f}%"
+
+sales = [
+    {region: "north", product: "widget", units: 120, cents: 359880},
+    {region: "south", product: "gadget", units: 45, cents: 224955},
+    {region: "north", product: "gadget", units: 30, cents: 149970},
+    {region: "east", product: "widget", units: 200, cents: 599800},
+    {region: "west", product: "gizmo", units: 12, cents: 30000},
+    {region: "south", product: "widget", units: 77, cents: 230923},
+]
+
+grand = sum(sales *> $.cents)
+var t = Table("Sales by line")
+t.set_headers(["Region", "Product", "Units", "Revenue", "Share"])
+for s in sorted(sales, s => -s.cents)
+    t.add_row([s.region.upper(), s.product, "{s.units}", money(s.cents), pct(s.cents, grand)])
+print(t.render())
+print("widths: {t.widths}")
+
+# per-region rollup with right-aligned numeric columns
+by_region = {}
+for s in sales
+    by_region[s.region] = (by_region[s.region] or 0) + s.cents
+print("")
+print("{'region':<8}{'revenue':>12}{'bar':>4}")
+for region in sorted(by_region.keys())
+    cents = by_region[region] or 0
+    blocks = int(cents / 100000)
+    print("{region:<8}{money(cents):>12}    {'*'.repeat(blocks)}")
+print("{'total':<8}{money(grand):>12}")
+
+# centred banner and a few alignment corner cases
+def banner(text)
+    inner = " {text} "
+    "{inner:^24}".replace(" ", "~")
+
+print(banner("REPORT"))
+print("[{'x':^7}][{'ab':^7}][{'abc':^7}]")
+print("[{7:>3}][{(-7):>3}][{1234:>3}]")
+print("[{2.5:<6.1f}][{2.25:6.2f}][{0.005:.2f}][{(-0.5):.1f}]")
+units = sales *> $.units
+print("units: min {min(units)}, max {max(units)}, avg {(float(sum(units)) / float(len(units))):.2f}")
+avg_price = float(grand) / float(sum(units)) / 100.0
+print("average unit price: {avg_price:.2f}")

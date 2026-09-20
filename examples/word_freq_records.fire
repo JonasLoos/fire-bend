@@ -1,0 +1,80 @@
+# Word frequency over a paragraph: normalise, count, sort by count then word,
+# print a ranked table with histogram bars and a few summary statistics.
+
+paragraph = "The quick brown fox jumps over the lazy dog. The dog, being lazy,
+does not chase the fox; the fox does not care. Quick thinking wins: the fox
+wins, the dog naps, and the lazy afternoon drifts on. Foxes are quick!"
+
+punctuation = ".,;:!?"
+
+def clean(word)
+    kept = word.lower().chars() ?> not punctuation.contains($)
+    kept.join("")
+
+def tokenize(text)
+    text.replace("\n", " ").split(" ")
+        *> w => clean(w)
+        ?> len($) > 0
+
+words = tokenize(paragraph)
+print("tokens: {len(words)}")
+
+counts = {}
+for w in words
+    counts[w] = (counts[w] or 0) + 1
+
+print("distinct: {len(counts.keys())}")
+
+# sort by word first (stable), then by count descending: count wins, ties by word
+# entries() pairs are rebuilt as records so the sort keys can name the fields
+pairs = for k, v in counts.entries() do {word: k, count: v}
+by_word = sorted(pairs, p => p.word)
+ranked = sorted(by_word, p => -p.count)
+
+def bar(n)
+    "#".repeat(n)
+
+print("rank  word        count  bar")
+print("-".repeat(32))
+for i, p in 1.., ranked.take(8)
+    print("{i:>4}  {p.word:<10}  {p.count:>5}  {bar(p.count)}")
+
+# words appearing exactly once, alphabetically, wrapped at 40 columns
+singles = ranked ?> $.count == 1 *> $.word |> sorted($, w => w)
+var line = ""
+var lines = []
+for s in singles
+    candidate = if line == "" do s else "{line} {s}"
+    if len(candidate) > 40
+        lines.push(line)
+        line = s
+    else
+        line = candidate
+if line != "" do lines.push(line)
+print("hapax legomena ({len(singles)}):")
+for l in lines do print("  {l}")
+
+# length statistics
+lengths = words *> len($)
+total_chars = sum(lengths)
+avg = float(total_chars) / float(len(words))
+longest = words.reduce((best, w) => if len(w) > len(best) do w else best)
+print("average length: {avg:.2f}")
+print("longest: {longest} ({len(longest)})")
+print("shortest: {sorted(words, w => len(w)).first()}")
+
+# bucket words by length using a dictionary of lists
+buckets = {}
+for w in counts.keys()
+    k = "{len(w)}"
+    buckets[k] = (buckets[k] or []) + [w]
+for k in sorted(buckets.keys(), k => (k.parse_int() !> 0))
+    ws = sorted(buckets[k] or [], w => w)
+    print("len {k:>2}: {ws.join(', ')}")
+
+# top word by a match on the head of the ranked list (a guarded rest
+# pattern `[{word, count}, ...rest] if ...` is not portable, see repro_15)
+if len(ranked) == 0 do print("no words")
+match ranked[0]
+    {word, count} if count > 5 => print("dominant word: {word} x{count}")
+    {word} => print("top word: {word}")

@@ -1,0 +1,87 @@
+# A tiny CSV/record parser: split lines and fields, trim, parse numbers with
+# results, report bad rows with `!>`, and aggregate the good ones.
+
+raw = "  name , dept , age , salary
+Ada Lovelace, eng, 36, 120000
+Bob Smith, ops , 41 , 88000
+Cy Young, eng, x1, 91000
+Dee Dee, sales, 29, 
+Eve Adams, eng, 25, 105000
+, ops, 33, 70000
+Fay Wong, sales, 52, 99000"
+
+def Row(public name: str, public dept: str, public age: int, public salary: int)
+    public describe = () => "{name} ({dept}, {age}) earns {salary}"
+
+def parse_field(fields, i, label)
+    text = fields[i].trim()
+    if text == "" do {err: "{label} is empty"} else {ok: text}
+
+def parse_row(line, lineno)
+    fields = line.split(",")
+    if len(fields) != 4 do return {err: "line {lineno}: expected 4 fields, got {len(fields)}"}
+    name = parse_field(fields, 0, "name") !> e => ""
+    if name == "" do return {err: "line {lineno}: name is empty"}
+    dept = fields[1].trim()
+    age = fields[2].trim().parse_int() !> e => -1
+    if age < 0 do return {err: "line {lineno}: bad age '{fields[2].trim()}'"}
+    salary = fields[3].trim().parse_int()
+    match salary
+        {ok} => {ok: Row(name, dept, age, ok)}
+        {err} => {err: "line {lineno}: bad salary '{fields[3].trim()}'"}
+
+lines = raw.split("\n")
+header = lines[0].split(",") *> $.trim()
+print("columns: {header.join(' | ')}")
+
+var rows = []
+var errors = []
+for i, line in 1.., lines[1..]
+    match parse_row(line, i + 1)
+        {ok} =>
+            rows.push(ok)
+            nothing
+        {err} =>
+            errors.push(err)
+            nothing
+
+print("parsed {len(rows)} rows, {len(errors)} errors")
+for e in errors do print("  ! {e}")
+
+for r in rows do print("  {r.describe()}")
+
+# aggregate by department using a dictionary
+totals = {}
+headcount = {}
+for r in rows
+    totals[r.dept] = (totals[r.dept] or 0) + r.salary
+    headcount[r.dept] = (headcount[r.dept] or 0) + 1
+
+print("dept   count   total   average")
+for d in sorted(totals.keys(), k => k)
+    n = headcount[d] or 1
+    t = totals[d] or 0
+    print("{d:<6} {n:>5} {t:>7} {(t / n):>9}")
+
+# railway on the age column: parse everything, repair the bad ones
+ages = lines[1..] *> $.split(",")[2].trim().parse_int() !> -1
+print("ages: {ages}")
+valid_ages = ages ?> $ >= 0
+print("mean age: {(float(sum(valid_ages)) / float(len(valid_ages))):.1f}")
+
+# oldest and youngest through sorted + negative index
+by_age = sorted(rows, r => r.age)
+print("youngest: {by_age[0].name}, oldest: {by_age[-1].name}")
+print("eng names: {rows ?> $.dept == 'eng' *> $.name.split(' ')[0] |> $.join(', ')}")
+
+# a chained result pipeline that fails mid-way and is repaired at the end
+salary_of = who => (rows ?> $.name == who *> $.salary |> $.first())
+r1 = match salary_of("Fay Wong")
+    nothing => {err: "not found"}
+    s: int => {ok: s}
+r2 = r1 |> $ / 12 |> "{$} per month" !> e => "unknown: {e}"
+print(r2)
+r3 = match salary_of("Nobody")
+    nothing => {err: "not found"}
+    s: int => {ok: s}
+print(r3 |> $ / 12 |> "{$} per month" !> e => "unknown: {e}")

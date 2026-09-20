@@ -1,0 +1,118 @@
+# Sorting and searching written by hand: quicksort via comprehensions and
+# concatenation, merge sort on halves, insertion/bubble/selection sorts that
+# rebuild a list through index assignment, binary search, and a polymorphic
+# use of the same defs on strings.
+
+def quicksort(xs)
+    if len(xs) <= 1 do return xs
+    pivot = xs[0]
+    rest = xs[1..]
+    smaller = for x in rest if x < pivot do x
+    larger = for x in rest if x >= pivot do x
+    quicksort(smaller) + [pivot] + quicksort(larger)
+
+def merge(a, b)
+    var i = 0
+    var j = 0
+    var out = []
+    while i < len(a) and j < len(b)
+        if a[i] <= b[j]
+            out.push(a[i])
+            i += 1
+        else
+            out.push(b[j])
+            j += 1
+    out + a[i..] + b[j..]
+
+def merge_sort(xs)
+    if len(xs) <= 1 do return xs
+    mid = int(len(xs) / 2)
+    merge(merge_sort(xs[..mid]), merge_sort(xs[mid..]))
+
+def insertion_sort(xs)
+    var out = xs
+    var i = 1
+    while i < len(out)
+        key = out[i]
+        var j = i - 1
+        while j >= 0 and out[j] > key
+            out[j + 1] = out[j]
+            j -= 1
+        out[j + 1] = key
+        i += 1
+    out
+
+def bubble_sort(xs)
+    var out = xs
+    var n = len(out)
+    var swapped = true
+    while swapped
+        swapped = false
+        for i in 0..(n - 1)
+            if out[i] > out[i + 1]
+                tmp = out[i]
+                out[i] = out[i + 1]
+                out[i + 1] = tmp
+                swapped = true
+        n -= 1
+    out
+
+def selection_sort(xs)
+    var out = xs
+    for i in 0..len(out)
+        var best = i
+        for j in (i + 1)..len(out)
+            if out[j] < out[best] do best = j
+        if best != i
+            tmp = out[i]
+            out[i] = out[best]
+            out[best] = tmp
+    out
+
+def binary_search(xs, target)
+    var lo = 0
+    var hi = len(xs) - 1
+    while lo <= hi
+        mid = int((lo + hi) / 2)
+        if xs[mid] == target do return mid
+        if xs[mid] < target
+            lo = mid + 1
+        else
+            hi = mid - 1
+    -1
+
+def is_sorted(xs)
+    for i in 1..len(xs)
+        if xs[i - 1] > xs[i] do return false
+    true
+
+data = [38, 27, 43, 3, 9, 82, 10, 3, -5, 0, 27]
+print("input:     ", data)
+print("quicksort: ", quicksort(data))
+print("mergesort: ", merge_sort(data))
+print("insertion: ", insertion_sort(data))
+print("bubble:    ", bubble_sort(data))
+print("selection: ", selection_sort(data))
+print("builtin:   ", sorted(data))
+print("unchanged: ", data)
+print("all agree: ", quicksort(data) == sorted(data) and merge_sort(data) == bubble_sort(data))
+print("edge cases:", quicksort([]), merge_sort([1]), insertion_sort([2, 1]), bubble_sort([]), selection_sort([7]))
+
+s = merge_sort(data)
+for t in [3, 82, -5, 43, 100, 1]
+    idx = binary_search(s, t)
+    if idx >= 0
+        print("found {t} at {idx} (s[{idx}] = {s[idx]})")
+    else
+        print("{t} not found")
+print(is_sorted(s), is_sorted(data), is_sorted([]))
+
+# the same defs, instantiated on strings
+words = ["kiwi", "fig", "banana", "apple", "date", "cherry", "plum"]
+print(quicksort(words))
+print(merge_sort(words) == insertion_sort(words), bubble_sort(words) == selection_sort(words))
+print(sorted(words, w => w) == quicksort(words))
+print(sorted(words, w => len(w)))
+print(sorted(words, w => "{len(w)}{w}"))
+print(binary_search(quicksort(words), "date"), binary_search(quicksort(words), "zzz"))
+print(merge_sort(words *> len($)), reversed(quicksort(data)) == sorted(data, x => -x))

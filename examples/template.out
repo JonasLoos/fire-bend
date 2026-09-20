@@ -1,0 +1,9 @@
+Dear Ada Lovelace, welcome to LONDON as engineer. Your id is 12 chars; <unknown?> and engineer|shout?.
+missing: ['unknown']
+tags: ['name | title', 'city|upper', 'role', 'name|reverse|len', 'unknown', 'role | shout']
+#1: ITEM-1; #2: ITEM-2; #4: ITEM-4; #5: ITEM-5
+['name', 'city', 'role', 'name', 'unknown', 'role']
+unknown: ['unknown']
+city=London name=ada lovelace role=engineer
+open <oops and {{name?> ok
+true [{kind: 'text', body: 'plain'}]

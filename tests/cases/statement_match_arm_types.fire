@@ -1,0 +1,6 @@
+# a match in statement position does not need its arms to share a type
+var n = 0
+match "a"
+    'a' => print("yes")
+    other => n = 1
+print(n)

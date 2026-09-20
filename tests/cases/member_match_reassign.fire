@@ -1,0 +1,11 @@
+# `member = match member ...` inside a method
+def Machine()
+    public var state = 'idle'
+    public step = () =>
+        state = match state
+            'idle' => 'running'
+            other => 'done'
+
+var m = Machine()
+m.step()
+print(m.state)

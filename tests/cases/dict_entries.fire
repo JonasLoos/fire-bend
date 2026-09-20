@@ -1,0 +1,4 @@
+# entries() and printing of a non-empty dictionary
+d = {}
+d["a"] = 1
+print(d.entries())

@@ -1,0 +1,7 @@
+# indexed assignment through a member path (`obj.list[i] = v`)
+def Bank()
+    public var accounts = [10, 20]
+
+var bank = Bank()
+bank.accounts[0] = 99
+print(bank.accounts)

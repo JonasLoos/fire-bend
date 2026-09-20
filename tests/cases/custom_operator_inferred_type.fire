@@ -1,0 +1,9 @@
+# a custom operator on a value whose type is inferred (a parameter, `$` in a stage)
+def Vec(public x: int = 0, public y: int = 0)
+    public `+` = o => Vec(x + o.x, y + o.y)
+
+def shift(v)
+    v + Vec(10, 10)
+
+print(shift(Vec(1, 2)))
+print([Vec(1, 2), Vec(3, 4)] *> $ + Vec(10, 10))

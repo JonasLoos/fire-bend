@@ -1,0 +1,18 @@
+'A man, a plan, a canal: Panama' -> true true
+'racecar' -> true true
+'hello' -> false false
+'' -> true true
+'No lemon, no melon' -> true true
+aaabccdddd -> 3a1b2c4d -> aaabccdddd ok=true
+abc -> 1a1b1c -> abc ok=true
+ ->  ->  ok=true
+zzzzzzzzzzzz -> 12z -> zzzzzzzzzzzz ok=true
+aabbaa -> 2a2b2a -> aabbaa ok=true
+[['cat', 'act'], ['google', 'gogole'], ['listen', 'silent', 'enlist']]
+Khoor, Zruog! abc Hello, World! xyz def
+3 2 1 nothing 5
+['and', 'bat', 'cat', 'hat', 'the']
+fl  same 
+['(', '1', '+', '22', ')', '*', '(', 'x3', '+', '4', ')']
+3 ['mi', '', 'i', '', 'ippi'] a+b+c
+desserts abcabcabc PAD

@@ -1,0 +1,8 @@
+def double(x)
+    x * 2
+
+print(double(21))
+print("hello", 1 + 2, 3.5, true, nothing)
+xs = [1, 2, 3]
+print(xs *> $ * 10)
+print(xs ?> $ % 2 == 1 |> sum)

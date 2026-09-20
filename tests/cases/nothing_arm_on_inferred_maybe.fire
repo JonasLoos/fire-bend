@@ -1,0 +1,7 @@
+# a nothing arm on a maybe whose payload type comes from a record field of a parameter
+def find_value(pairs, name)
+    hit = pairs ?> $.key == name *> $.value |> $.first()
+    match hit
+        nothing => ""
+        v: str => v
+print(find_value([{key: "a", value: "x"}], "a"), find_value([{key: "a", value: "x"}], "b"))

@@ -1,0 +1,9 @@
+# a method that mutates a member and also returns a value
+def Acc(public var balance: int = 0)
+    public withdraw = n =>
+        balance -= n
+        balance
+
+var a = Acc(100)
+r = a.withdraw(30)
+print(r, a.balance)

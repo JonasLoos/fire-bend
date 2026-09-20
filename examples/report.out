@@ -1,0 +1,25 @@
+Sales by line
+======-+-=======-+-=====-+-=======-+-=====
+Region | Product | Units | Revenue | Share
+-------+---------+-------+---------+------
+EAST   | widget  | 200   | 5998.00 | 37.6%
+NORTH  | widget  | 120   | 3598.80 | 22.6%
+SOUTH  | widget  | 77    | 2309.23 | 14.5%
+SOUTH  | gadget  | 45    | 2249.55 | 14.1%
+NORTH  | gadget  | 30    | 1499.70 | 9.4% 
+WEST   | gizmo   | 12    | 300.00  | 1.9% 
+======-+-=======-+-=====-+-=======-+-=====
+widths: [6, 7, 5, 7, 5]
+
+region       revenue bar
+east         5998.00    *****
+north        5098.50    *****
+south        4558.78    ****
+west          300.00    
+total       15955.28
+~~~~~~~~~REPORT~~~~~~~~~
+[   x   ][  ab   ][  abc  ]
+[  7][ -7][1234]
+[2.5   ][  2.25][0.01][-0.5]
+units: min 12, max 200, avg 80.67
+average unit price: 32.97

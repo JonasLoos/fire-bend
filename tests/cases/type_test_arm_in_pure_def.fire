@@ -1,0 +1,7 @@
+# a match with a type-test arm and a nothing arm inside a pure def is exhaustive and cannot abort
+def digit(c)
+    d = match "0123456789".index_of(c)
+        k: int => k
+        nothing => -1
+    d * 2
+print(digit("7"), digit("x"))

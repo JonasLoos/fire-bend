@@ -1,0 +1,21 @@
+def DatabaseConfig(public host: str, public port: int = 5432)
+    public connection_string = () => "db://{host}:{port}"
+
+def AppConfig(app_name: str)
+    public name = app_name
+    LogLevel = 'silent' | 'normal' | 'verbose'   # a union type as a value
+    public var log_level = 'normal'
+    public db = DatabaseConfig("localhost")
+
+    public set_log_level = (level: LogLevel) =>
+        log_level = level
+
+    public summary = () =>
+        "App '{name}' logging at {log_level}, DB: {db.connection_string()}"
+
+
+app_config = AppConfig("MyWebApp")
+print(app_config.summary())
+
+app_config.set_log_level('verbose')
+print(app_config.summary())

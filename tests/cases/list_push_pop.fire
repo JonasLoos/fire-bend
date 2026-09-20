@@ -1,0 +1,8 @@
+# push (with several values) and pop rebind the list; pop also yields the value
+xs = []
+xs.push(1)
+xs.push(2, 3)
+print(xs)
+var ys = [7, 8, 9]
+last = ys.pop()
+print(last, ys)

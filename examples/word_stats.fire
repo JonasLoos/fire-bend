@@ -1,0 +1,15 @@
+text = 'the quick brown fox jumps over the lazy dog the fox'
+
+words = text.split(' ')
+print("words: {len(words)}")
+
+unique = words.reduce((acc, w) => if acc.contains(w) do acc else acc + [w], [])
+print("unique: {len(unique)}")
+
+longest = words.reduce((best, w) => if len(w) > len(best) do w else best)
+print("longest: {longest}")
+
+counts = unique
+    *> w => "{w}: {words ?> $ == w |> len}"
+    |> $.join(', ')
+print(counts)

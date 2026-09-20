@@ -1,0 +1,10 @@
+{ok: 5}
+{err: 'division by zero'}
+6
+-1
+[10, 20, -1, 40]
+4
+nothing
+found 8
+true false
+6

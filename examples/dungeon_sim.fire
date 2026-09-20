@@ -1,0 +1,67 @@
+# Turn-based dungeon simulation: a state machine driven by a while loop,
+# match on a state string, break, and a class holding a dictionary.
+def Hero(public name: str, public var hp: int, public var gold: int = 0)
+    public var potions = 1
+    public hurt = n => hp -= n
+    public drink = () =>
+        if potions > 0
+            potions -= 1
+            hp += 8
+    public loot = n => gold += n
+    public status = () => "{name} hp={hp} gold={gold} potions={potions}"
+
+def Dungeon(public rooms: list)
+    public var state = 'enter'
+    public var room = 0
+    public var turn = 0
+    public var log = {}
+    public var monster_hp = 0
+
+    public note = event => log[event] = (log[event] or 0) + 1
+
+    public current = () => rooms[room]
+
+    public tick = hero =>
+        var h = hero
+        turn += 1
+        match state
+            'enter' =>
+                note("enter")
+                state = if current() == 'monster' do 'fight' elif current() == 'treasure' do 'loot' else 'rest'
+                if state == 'fight' do monster_hp = 7
+            'fight' =>
+                note("fight")
+                h.hurt(3)
+                monster_hp -= 4
+                if monster_hp <= 0 do state = 'advance'
+                if h.hp < 6 do h.drink()
+            'loot' =>
+                note("loot")
+                h.loot(10 + room)
+                state = 'advance'
+            'rest' =>
+                note("rest")
+                h.hurt(-2)
+                state = 'advance'
+            'advance' =>
+                room += 1
+                state = if room >= len(rooms) do 'exit' else 'enter'
+            other => state = 'exit'
+        h
+
+var hero = Hero("ada", 12)
+var dungeon = Dungeon(['treasure', 'monster', 'rest', 'monster', 'treasure'])
+while true
+    hero = dungeon.tick(hero)
+    if dungeon.state == 'exit' do break
+    if hero.hp <= 0
+        print("{hero.name} fell in room {dungeon.room}")
+        break
+    if dungeon.turn > 100 do break
+
+print(dungeon.state, dungeon.turn, dungeon.room)
+print(hero.status())
+print(dungeon.log["enter"], dungeon.log["fight"], dungeon.log["loot"], dungeon.log["rest"], dungeon.log["flee"])
+for k in sorted(dungeon.log.keys())
+    print("{k:<8}{dungeon.log[k]:>3}")
+print(hero.hp > 0, hero.gold == 25)

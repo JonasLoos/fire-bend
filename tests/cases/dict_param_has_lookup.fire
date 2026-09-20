@@ -1,0 +1,6 @@
+# a dictionary parameter used with .has() and [] inside the def
+def lookup(vars, name)
+    if vars.has(name) do vars[name] or "" else "?"
+d = {}
+d["a"] = "x"
+print(lookup(d, "a"), lookup(d, "b"))

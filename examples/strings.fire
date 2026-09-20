@@ -1,0 +1,112 @@
+# String algorithms: palindromes two ways, anagram grouping keyed by sorted
+# characters, run-length encoding and decoding, a caesar cipher through char
+# codes, word frequencies, longest common prefix, and a hand-written tokenizer.
+
+def clean(s)
+    s.lower().chars() ?> $ >= "a" and $ <= "z" |> $.join("")
+
+def is_palindrome(s)
+    t = clean(s)
+    t == t.chars().reverse().join("")
+
+def is_palindrome_loop(s)
+    t = clean(s)
+    var i = 0
+    var j = len(t) - 1
+    while i < j
+        if t[i] != t[j] do return false
+        i += 1
+        j -= 1
+    true
+
+def rle_encode(s)
+    if len(s) == 0 do return ""
+    var out = ""
+    var run = 1
+    for i in 1..len(s)
+        if s[i] == s[i - 1]
+            run += 1
+        else
+            out = out + "{run}{s[i - 1]}"
+            run = 1
+    out + "{run}{s[-1]}"
+
+def rle_decode(s)
+    var out = ""
+    var count = 0
+    for c in s.chars()
+        d = match "0123456789".index_of(c)
+            nothing => -1
+            k => k
+        if d < 0
+            out = out + c.repeat(count)
+            count = 0
+        else
+            count = count * 10 + d
+    out
+
+def anagram_groups(words)
+    groups = {}
+    for w in words
+        key = sorted(w.chars()).join("")
+        groups[key] = (groups[key] or []) + [w]
+    groups.values() ?> len($) > 1
+
+def caesar(s, shift)
+    var out = ""
+    for c in s.chars()
+        code = $strings.char_code(c)
+        if code >= 97 and code <= 122
+            out = out + $strings.from_char_code((code - 97 + shift) % 26 + 97)
+        elif code >= 65 and code <= 90
+            out = out + $strings.from_char_code((code - 65 + shift) % 26 + 65)
+        else
+            out = out + c
+    out
+
+def word_freq(text)
+    counts = {}
+    for w in text.lower().split(" ")
+        counts[w] = (counts[w] or 0) + 1
+    counts
+
+def common_prefix(words)
+    if len(words) == 0 do return ""
+    first = words[0]
+    var n = len(first)
+    for w in words
+        var k = 0
+        while k < n and k < len(w) and w[k] == first[k]
+            k += 1
+        n = min(n, k)
+    first[..n]
+
+def tokenize(s)
+    var tokens = []
+    var cur = ""
+    for c in s.chars()
+        if c == " " or c == "(" or c == ")" or c == "+" or c == "*"
+            if len(cur) > 0
+                tokens.push(cur)
+                cur = ""
+            if c != " " do tokens.push(c)
+        else
+            cur = cur + c
+    if len(cur) > 0 do tokens.push(cur)
+    tokens
+
+for s in ["A man, a plan, a canal: Panama", "racecar", "hello", "", "No lemon, no melon"]
+    print("'{s}' -> {is_palindrome(s)} {is_palindrome_loop(s)}")
+for s in ["aaabccdddd", "abc", "", "zzzzzzzzzzzz", "aabbaa"]
+    enc = rle_encode(s)
+    print("{s} -> {enc} -> {rle_decode(enc)} ok={rle_decode(enc) == s}")
+print(anagram_groups(["listen", "silent", "enlist", "google", "gogole", "cat", "act", "dog"]))
+secret = caesar("Hello, World! xyz", 3)
+print(secret, caesar(secret, -3), caesar("abc", 29))
+freq = word_freq("the cat and the hat and the bat")
+print(freq["the"], freq["and"], freq["bat"], freq["dog"], len(freq.keys()))
+print(sorted(freq.keys(), k => k))
+print(common_prefix(["flower", "flow", "flight"]), common_prefix(["dog", "racecar"]), common_prefix(["same", "same"]), common_prefix([]))
+print(tokenize("(1 + 22) * (x3 + 4)"))
+print("banana".chars() ?> $ == "a" |> len, "Mississippi".lower().split("s"), "a-b-c".replace("-", "+"))
+print("stressed".chars().reverse().join(""), "abc".repeat(3), "  pad  ".trim().upper())

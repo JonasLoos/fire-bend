@@ -1,0 +1,13 @@
+# an override delegating to the parent's mutating method
+def Base()
+    public var hp = 10
+    public hit = n => hp -= n
+
+def Child()
+    parent = Base()
+    self.{...} = parent
+    public hit = n => parent.hit(n)
+
+var c = Child()
+c.hit(5)
+print(c.hp)

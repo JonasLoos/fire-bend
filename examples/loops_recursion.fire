@@ -1,0 +1,22 @@
+def fib(n)
+    if n <= 1 do n else fib(n - 1) + fib(n - 2)
+
+var total = 0
+for i in 0..10
+    total += fib(i)
+print(total)
+
+var n = 27
+var steps = 0
+while n != 1
+    if n % 2 == 0
+        n = n / 2
+    else
+        n = 3 * n + 1
+    steps += 1
+print("collatz steps: {steps}")
+
+words = "the quick brown fox".split(" ")
+for w in words
+    if w == "brown" do continue
+    print(w.upper())

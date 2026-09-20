@@ -1,0 +1,6 @@
+# push on a local list inside a def
+def f()
+    out = ["a"]
+    out.push("b")
+    out.join(" ")
+print(f())

@@ -1,0 +1,10 @@
+# a method pushing to a public var list member, next to a += on another member
+def T()
+    public var rows = []
+    public var n = 0
+    public add = r =>
+        rows.push(r)
+        n += 1
+var t = T()
+t.add("a")
+print(t.rows, t.n)

@@ -1,0 +1,5 @@
+def my_fun(arg: str): str
+  print(arg)
+  return "the answer"
+
+print(my_fun("hi"))

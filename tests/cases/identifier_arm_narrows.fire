@@ -1,0 +1,8 @@
+# an identifier arm after `nothing =>` sees the narrowed type
+def find(xs, who)
+    xs ?> $ == who |> $.first()
+
+r = match find([1, 2], 2)
+    nothing => 0
+    s => s + 1
+print(r)

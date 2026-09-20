@@ -1,0 +1,23 @@
+def describe(p)
+    match p
+        [0, 0] => "origin"
+        [x, 0] if x > 0 => "positive x axis"
+        [x, 0] => "x axis at {x}"
+        [0, y] => "y axis at {y}"
+        [x, y] => "point {x},{y}"
+        other => "something else"
+
+print(describe([0, 0]))
+print(describe([3, 0]))
+print(describe([-3, 0]))
+print(describe([0, 7]))
+print(describe([1, 2]))
+print(describe([1, 2, 3]))
+
+r = "42".parse_int() |> $ * 2 !> err => 0
+print(r)
+bad = "x".parse_int() |> $ * 2 !> err => -1
+print(bad)
+match "7".parse_int()
+    {ok} => print("parsed {ok}")
+    {err} => print("failed: {err}")

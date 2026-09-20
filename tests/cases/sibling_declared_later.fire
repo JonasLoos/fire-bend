@@ -1,0 +1,5 @@
+# a method calling a sibling public member declared later in the class body
+def A()
+    public f = () => g()
+    public g = () => 1
+print(A().f())

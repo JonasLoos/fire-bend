@@ -1,0 +1,8 @@
+var n = 0
+while n < 3 do n += 1
+print(n)
+
+for i in 0..5
+  if i == 2 do continue
+  if i == 4 do break
+  print(i)

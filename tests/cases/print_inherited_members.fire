@@ -1,0 +1,14 @@
+# printing a child object shows the members inherited through self.{...}
+def Base()
+    public var hp = 10
+    public hit = n => hp -= n
+
+def Child()
+    parent = Base()
+    self.{...} = parent
+    public armor = 1
+
+var c = Child()
+c.hit(5)
+print(c.hp)
+print(c)

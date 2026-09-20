@@ -1,0 +1,8 @@
+# a statement match whose arms push to differently typed lists
+var oks = []
+var errs = []
+for x in ["1", "x", "3"]
+    match x.parse_int()
+        {ok} => oks.push(ok)
+        {err} => errs.push(err)
+print(oks, errs)

@@ -1,0 +1,6 @@
+# a guarded list pattern with a rest binding
+xs = [1, 2]
+match xs
+    [x, ...rest] if x > 5 => print("big {x}")
+    [x, ...rest] => print("top {x}")
+    [] => print("none")

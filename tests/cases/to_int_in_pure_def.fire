@@ -1,0 +1,4 @@
+# str.to_int() (fallible) inside a def that is otherwise pure
+def digit(c)
+    c.to_int() * 2
+print(digit("7"))

@@ -1,0 +1,6 @@
+# index assignment into a list whose type is only known from the call site
+def set_first(xs, v)
+    var out = xs
+    out[0] = v
+    out
+print(set_first([1, 2, 3], 9))

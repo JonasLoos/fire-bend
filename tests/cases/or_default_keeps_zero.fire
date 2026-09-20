@@ -1,0 +1,6 @@
+# `x or default` on a T | nothing replaces only nothing, never 0
+xs = [0, 5]
+print(xs.first() or -1)
+d = {}
+d["k"] = 0
+print(d["k"] or 7)

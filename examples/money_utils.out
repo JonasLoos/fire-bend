@@ -1,0 +1,17 @@
+22.40 2240
+apple ['apple', 'fig', 'pear']
+20.16
+[600, 650, 990]
+['apple', 'fig', 'pear']
+true false
+true
+false
+true false
+true
+14 true
+Vec{x: 2, y: 4} 6
+[Vec{x: -2, y: -4}, Vec{x: 2, y: -4}, Vec{x: 2, y: 4}, Vec{x: -2, y: 4}]
+40
+Money{cents: 250}
+LineItem{sku: 'fig', price: Money{cents: 325}, qty: 2}
+true Money{cents: 150}

@@ -1,0 +1,4 @@
+# a def whose body constrains its parameter is re-inferred per argument type
+def head(xs)
+    xs[0]
+print(head([1, 2]), head(["a", "b"]))

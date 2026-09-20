@@ -1,0 +1,402 @@
+/// Whitespace character (space)
+w = _{ " " }
+/// Newline character(s)
+nl = _{ "\n" | "\r\n" }
+/// One or more newlines, potentially separated by whitespace
+nls = _{ nl ~ (w* ~ nl)* }
+
+// --- Program ---
+// The program is a sequence of statements separated by newlines.
+// Leading/trailing whitespace and blank lines are allowed.
+/// The root rule for a Fire program.
+program = { SOI ~ statement? ~ (nls ~ statement)* ~ (nl | w)* ~ EOI }
+
+// --- Keywords ---
+// Keywords are reserved identifiers that cannot be used as variable names.
+// They are non-silent so the AST builder can see them as markers.
+/// The `def` keyword.
+kw_def = { "def" ~ !id_chars }
+/// The `return` keyword.
+kw_return = { "return" ~ !id_chars }
+/// The `public` keyword.
+kw_public = { "public" ~ !id_chars }
+/// The `var` keyword.
+kw_var = { "var" ~ !id_chars }
+/// The `if` keyword.
+kw_if = { "if" ~ !id_chars }
+/// The `else` keyword.
+kw_else = { "else" ~ !id_chars }
+/// The `elif` keyword.
+kw_elif = { "elif" ~ !id_chars }
+/// The `for` keyword.
+kw_for = { "for" ~ !id_chars }
+/// The `in` keyword.
+kw_in = { "in" ~ !id_chars }
+/// The `while` keyword.
+kw_while = { "while" ~ !id_chars }
+/// The `break` keyword.
+kw_break = { "break" ~ !id_chars }
+/// The `continue` keyword.
+kw_continue = { "continue" ~ !id_chars }
+/// The `match` keyword.
+kw_match = { "match" ~ !id_chars }
+/// The `not` keyword.
+kw_not = { "not" ~ !id_chars }
+/// The `and` keyword.
+kw_and = { "and" ~ !id_chars }
+/// The `or` keyword.
+kw_or = { "or" ~ !id_chars }
+/// The `do` keyword.
+kw_do = { "do" ~ !id_chars }
+/// The `true` keyword.
+kw_true = { "true" ~ !id_chars }
+/// The `false` keyword.
+kw_false = { "false" ~ !id_chars }
+/// The `nothing` keyword (unit value).
+kw_nothing = { "nothing" ~ !id_chars }
+/// The `async` keyword.
+kw_async = { "async" ~ !id_chars }
+/// The `await` keyword.
+kw_await = { "await" ~ !id_chars }
+/// Any keyword.
+keyword = { kw_def | kw_return | kw_public | kw_var | kw_if | kw_else | kw_elif | kw_for | kw_in | kw_while | kw_break | kw_continue | kw_match | kw_nothing | kw_not | kw_and | kw_or | kw_do | kw_true | kw_false | kw_async | kw_await }
+
+// --- Statements ---
+// A statement includes the actual statement logic plus optional trailing whitespace and comment.
+// Usually statements are single lines, but they can be multi-line (e.g. blocks, lists, if-elif-else)
+/// A single statement, potentially followed by whitespace and a comment.
+statement = { statement_raw ~ w* ~ comment? }
+/// The core logic of a statement.
+statement_raw = _{
+    documentation |
+    comment |
+    variable_declaration |
+    assignment_stmt |
+    return_stmt |
+    break_stmt |
+    continue_stmt |
+    while_stmt |
+    for_stmt |
+    if_stmt |
+    match_stmt |
+    method_stmt |
+    guarded_arm |
+    expression_big
+}
+
+/// A single-line comment, starting with `#`.
+comment = { "#" ~ (!nl ~ ANY)* }
+/// A documentation comment, starting with `##`.
+documentation = { "##" ~ (!nl ~ ANY)* }
+/// Variable declaration statement, e.g. `public var a = 1` or `a : int = 1`.
+variable_declaration = { ((kw_public ~ w+ ~ (kw_var ~ w+)?) | (kw_var ~ w+)) ~ typecheck ~ w* ~ "=" ~ !"=" ~ w* ~ (match_stmt | expression_big | block) }
+/// Assignment statement. It allows chaining, e.g., `a = b = 1`. The value is evaluated once and assigned to all targets left-to-right.
+assignment_stmt = { (typecheck ~ w* ~ assignment_op ~ w*)+ ~ (match_stmt | expression_big | block) }
+/// Return statement (expression is optional; a bare `return` returns `nothing`).
+return_stmt = { kw_return ~ (w+ ~ (match_stmt | expression_big | block))? }
+/// Break statement.
+break_stmt = { kw_break }
+/// Continue statement.
+continue_stmt = { kw_continue }
+/// While loop statement.
+while_stmt = { kw_while ~ w+ ~ expression_small ~ do_or_block }
+/// For loop statement. Targets are patterns (`for [i, e] in pairs`,
+/// `for k, v in entries`); several iterables zip (`for i, x in 0.., xs`).
+for_stmt = { kw_for ~ w+ ~ for_targets ~ w+ ~ kw_in ~ w+ ~ for_iterables ~ do_or_block }
+/// Comma-separated loop-variable patterns.
+for_targets = _{ typecheck ~ (w* ~ "," ~ w* ~ typecheck)* }
+/// Comma-separated iterables; more than one means elementwise zip. A full
+/// pipeline chain is allowed: `for x in xs ?> pred do ...`.
+for_iterables = _{ pipeline_expr_simple ~ (w* ~ "," ~ w* ~ pipeline_expr_simple)* }
+/// If statement, supports `elif` and `else`.
+if_stmt = { kw_if ~ w+ ~ expression_small ~ do_or_block ~ ((w* ~ block_nl | w+) ~ kw_elif ~ w+ ~ expression_small ~ do_or_block)* ~ else? }
+/// Part of if/while/for statements: either a `do` clause with a single expression or an indented block.
+do_or_block = _{ w+ ~ kw_do ~ w+ ~ (return_stmt | break_stmt | continue_stmt | pipeline_expr_simple) | w* ~ block }
+/// The `else` part of an if statement.
+else = { (w* ~ block_nl | w+) ~ kw_else ~ (w+ ~ pipeline_expr_simple | w* ~ block) }
+/// Match statement.
+match_stmt = { kw_match ~ w+ ~ expression_small ~ w* ~ block }
+/// A guarded match arm: `pattern if condition => body` (only valid inside a match block).
+guarded_arm = { typecheck ~ w+ ~ kw_if ~ w+ ~ expression_small ~ w* ~ lambda_op ~ w* ~ (lambda_expr | block) }
+/// Method definition statement. The body block is optional: a constructor
+/// whose `public` parameters already declare all members needs none.
+method_stmt = { (kw_public ~ w+)? ~ kw_def ~ w+ ~ identifier ~ w* ~ ("(" ~ w* ~ method_args? ~ w* ~ ")")? ~ w* ~ (typecheck_op ~ w* ~ logic_or ~ w*)? ~ block? }
+/// Arguments for a method definition. `public` makes a parameter a member;
+/// `var` makes it mutable.
+method_args = { (kw_public ~ w+)? ~ (kw_var ~ w+)? ~ w* ~ expression_small ~ w* ~ ("," ~ w* ~ (kw_public ~ w+)? ~ (kw_var ~ w+)? ~ w* ~ expression_small ~ w*)* }
+
+/// One or more space characters, used for indentation.
+indentation = _{ " "+ }
+// PUSH/DROP manage the indentation stack for nested blocks.
+// PEEK_ALL checks the current indentation level without consuming input.
+/// An indented block of statements.
+block = _{
+    nls ~
+    // Capture the indentation of the first line.
+    PEEK_ALL ~ PUSH(indentation) ~ statement ~
+    // Match subsequent lines at the same indentation level.
+    (block_nl ~ statement)* ~
+    // Remove this block's indentation level from the stack.
+    DROP
+}
+// Matches required newlines before the next statement in a block,
+// ensuring the next line starts exactly at the current indentation level (checked by PEEK_ALL).
+/// Required newlines before the next statement in an indented block, ensuring correct indentation.
+block_nl = _{ nls ~ PEEK_ALL ~ !indentation }  // The `!indentation` is not really necessary here, cuz `statement` doesn't start with whitespace
+
+// --- Expressions ---
+// The following rules define the operator precedence hierarchy, from lowest to highest.
+// `expression_big` is the entry point for expressions that contain pipelines, lambdas, if, while, for, etc.
+/// The main entry point for expressions, allowing complex constructs like pipelines and lambdas.
+expression_big = _{ pipeline_expr }
+
+/// Pipeline expression, possibly spanning multiple lines. E.g. `expr |> expr |> expr`.
+/// `|>` applies, `*>` maps, `?>` filters, `!>` handles the error channel.
+/// Can also be used as a block where each line starts with a pipeline operator.
+pipeline_expr = { pipeline_expr_simple ~ pipeline_block? }
+/// A single line or part of a pipeline expression.
+pipeline_expr_simple = { lambda_expr ~ (w* ~ pipeline_op ~ w* ~ pipeline_expr_simple)? }
+/// Lambda expression (anonymous function). E.g. `arg => expr`, `arg: type => expr`, or `(arg1, arg2 = default) => expr`.
+/// The part before `=>` is parsed once as an ordinary expression and upgraded
+/// to a parameter list by the AST builder — speculatively parsing it as
+/// parameters and re-parsing on failure made nesting exponentially slow.
+lambda_expr = { loop_expr ~ (w* ~ lambda_op ~ w* ~ (lambda_expr | block))? }
+/// Combined loop (while/for) and conditional (if) expression (a comprehension).
+loop_expr = { loop_clause ~ (w+ ~ loop_clause)* ~ (w+ ~ if_expr | do_or_block) | if_expr | expression_small }
+/// A single `for x in xs` / `while cond` clause of a comprehension.
+loop_clause = _{ (kw_while | kw_for ~ w+ ~ for_targets ~ w+ ~ kw_in) ~ w+ ~ for_iterables }
+/// Inline if expression.
+if_expr = { kw_if ~ w+ ~ expression_small ~ ( w* ~ block | w+ ~ kw_do ~ w+ ~ pipeline_expr_simple ~ (w+ ~ kw_elif ~ w+ ~ expression_small ~ w+ ~ kw_do ~ w+ ~ pipeline_expr_simple)* ~ (w+ ~ kw_else ~ w+ ~ pipeline_expr_simple)?) }
+
+/// Expressions typically used in conditions or simple assignments, excluding complex constructs (e.g., condition of an if/while).
+expression_small = _{ assignment_expr }
+/// Assignment expression, possibly chained.
+assignment_expr = { logic_or ~ (w* ~ assignment_op ~ w* ~ logic_or)* }
+/// Logical OR expression (`or`), possibly spanning multiple lines.
+logic_or = { logic_or_simple ~ logic_or_block? }
+/// A single line or part of a logical OR expression.
+logic_or_simple = { logic_and ~ (w+ ~ kw_or ~ w+ ~ logic_and)* }
+/// Logical AND expression (`and`), possibly spanning multiple lines.
+logic_and = { logic_and_simple ~ logic_and_block? }
+/// A single line or part of a logical AND expression.
+logic_and_simple = { logic_not ~ (w+ ~ kw_and ~ w+ ~ logic_not)* }
+/// Logical NOT expression (`not`).
+logic_not = { (kw_not ~ w+)? ~ comparison }
+/// Comparison expression (==, !=, >, etc.), possibly spanning multiple lines.
+comparison = { comparison_simple ~ comparison_block? }
+/// A single line or part of a comparison expression.
+comparison_simple = { type_or ~ (w* ~ comparison_op ~ w* ~ type_or)* }
+/// Type OR expression (`|`), possibly spanning multiple lines (used for union types).
+type_or = { type_or_simple ~ type_or_block? }
+/// A single line or part of a type OR expression.
+type_or_simple = { type_and ~ (w* ~ type_or_op ~ w* ~ type_and)* }
+/// Type AND expression (`&`), possibly spanning multiple lines (used for intersection types).
+type_and = { type_and_simple ~ type_and_block? }
+/// A single line or part of a type AND expression.
+type_and_simple = { range ~ (w* ~ type_and_op ~ w* ~ range)* }
+/// Range expression (`..`). Left-factored: the leading `additive` is parsed
+/// exactly once (re-trying it per alternative made nested expressions
+/// exponentially slow to parse).
+range = { additive ~ (w* ~ range_op ~ (w* ~ additive)?)? | range_op ~ w* ~ additive }
+/// Additive expression (+, -), possibly spanning multiple lines.
+additive = { additive_simple ~ additive_block? }
+/// A single line or part of an additive expression.
+additive_simple = { multiplicative ~ (w* ~ add_op ~ w* ~ multiplicative)* }
+/// Multiplicative expression (*, /, %), possibly spanning multiple lines.
+multiplicative = { multiplicative_simple ~ multiplicative_block? }
+/// A single line or part of a multiplicative expression.
+multiplicative_simple = { unary ~ (w* ~ mul_op ~ w* ~ unary)* }
+/// Unary expression (+, -, ...).
+unary = { (unary_op ~ w* ~ await_expr) | await_expr }
+/// Await expression.
+await_expr = { kw_await ~ w+ ~ async_expr | async_expr }
+/// Async expression.
+async_expr = { kw_async ~ w+ ~ power | power }
+/// Power/exponentiation expression (**).
+power = { typecheck ~ (w* ~ power_op ~ w* ~ unary)? }
+/// Type check expression (`:`).
+typecheck = { call_or_access ~ (w* ~ typecheck_op ~ w* ~ logic_or)? }
+/// Function call or member access expression, possibly spanning multiple lines.
+call_or_access = { call_or_access_simple ~ access_block? }
+/// A single line or part of a function call or member access expression.
+call_or_access_simple = { atom ~ (member_access_op ~ atom | function_call_args | list_access_args)* }
+
+/// Arguments for a function call (within parentheses).
+function_call_args = { w* ~ "(" ~ call_arg_list ~ ")" }
+/// Arguments for list access (within square brackets).
+list_access_args = { w* ~ "[" ~ call_arg_list ~ "]" }
+/// Comma-separated list of arguments for function calls or list access.
+call_arg_list = _{ w* ~ (call_arg ~ w* ~ ("," ~ w* ~ call_arg)*)? ~ w* }
+/// A single call argument: `name = value` (keyword) or an expression.
+call_arg = _{ named_arg | expression_big }
+/// A keyword argument: `width = 3`.
+named_arg = { identifier ~ w* ~ "=" ~ !("=" | ">") ~ w* ~ expression_big }
+
+// --- Blocks ---
+// One can spread pipeline and other operators over multiple lines, where each line starts with the operator.
+/// An indented block continuing a pipeline expression.
+pipeline_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ pipeline_block_line ~ (block_nl ~ pipeline_block_line)* ~ DROP }
+/// A single line within a pipeline block.
+pipeline_block_line = { pipeline_op ~ w* ~ pipeline_expr_simple ~ w* ~ comment? }
+/// An indented block continuing a logical OR expression.
+logic_or_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ logic_or_block_line ~ (block_nl ~ logic_or_block_line)* ~ DROP }
+/// A single line within a logical OR block.
+logic_or_block_line = { kw_or ~ w* ~ logic_or_simple ~ w* ~ comment? }
+/// An indented block continuing a logical AND expression.
+logic_and_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ logic_and_block_line ~ (block_nl ~ logic_and_block_line)* ~ DROP }
+/// A single line within a logical AND block.
+logic_and_block_line = { kw_and ~ w* ~ logic_and_simple ~ w* ~ comment? }
+/// An indented block continuing a comparison expression.
+comparison_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ comparison_block_line ~ (block_nl ~ comparison_block_line)* ~ DROP }
+/// A single line within a comparison block.
+comparison_block_line = { comparison_op ~ w* ~ comparison_simple ~ w* ~ comment? }
+/// An indented block continuing a type OR expression.
+type_or_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ type_or_block_line ~ (block_nl ~ type_or_block_line)* ~ DROP }
+/// A single line within a type OR block.
+type_or_block_line = { type_or_op ~ w* ~ type_or_simple ~ w* ~ comment? }
+/// An indented block continuing a type AND expression.
+type_and_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ type_and_block_line ~ (block_nl ~ type_and_block_line)* ~ DROP }
+/// A single line within a type AND block.
+type_and_block_line = { type_and_op ~ w* ~ type_and_simple ~ w* ~ comment? }
+/// An indented block continuing an additive expression.
+additive_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ additive_block_line ~ (block_nl ~ additive_block_line)* ~ DROP }
+/// A single line within an additive block.
+additive_block_line = { add_op ~ w* ~ additive_simple ~ w* ~ comment? }
+/// An indented block continuing a multiplicative expression.
+multiplicative_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ multiplicative_block_line ~ (block_nl ~ multiplicative_block_line)* ~ DROP }
+/// A single line within a multiplicative block.
+multiplicative_block_line = { mul_op ~ w* ~ multiplicative_simple ~ w* ~ comment? }
+/// An indented block continuing a member access expression.
+access_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ access_block_line ~ (block_nl ~ access_block_line)* ~ DROP }
+/// A single line within a member access block.
+access_block_line = { member_access_op ~ w* ~ call_or_access_simple ~ w* ~ comment? }
+
+/// An indented block within parentheses `()`.
+bracket_block = _{ nls ~ PEEK_ALL ~ PUSH(indentation) ~ expression_big ~ DROP ~ block_nl? }
+/// An indented block within list brackets `[]`.
+list_block = _{ nls ~ PEEK_ALL ~ PUSH(indentation) ~ list_line ~ (block_nl ~ list_line)* ~ DROP ~ block_nl? }
+/// One line of a multi-line list: entries with an optional trailing comment, or a comment-only line.
+list_line = _{ list_entries ~ (w* ~ comment)? | comment }
+/// An indented block within object braces `{}`.
+object_block = _{ nls ~ PEEK_ALL ~ PUSH(indentation) ~ object_line ~ (block_nl ~ object_line)* ~ DROP ~ block_nl? }
+/// One line of a multi-line object: entries with an optional trailing comment, or a comment-only line.
+object_line = _{ object_entries ~ (w* ~ comment)? | comment }
+
+// --- Atoms ---
+/// The smallest parsable units of code (literals, identifiers, grouped expressions, etc.).
+atom = _{
+    identifier |
+    import |
+    number |
+    string |
+    fstring |
+    tstring |
+    boolean |
+    nothing_lit |
+    ellipsis |
+    previous_result |
+    list |
+    object |
+    paren_expr
+}
+/// A parenthesized expression (or a lambda parameter list: `()`, `(a, b = 1)`).
+/// Comma-separated content only becomes valid when `=>` follows; the AST
+/// builder rejects it anywhere else.
+paren_expr = { "(" ~ w* ~ (expression_big ~ (w* ~ "," ~ w* ~ expression_big)* | bracket_block)? ~ w* ~ ")" }
+
+// --- Operator symbols ---
+/// Pipeline operators: `|>` (apply), `*>` (map), `?>` (filter), `!>` (handle error).
+pipeline_op = { "|>" | "*>" | "?>" | "!>" }
+/// Lambda operator: `=>`.
+lambda_op = { "=>" }
+/// Assignment operators: `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `**=`.
+assignment_op = { "**=" | "+=" | "-=" | "*=" | "/=" | "%=" | ("=" ~ !("=" | ">")) }
+/// Type OR operator: `|`.
+type_or_op = { "|" ~ !">" }
+/// Type AND operator: `&`.
+type_and_op = { "&" }
+/// Comparison operators: `==`, `!=`, `>=`, `<=`, `>`, `<`.
+comparison_op = { "==" | "!=" | ">=" | "<=" | ">" | "<" }
+/// Range operator: `..`.
+range_op = { ".." ~ !"." }
+/// Additive operators: `+`, `-`.
+add_op = { "+" | "-" }
+/// Multiplicative operators: `*`, `/`, `%`.
+mul_op = { "*" ~ !(">" | "*") | "/" | "%" }
+/// Power operator: `**`.
+power_op = { "**" }
+/// Unary operators: `+`, `-`, `...` (spread/rest).
+unary_op = { "+" | "-" | "..." }
+/// Type check operator: `:`.
+typecheck_op = { ":" }
+/// Member access operators: `.` (normal), `?.` (safe navigation).
+member_access_op = { ("?." | ".") ~ !"." }
+// unused: ! @ ~ ; ^ // << >> && ||
+
+// --- Primitives ---
+// `@` is used for atomic rules, which do not produce sub-terms
+// `!keyword` ensures identifiers don't clash with keywords.
+/// An identifier (variable name, function name, etc.).
+identifier = @{ !(keyword ~ !id_chars) ~ (ASCII_ALPHA | "_") ~ id_chars* }
+/// An import: `$module` (built-in) or `$'./path.fire'` (user file).
+import = @{ "$" ~ (identifier | import_path) }
+/// A quoted file path in an import: `'./utils.fire'`.
+import_path = @{ "'" ~ (!("'" | NEWLINE) ~ ANY)+ ~ "'" }
+/// Characters allowed within an identifier (alphanumeric and underscore).
+id_chars = _{ASCII_ALPHANUMERIC | "_"}
+/// A numeric literal (various forms).
+number = {
+    hex_number |
+    bin_number |
+    imaginary_number |
+    scientific_number |
+    decimal_number
+}
+/// Hexadecimal number literal (e.g., `0xAF`).
+hex_number = @{ "0x" ~ ASCII_HEX_DIGIT+ }
+/// Binary number literal (e.g., `0b101`).
+bin_number = @{ "0b" ~ ASCII_BIN_DIGIT+ }
+/// Scientific notation number literal (e.g., `1.2e3`).
+scientific_number = @{ decimal_number ~ ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+ }
+/// Imaginary number literal (e.g., `3.14j`).
+imaginary_number = @{ (scientific_number | decimal_number) ~ ("i" | "j") }
+/// Decimal number literal (e.g., `123`, `1.23`, `.5`).
+decimal_number = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+ | "." ~ !".")? | "." ~ ASCII_DIGIT+ }
+/// Single-quoted string literal.
+string = @{ "'" ~ (!"'" ~ ANY)* ~ "'" }
+/// Double-quoted f-string (formatted string) literal with interpolation.
+fstring = { "\"" ~ (fstring_interp | fstring_escape | fstring_text)* ~ "\"" }
+/// An interpolated expression within an f-string.
+fstring_interp = { "{" ~ w* ~ (fstring_formatted | expression_big ~ w*) ~ "}" }
+/// An interpolation with a format spec: `{price:.2f}`, `{name:>10}`.
+/// The target is an access expression; parenthesize anything bigger.
+fstring_formatted = { call_or_access ~ format_spec }
+/// A format spec: `:` followed by `[[fill]align][width][.precision][type]`.
+format_spec = @{ ":" ~ (!("}" | "\"" | NEWLINE) ~ ANY)+ }
+/// An escape sequence within an f-string.
+fstring_escape = @{ "\\" ~ ("\\" | "\"" | "{" | "}" | "r" | "n" | "t" | "b" | "f" | "v" | "0" | "x" ~ ASCII_HEX_DIGIT{2} | "u" ~ ASCII_HEX_DIGIT{4} | "U" ~ ASCII_HEX_DIGIT{8}) }
+/// Literal text within an f-string.
+fstring_text = @{ (!("\"" | "\\" | "{") ~ ANY)+ }
+/// Backtick-quoted template string literal (raw string).
+tstring = @{ "`" ~ (!"`" ~ ANY)* ~ "`" }
+/// Boolean literal (`true` or `false`).
+boolean = @{ kw_true | kw_false }
+/// The `nothing` literal (unit value).
+nothing_lit = @{ kw_nothing }
+/// Ellipsis literal (`...`).
+ellipsis = @{ "..." }
+/// Reference to the piped value within a pipeline (`$`).
+previous_result = { "$" ~ !id_chars }
+/// List literal, enclosed in `[]`.
+list = { "[" ~ w* ~ (list_entries? ~ w* ~ list_block?) ~ w* ~ "]" }
+/// Comma-separated entries within a list literal (trailing comma allowed).
+list_entries = _{ list_entry ~ w* ~ ("," ~ w* ~ list_entry)* ~ (w* ~ ",")? }
+/// A single entry within a list literal.
+list_entry = { expression_big }
+/// Object literal, enclosed in `{}`.
+object = { "{" ~ w* ~ (object_entries? ~ w* ~ object_block?) ~ w* ~ "}" }
+// Object entries can be `key: value`, shorthand `key` (equivalent to `key: key`), or `...` (ellipsis for spreading).
+/// Comma-separated entries within an object literal (trailing comma allowed).
+object_entries = _{ object_entry ~ w* ~ ("," ~ w* ~ object_entry)* ~ (w* ~ ",")? }
+/// A single entry within an object literal (key:value, shorthand identifier, or spread ellipsis).
+object_entry = { identifier ~ w* ~ ":" ~ w* ~ expression_big | identifier | ellipsis }
