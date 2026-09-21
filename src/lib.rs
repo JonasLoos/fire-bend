@@ -10,6 +10,7 @@ pub mod ast;
 pub mod infer;
 pub mod ir;
 pub mod lower;
+pub mod prune;
 pub mod sigs;
 pub mod tast;
 pub mod types;
@@ -50,15 +51,17 @@ fn rule_description(rule: Rule) -> String {
         | pipeline_expr | pipeline_expr_simple | lambda_expr | loop_expr | if_expr
         | assignment_expr | logic_or | logic_or_simple | logic_and | logic_and_simple
         | logic_not | comparison | comparison_simple | type_or | type_or_simple
-        | type_and | type_and_simple | range | additive | additive_simple
+        | xor | xor_simple | type_and | type_and_simple | range | shift | shift_simple
+        | additive | additive_simple
         | multiplicative | multiplicative_simple | unary | await_expr | async_expr
         | power | typecheck | call_or_access | call_or_access_simple => "an expression",
         pipeline_block | pipeline_block_line | logic_or_block | logic_or_block_line
         | logic_and_block | logic_and_block_line | comparison_block | comparison_block_line
-        | type_or_block | type_or_block_line | type_and_block | type_and_block_line
+        | type_or_block | type_or_block_line | xor_block | xor_block_line
+        | type_and_block | type_and_block_line | shift_block | shift_block_line
         | additive_block | additive_block_line | multiplicative_block
         | multiplicative_block_line | access_block | access_block_line
-        | bracket_block | list_block | object_block
+        | bracket_block | list_block | object_block | call_block | call_line
             => "a continuation line starting with an operator",
         function_call_args => "call arguments '(...)'",
         list_access_args => "an index '[...]'",
@@ -68,6 +71,7 @@ fn rule_description(rule: Rule) -> String {
         assignment_op => "an assignment operator",
         comparison_op => "a comparison operator",
         add_op | mul_op | power_op => "an arithmetic operator",
+        xor_op | shift_op => "a bitwise operator",
         unary_op => "'-' or 'not'",
         range_op => "'..'",
         typecheck_op => "':' (type annotation)",
@@ -139,13 +143,14 @@ fn humanize_parse_error(source: &str, e: pest::error::Error<Rule>) -> pest::erro
         matches!(rule,
             pipeline_op | lambda_op | assignment_op | comparison_op | add_op | mul_op
             | power_op | range_op | typecheck_op | member_access_op | type_or_op
-            | type_and_op | function_call_args | list_access_args
+            | type_and_op | xor_op | shift_op | function_call_args | list_access_args
             | pipeline_block | pipeline_block_line | logic_or_block | logic_or_block_line
             | logic_and_block | logic_and_block_line | comparison_block
             | comparison_block_line | type_or_block | type_or_block_line
+            | xor_block | xor_block_line | shift_block | shift_block_line
             | type_and_block | type_and_block_line | additive_block | additive_block_line
             | multiplicative_block | multiplicative_block_line | access_block
-            | access_block_line | bracket_block | list_block | object_block)
+            | access_block_line | bracket_block | list_block | object_block | call_block | call_line)
     }
 
     let collapse = positives.iter().filter(|r| continues_expression(**r)).count() >= 4;
@@ -229,11 +234,16 @@ pub fn describe_types(source: &str) -> Result<String, Vec<Diag>> {
     let tp = infer::infer_program(&program)?;
     let names = |id: types::RecId| tp.records[id].name.clone();
     let mut out = String::new();
+    // a def re-inferred per argument type appears once per distinct type
+    let mut seen = std::collections::HashSet::new();
     for d in &tp.defs {
         let ty = types::TypeDisplay { store: &tp.store, ty: &d.scheme.ty, names: &names };
         let caps: Vec<&str> = d.captures.iter().map(|(n, _)| n.as_str()).collect();
         let captures = if caps.is_empty() { String::new() } else { format!(" captures {}", caps.join(", ")) };
-        out.push_str(&format!("{} : {} [{:?}]{}\n", d.name, ty, d.effect, captures));
+        let text = format!("{} : {} [{:?}]{}\n", d.name, ty, d.effect, captures);
+        if seen.insert(text.clone()) {
+            out.push_str(&text);
+        }
     }
     for r in &tp.records {
         let fields: Vec<String> = r

@@ -871,21 +871,25 @@ pub struct Program {
 }
 
 impl Program {
-    /// Render the program with types and defs in dependency order.
+    /// Render the program with types and defs in dependency order, after
+    /// the part of the prelude it uses.
     pub fn render(&self) -> String {
+        let mut body = String::new();
+        for t in order_types(&self.types) {
+            t.write(&mut body);
+        }
+        for d in order_defs(&self.defs) {
+            d.write(&mut body);
+        }
+        let prelude = crate::prune::prune_prelude(&self.raw_prelude, &body);
         let mut out = String::new();
         out.push_str("import Base\n\n");
-        out.push_str(&self.raw_prelude);
-        if !self.raw_prelude.ends_with('\n') {
+        out.push_str(&prelude);
+        if !prelude.ends_with('\n') {
             out.push('\n');
         }
         out.push('\n');
-        for t in order_types(&self.types) {
-            t.write(&mut out);
-        }
-        for d in order_defs(&self.defs) {
-            d.write(&mut out);
-        }
+        out.push_str(&body);
         out
     }
 }

@@ -296,11 +296,21 @@ pub enum BinOp {
     Le,
     Gt,
     Ge,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    UShr,
 }
 
 impl BinOp {
     pub fn is_comparison(self) -> bool {
         matches!(self, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+    }
+    /// `& | ^ << >>`: defined on ints only.
+    pub fn is_bitwise(self) -> bool {
+        matches!(self, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr)
     }
 }
 

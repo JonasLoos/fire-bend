@@ -70,6 +70,21 @@ impl<'a> Lower<'a> {
                     a
                 }
             },
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr => match &ty {
+                Type::Int => match op {
+                    BinOp::BitAnd => Term::Call("U32.and".into(), vec![a, b]),
+                    BinOp::BitOr => Term::Call("U32.or".into(), vec![a, b]),
+                    BinOp::BitXor => Term::Call("U32.xor".into(), vec![a, b]),
+                    // shifts count in Nat; `>>` keeps the sign (ints are i32), `>>>` does not
+                    BinOp::Shl => Term::Call("U32.shln".into(), vec![a, Term::Call("U32.to_nat".into(), vec![b])]),
+                    BinOp::UShr => Term::Call("U32.shrn".into(), vec![a, Term::Call("U32.to_nat".into(), vec![b])]),
+                    _ => Term::Call("F.i32.shr".into(), vec![a, Term::Call("U32.to_nat".into(), vec![b])]),
+                },
+                other => {
+                    self.error(line, format!("operator {:?} on {:?}", op, other));
+                    a
+                }
+            },
         }
     }
 

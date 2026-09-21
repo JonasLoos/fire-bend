@@ -292,6 +292,21 @@ impl Infer {
         }
     }
 
+    /// A method called from the constructor body sees the whole object, so
+    /// every member has to exist by then; report the ones that do not.
+    fn check_members_built(&mut self, method: &str, line: usize) {
+        let rec = match self.frames.last().unwrap().kind {
+            FrameKind::Ctor(rec) => rec,
+            _ => return,
+        };
+        let k = self.frames.len();
+        let names: Vec<String> = self.records[rec].fields.iter().map(|f| f.name.clone()).collect();
+        let missing: Vec<String> = names.into_iter().filter(|f| self.lookup_in_frame(k - 1, f).is_none()).collect();
+        if !missing.is_empty() {
+            self.error(line, format!("{}() is called before member {} exists; a method sees the whole object, so declare the members first or make the helper a top-level def", method, missing.join(", ")));
+        }
+    }
+
     /// The receiver value inside a method (rebuilt from member locals) or
     /// the object under construction.
     pub(super) fn self_expr(&mut self, line: usize) -> TExpr {
@@ -417,10 +432,6 @@ impl Infer {
                     mk(TExprKind::Or(Box::new(a), Box::new(b)), ty)
                 }
             }
-            B::TypeOr | B::TypeAnd => {
-                self.error(line, "type expressions are only valid in annotations");
-                mk(TExprKind::Lit(Lit::Nothing), Type::Unit)
-            }
             _ => {
                 let a = self.infer_expr(left, line);
                 let b = self.infer_expr(right, line);
@@ -437,7 +448,14 @@ impl Infer {
                     B::Le => BinOp::Le,
                     B::Gt => BinOp::Gt,
                     B::Ge => BinOp::Ge,
-                    _ => unreachable!(),
+                    // in a value, `|` and `&` are the bit operations
+                    B::TypeOr => BinOp::BitOr,
+                    B::TypeAnd => BinOp::BitAnd,
+                    B::BitXor => BinOp::BitXor,
+                    B::Shl => BinOp::Shl,
+                    B::Shr => BinOp::Shr,
+                    B::UShr => BinOp::UShr,
+                    B::And | B::Or => unreachable!(),
                 };
                 self.binop(bop, a, b, line)
             }
@@ -490,14 +508,9 @@ impl Infer {
         }
         // custom operators: the left operand's class decides
         if let Type::Record(rec, _) = self.store.shallow(&a.ty) {
-            let sym = match op {
-                BinOp::Add => "+",
-                BinOp::Sub => "-",
-                BinOp::Mul => "*",
-                BinOp::Div => "/",
-                BinOp::Mod => "%",
-                BinOp::Pow => "**",
-                _ => unreachable!(),
+            let Some(sym) = op.symbol() else {
+                self.error(line, format!("operator {:?} is not defined on {}", op, self.records[rec].name));
+                return mk(TExprKind::Lit(Lit::Int(0)), Type::Int);
             };
             if self.find_method(rec, sym).is_none() {
                 self.error(line, format!("{} has no operator {}", self.records[rec].name, sym));
@@ -522,7 +535,7 @@ impl Infer {
         };
         let kind = match self.frames.last().unwrap().kind {
             FrameKind::Ctor(rec) if bound_name.is_some() => {
-                if is_public || self.references_members_expr(rec, params, body) {
+                if is_public || self.is_prescanned_method(rec, &name) || self.references_members_expr(rec, params, body) {
                     DefKind::Method { rec, mutates: false }
                 } else {
                     DefKind::Lambda
@@ -622,6 +635,7 @@ impl Infer {
                         || self.frames.iter().any(|f| f.def == def && matches!(f.kind, FrameKind::Method(_)));
                     let targs = self.fill_named_args(def, targs, named, is_method, line);
                     if is_method {
+                        self.check_members_built(name, line);
                         let recv = self.self_expr(line);
                         return self.method_call(recv, name, targs, line);
                     }
@@ -1351,10 +1365,63 @@ impl Infer {
             }
             ast::Expression::Boolean(_) => Type::Bool,
             ast::Expression::Nothing => Type::Unit,
+            // `[T]`: a list
+            ast::Expression::List(items) => match items.as_slice() {
+                [t] => Type::list(self.type_from_expr(t, line)),
+                _ => {
+                    self.error(line, "a list type is written [T], with one element type");
+                    self.store.fresh()
+                }
+            },
+            // `{}`: a dictionary; `{name: str, age: int}`: a record
+            ast::Expression::Object(entries) => {
+                if entries.is_empty() {
+                    return Type::map(self.store.fresh());
+                }
+                let mut names = Vec::new();
+                let mut tys = Vec::new();
+                for en in entries {
+                    match en {
+                        ast::ObjectEntry::KeyValue { key, value } => {
+                            names.push(key.clone());
+                            tys.push(self.type_from_expr(value, line));
+                        }
+                        _ => {
+                            self.error(line, "a record type lists its fields as `name: type`");
+                            return self.store.fresh();
+                        }
+                    }
+                }
+                let (rec, args) = self.literal_shape(&names);
+                for (a, t) in args.iter().zip(tys.iter()) {
+                    self.unify(a, t, line, "record type");
+                }
+                Type::Record(rec, args)
+            }
             _ => {
                 self.error(line, "unsupported type expression");
                 self.store.fresh()
             }
+        }
+    }
+
+    /// Could this expression be a type (as opposed to a value)? Decides
+    /// whether `Name = a | b` declares a type alias or ors two ints.
+    pub(super) fn looks_like_type_expr(&mut self, e: &ast::Expression) -> bool {
+        match e {
+            ast::Expression::Str(_) | ast::Expression::TString(_) | ast::Expression::Nothing => true,
+            ast::Expression::Identifier(n) => {
+                if matches!(n.as_str(), "int" | "float" | "str" | "bool" | "nothing" | "number" | "any" | "list" | "object" | "fn") {
+                    return true;
+                }
+                let frames = self.frames.len();
+                let binding = (0..frames).rev().find_map(|i| self.lookup_in_frame(i, n)).or_else(|| self.lookup_member(n));
+                matches!(binding, Some(Binding::TypeAlias(_)) | Some(Binding::Class(_)) | None)
+            }
+            ast::Expression::List(items) => items.len() == 1 && self.looks_like_type_expr(&items[0]),
+            ast::Expression::Object(entries) => entries.is_empty(),
+            ast::Expression::BinaryOp { left, op: ast::BinaryOperator::TypeOr, right } => self.looks_like_type_expr(left) && self.looks_like_type_expr(right),
+            _ => false,
         }
     }
 }

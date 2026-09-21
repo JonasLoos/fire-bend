@@ -87,6 +87,17 @@ def F.bool.lt(a: Bool, b: Bool) -> Bool:
 def F.i32.neg(+x: U32) -> Bool:
   U32.is_ne(U32.and(x, 2147483648), 0)
 
+# arithmetic shift right: a logical shift of the complement keeps the sign
+def F.i32.shr.go(x: U32, n: Nat, neg: Bool) -> U32:
+  match neg:
+    case True{}:
+      U32.not(U32.shrn(U32.not(x), n))
+    case False{}:
+      U32.shrn(x, n)
+
+def F.i32.shr(+x: U32, n: Nat) -> U32:
+  F.i32.shr.go(x, n, F.i32.neg(x))
+
 def F.i32.lt(a: U32, b: U32) -> Bool:
   U32.is_lt(U32.xor(a, 2147483648), U32.xor(b, 2147483648))
 

@@ -147,11 +147,13 @@ impl Infer {
                     }
                     return vec![];
                 }
-                // a type alias: Level = 'a' | 'b'
+                // a type alias: Level = 'a' | 'b' (`flags = a | b` on ints is a value)
                 if let (ast::Pattern::Identifier(name), ast::Expression::BinaryOp { op: ast::BinaryOperator::TypeOr, .. }) = (pattern, value) {
-                    let t = self.type_from_expr(value, line);
-                    self.declare(name, Binding::TypeAlias(t));
-                    return vec![];
+                    if self.looks_like_type_expr(value) {
+                        let t = self.type_from_expr(value, line);
+                        self.declare(name, Binding::TypeAlias(t));
+                        return vec![];
+                    }
                 }
                 // a named lambda: recursion by name, a method inside a class
                 if let (ast::Pattern::Identifier(name), ast::Expression::Lambda { params, body }) = (pattern, value) {
@@ -198,7 +200,7 @@ impl Infer {
                     if fresh {
                         let decl = ast::Stmt { node: ast::Statement::Declaration { is_public: false, is_mutable: false, pattern: pattern.clone(), value: value.clone() }, line };
                         let special = matches!(value, ast::Expression::Lambda { .. } | ast::Expression::Import(_))
-                            || matches!(value, ast::Expression::BinaryOp { op: ast::BinaryOperator::TypeOr, .. });
+                            || (matches!(value, ast::Expression::BinaryOp { op: ast::BinaryOperator::TypeOr, .. }) && self.looks_like_type_expr(value));
                         if special {
                             return self.infer_stmt(&decl);
                         }
@@ -300,7 +302,8 @@ impl Infer {
             ast::Statement::Expression(e) => {
                 // `xs.push(v)` / `xs.pop()` as a statement: rebind the container
                 if let Some((recv, method, args)) = container_mutation(e) {
-                    let recv_e = self.infer_expr(recv, line);
+                    let recv_e = self.infer_write_target(recv, line);
+                    self.pin_list_receiver(&recv_e.ty, method, line);
                     let rt = self.store.shallow(&recv_e.ty);
                     if matches!(rt, Type::List(_) | Type::Var(_)) {
                         let targs: Vec<TExpr> = args.iter().map(|a| self.infer_expr(a, line)).collect();
@@ -592,7 +595,7 @@ impl Infer {
             }
             ast::Pattern::Member { object, member } => {
                 // obj.member = v  → rebind obj's root local with the field replaced
-                let obj = self.infer_expr(object, line);
+                let obj = self.infer_write_target(object, line);
                 let fty = self.store.fresh();
                 let cur = self.member_read(obj.clone(), member, fty.clone(), line);
                 let new_value = self.apply_compound(op, cur, value, line);
@@ -602,44 +605,15 @@ impl Infer {
                 self.rebuild_path_assign(obj, member, new_value, line)
             }
             ast::Pattern::Index { object, index } => {
-                let obj = self.infer_expr(object, line);
+                let obj = self.infer_write_target(object, line);
                 let idx = self.infer_expr(index, line);
-                let elem = self.store.fresh();
-                self.defer(Pending::Index { recv: obj.ty.clone(), idx: idx.ty.clone(), ret: elem.clone(), lit: None, line });
-                self.resolve_pending(false);
-                let ot = self.store.shallow(&obj.ty);
-                let (cur, set_name) = match ot {
-                    Type::Map(v) => {
-                        let cur = TExpr { kind: TExprKind::Builtin("map_get_or".into(), vec![obj.clone(), idx.clone()]), ty: (*v).clone(), line };
-                        (cur, "map_set")
-                    }
-                    Type::List(e) => {
-                        let cur = TExpr { kind: TExprKind::Builtin("index".into(), vec![obj.clone(), idx.clone()]), ty: (*e).clone(), line };
-                        (cur, "list_set")
-                    }
-                    Type::Var(_) => {
-                        // a parameter: list or dictionary, decided when known
-                        let cur = TExpr { kind: TExprKind::Builtin("index_cur".into(), vec![obj.clone(), idx.clone()]), ty: elem.clone(), line };
-                        self.pending.retain(|p| !matches!(p, Pending::Index { ret, .. } if ret == &elem));
-                        self.defer(Pending::IndexCur { recv: obj.ty.clone(), idx: idx.ty.clone(), ret: elem.clone(), line });
-                        (cur, "index_set")
-                    }
-                    other => {
-                        let n = self.type_name(&other);
-                        self.error(line, format!("cannot assign into a value of type {}", n));
-                        return vec![];
-                    }
+                let Some((cur, set_name)) = self.index_slot(&obj, &idx, line) else {
+                    return vec![];
                 };
                 let vty = cur.ty.clone();
                 let new_value = if op == ast::AssignmentOp::Assign { value } else { self.apply_compound(op, cur, value, line) };
                 let new_value = self.coerce_join(new_value, &vty, line);
-                if set_name == "index_set" {
-                    self.defer(Pending::IndexSet { recv: obj.ty.clone(), idx: idx.ty.clone(), value: new_value.ty.clone(), line });
-                    self.resolve_pending(false);
-                } else {
-                    self.unify(&vty, &new_value.ty, line, "assignment");
-                }
-                let updated = TExpr { kind: TExprKind::Builtin(set_name.into(), vec![obj.clone(), idx, new_value]), ty: obj.ty.clone(), line };
+                let updated = self.index_write(obj.clone(), idx, new_value, set_name, &vty, line);
                 self.rebind_root(obj, updated, line)
             }
             ast::Pattern::SpreadInto { object } => {
@@ -697,6 +671,67 @@ impl Infer {
         }
     }
 
+    /// The container of a write, like `infer_expr` except that a nested
+    /// `a[i]` reads the element about to be written back (so a missing
+    /// dictionary key aborts instead of yielding `nothing`): the `rows[r]`
+    /// of `rows[r][c] = v`.
+    fn infer_write_target(&mut self, e: &ast::Expression, line: usize) -> TExpr {
+        if let ast::Expression::Index { object, index } = e {
+            let obj = self.infer_write_target(object, line);
+            let idx = self.infer_expr(index, line);
+            return match self.index_slot(&obj, &idx, line) {
+                Some((cur, _)) => cur,
+                None => TExpr { kind: TExprKind::Lit(Lit::Nothing), ty: self.store.fresh(), line },
+            };
+        }
+        self.infer_expr(e, line)
+    }
+
+    /// `obj[idx]` as a slot to write: the current element, and the builtin
+    /// that writes it (`list_set`, `map_set`, or `index_set` while the
+    /// container's type is still open).
+    fn index_slot(&mut self, obj: &TExpr, idx: &TExpr, line: usize) -> Option<(TExpr, &'static str)> {
+        let elem = self.store.fresh();
+        self.defer(Pending::Index { recv: obj.ty.clone(), idx: idx.ty.clone(), ret: elem.clone(), lit: None, line });
+        self.resolve_pending(false);
+        let ot = self.store.shallow(&obj.ty);
+        match ot {
+            Type::Map(v) => {
+                let cur = TExpr { kind: TExprKind::Builtin("map_get_or".into(), vec![obj.clone(), idx.clone()]), ty: (*v).clone(), line };
+                Some((cur, "map_set"))
+            }
+            Type::List(e) => {
+                let cur = TExpr { kind: TExprKind::Builtin("index".into(), vec![obj.clone(), idx.clone()]), ty: (*e).clone(), line };
+                Some((cur, "list_set"))
+            }
+            Type::Var(_) => {
+                // a parameter: list or dictionary, decided when known
+                let cur = TExpr { kind: TExprKind::Builtin("index_cur".into(), vec![obj.clone(), idx.clone()]), ty: elem.clone(), line };
+                self.pending.retain(|p| !matches!(p, Pending::Index { ret, .. } if ret == &elem));
+                self.defer(Pending::IndexCur { recv: obj.ty.clone(), idx: idx.ty.clone(), ret: elem.clone(), line });
+                Some((cur, "index_set"))
+            }
+            other => {
+                let n = self.type_name(&other);
+                self.error(line, format!("cannot assign into a value of type {}", n));
+                None
+            }
+        }
+    }
+
+    /// `obj[idx] = value` as a value: the container with the element
+    /// replaced.
+    fn index_write(&mut self, obj: TExpr, idx: TExpr, value: TExpr, set_name: &str, elem_ty: &Type, line: usize) -> TExpr {
+        if set_name == "index_set" {
+            self.defer(Pending::IndexSet { recv: obj.ty.clone(), idx: idx.ty.clone(), value: value.ty.clone(), line });
+            self.resolve_pending(false);
+        } else {
+            self.unify(elem_ty, &value.ty, line, "assignment");
+        }
+        let ty = obj.ty.clone();
+        TExpr { kind: TExprKind::Builtin(set_name.into(), vec![obj, idx, value]), ty, line }
+    }
+
     /// Container mutation (`xs.push`, `m[k] = v`) is allowed on immutable
     /// bindings in Fire; the backend rebinds instead.
     fn is_container_mutation(&self, ty: &Type, _op: ast::AssignmentOp) -> bool {
@@ -713,6 +748,12 @@ impl Infer {
             ast::AssignmentOp::DivAssign => BinOp::Div,
             ast::AssignmentOp::ModAssign => BinOp::Mod,
             ast::AssignmentOp::PowAssign => BinOp::Pow,
+            ast::AssignmentOp::BitAndAssign => BinOp::BitAnd,
+            ast::AssignmentOp::BitOrAssign => BinOp::BitOr,
+            ast::AssignmentOp::BitXorAssign => BinOp::BitXor,
+            ast::AssignmentOp::ShlAssign => BinOp::Shl,
+            ast::AssignmentOp::ShrAssign => BinOp::Shr,
+            ast::AssignmentOp::UShrAssign => BinOp::UShr,
         };
         self.binop(bop, cur, value, line)
     }
@@ -815,8 +856,22 @@ impl Infer {
                 self.resolve_pending(false);
                 self.rebuild_path_assign(inner, &name, updated, line)
             }
+            TExprKind::Builtin(name, args) if matches!(name.as_str(), "index" | "index_cur" | "map_get_or") && args.len() == 2 => {
+                // `xs[i][j] = v` / `xs[i].push(v)` / `xs[i].field = v`: write the
+                // element back into its container, then rebind that
+                let inner = args[0].clone();
+                let idx = args[1].clone();
+                let set_name = match self.store.shallow(&inner.ty) {
+                    Type::Map(_) => "map_set",
+                    Type::List(_) => "list_set",
+                    _ => "index_set",
+                };
+                let elem_ty = obj.ty.clone();
+                let new_inner = self.index_write(inner.clone(), idx, updated, set_name, &elem_ty, line);
+                self.rebind_root(inner, new_inner, line)
+            }
             _ => {
-                self.error(line, "assignment target must be a variable or a member path of a variable");
+                self.error(line, "assignment target must be a variable or a member path of a variable (`x`, `x.a`, `x[i]`, `x[i].a`, ...)");
                 vec![]
             }
         }
@@ -1055,6 +1110,14 @@ impl Infer {
         let mut body = match (body_stmts, body_expr) {
             (Some(stmts), _) => {
                 let b = self.infer_block(stmts);
+                self.finish_body(b, &kind, &ret, line)
+            }
+            (_, Some(e)) if self.body_mutates_container(e, &tparams) => {
+                // `v => items.push(v)`: the body is the mutation statement, so
+                // the container rebinds as it would in a block; `pop` also
+                // answers the element
+                let stmts = self.container_mutation_body(e, line);
+                let b = self.infer_block(&stmts);
                 self.finish_body(b, &kind, &ret, line)
             }
             (_, Some(e)) => {
@@ -1326,6 +1389,21 @@ impl Infer {
             if *pub_ || free.contains("self") || free.iter().any(|f| f != n && scope_names.contains(f)) {
                 method_names.push(n.clone());
             }
+        }
+        // a private function that a method calls is a method too: the call
+        // dispatches through `self`, so the helper never has to live in a
+        // field as a closure (which could not be called)
+        loop {
+            let more: Vec<String> = funcs
+                .iter()
+                .filter(|(n, _, _)| !method_names.contains(n))
+                .filter(|(n, _, _)| funcs.iter().any(|(m, _, free)| m != n && method_names.contains(m) && free.contains(n)))
+                .map(|(n, _, _)| n.clone())
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            method_names.extend(more);
         }
         let mut method_free: HashSet<String> = HashSet::new();
         for (n, _, free) in &funcs {
@@ -1671,22 +1749,39 @@ pub(super) fn param_name(p: &ast::Pattern) -> Option<String> {
 /// Scan a constructor body: declared bindings (name, public, mutable), the
 /// free names of every function defined in it, and whether it spreads a
 /// parent.
+/// The free names of a lambda: those of its body and defaults, minus its
+/// parameters.
+fn lambda_free_names(params: &[ast::Param], body: &ast::Expression) -> HashSet<String> {
+    let mut free = HashSet::new();
+    free_names_expr(body, &mut free);
+    for p in params {
+        if let Some(d) = &p.default {
+            free_names_expr(d, &mut free);
+        }
+        if let Some(pn) = param_name(&p.pattern) {
+            free.remove(&pn);
+        }
+    }
+    free
+}
+
+/// The binding an access chain starts from: `xs` in `xs[i].items`; `$`
+/// for the piped value.
+fn access_root(e: &ast::Expression) -> Option<&str> {
+    match e {
+        ast::Expression::Identifier(n) => Some(n.as_str()),
+        ast::Expression::PreviousResult => Some("$"),
+        ast::Expression::MemberAccess { object, .. } | ast::Expression::Index { object, .. } => access_root(object),
+        _ => None,
+    }
+}
+
 fn collect_class_body(body: &[ast::Stmt], declared: &mut Vec<(String, bool, bool)>, funcs: &mut Vec<(String, bool, HashSet<String>)>, has_parent: &mut Option<Option<String>>) {
     for s in body {
         match &s.node {
             ast::Statement::Declaration { is_public, is_mutable, pattern, value } => {
                 if let (ast::Pattern::Identifier(n), ast::Expression::Lambda { params, body }) = (pattern, value) {
-                    let mut free = HashSet::new();
-                    free_names_expr(body, &mut free);
-                    for p in params {
-                        if let Some(d) = &p.default {
-                            free_names_expr(d, &mut free);
-                        }
-                        if let Some(pn) = param_name(&p.pattern) {
-                            free.remove(&pn);
-                        }
-                    }
-                    funcs.push((n.clone(), *is_public, free));
+                    funcs.push((n.clone(), *is_public, lambda_free_names(params, body)));
                     declared.push((n.clone(), *is_public, *is_mutable));
                     continue;
                 }
@@ -1711,6 +1806,13 @@ fn collect_class_body(body: &[ast::Stmt], declared: &mut Vec<(String, bool, bool
                 declared.push((name.clone(), *is_public, false));
             }
             ast::Statement::Assignment { targets, value } => {
+                // `helper = (a, b) => ...` (no `public`/`var`) parses as an
+                // assignment; it is a private function of the body
+                if let ([(ast::Pattern::Identifier(n), ast::AssignmentOp::Assign)], ast::Expression::Lambda { params, body }) = (targets.as_slice(), value) {
+                    funcs.push((n.clone(), false, lambda_free_names(params, body)));
+                    declared.push((n.clone(), false, false));
+                    continue;
+                }
                 for (t, _) in targets {
                     if let ast::Pattern::SpreadInto { .. } = t {
                         // `self.{...} = parent` where `parent` is a binding of the
@@ -1789,9 +1891,60 @@ fn container_mutation(e: &ast::Expression) -> Option<(&ast::Expression, &str, &[
 }
 
 impl Infer {
+    /// `xs.push(v)` / `xs.pop()` on a receiver whose type is still open (a
+    /// parameter, or a member typed by one). The statement is rewritten to
+    /// rebind the container *now*, while it is being typed, so the receiver
+    /// has to be decided now too: push and pop are list methods, so fix it
+    /// as a list. Leaving it open would compile the mutation to a discarded
+    /// expression once the type turned out to be a list.
+    ///
+    /// When a class in the program declares a method of the same name the
+    /// receiver is left open (it may be that class); a list arriving there
+    /// later is reported instead of silently dropped.
+    pub(super) fn pin_list_receiver(&mut self, recv: &Type, method: &str, line: usize) {
+        if !matches!(self.store.shallow(recv), Type::Var(_)) {
+            return;
+        }
+        let class_has_method = (0..self.records.len()).any(|r| self.records[r].method(method).is_some() || self.is_prescanned_method(r, method));
+        if class_has_method {
+            self.defer(Pending::ListMutation { recv: recv.clone(), method: method.to_string(), line });
+            return;
+        }
+        let elem = self.store.fresh();
+        self.unify(recv, &Type::list(elem), line, &format!("receiver of .{}()", method));
+    }
+
+    /// Is an expression-bodied function's body `xs.push(v)` / `xs.pop()`
+    /// on something outside the function (a member, an outer binding)?
+    /// On one of its own parameters (or `$`) nothing outside could see the
+    /// rebinding, so the body stays a value: `*> $.push(0)` maps to the
+    /// extended lists.
+    fn body_mutates_container(&self, e: &ast::Expression, params: &[TParam]) -> bool {
+        match container_mutation(e).and_then(|(recv, _, _)| access_root(recv)) {
+            Some("$") | None => false,
+            Some(root) => !params.iter().any(|p| p.name == root),
+        }
+    }
+
+    /// The statements a mutation-bodied function runs: the mutation, and
+    /// for `pop` the element it answers.
+    fn container_mutation_body(&mut self, e: &ast::Expression, line: usize) -> Vec<ast::Stmt> {
+        match container_mutation(e) {
+            Some((_, "pop", _)) => {
+                let r = self.fresh_name("r");
+                vec![
+                    ast::Stmt { node: ast::Statement::Declaration { is_public: false, is_mutable: false, pattern: ast::Pattern::Identifier(r.clone()), value: e.clone() }, line },
+                    ast::Stmt { node: ast::Statement::Expression(ast::Expression::Identifier(r)), line },
+                ]
+            }
+            _ => vec![ast::Stmt { node: ast::Statement::Expression(e.clone()), line }],
+        }
+    }
+
     /// After `xs.pop()` was read as a value: `xs = xs.drop_last()`.
     fn pop_rebind(&mut self, recv: &ast::Expression, line: usize) -> Vec<TStmt> {
         let recv_e = self.infer_expr(recv, line);
+        self.pin_list_receiver(&recv_e.ty, "pop", line);
         if let Type::List(_) = self.store.shallow(&recv_e.ty) {
             let new_value = self.method_call_pub(recv_e.clone(), "drop_last", vec![], line);
             return self.rebind_root(recv_e, new_value, line);

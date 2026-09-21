@@ -1,0 +1,16 @@
+# a private helper (lambda or def) that a method calls is a method too
+def Game(n)
+    put = (r, c) => r * n + c
+    def helper(x)
+        x + 1
+    public play = (r, c) => put(r, c) + helper(0)
+    public replay = (r, c) => self.put(r, c)
+g = Game(10)
+print(g.play(1, 2), g.replay(3, 4))
+def Board
+    public var rows = [[0, 0], [0, 0]]
+    with_cell = (r, c, v) => rows[r][c] = v
+    public play = (r, c) => with_cell(r, c, 1)
+var bd = Board()
+bd.play(1, 0)
+print(bd.rows)

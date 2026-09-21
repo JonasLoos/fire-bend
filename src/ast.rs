@@ -138,6 +138,33 @@ pub enum AssignmentOp {
     DivAssign,
     ModAssign,
     PowAssign,
+    BitAndAssign,
+    BitOrAssign,
+    BitXorAssign,
+    ShlAssign,
+    ShrAssign,
+    UShrAssign,
+}
+
+impl AssignmentOp {
+    pub fn from_str(s: &str) -> Option<AssignmentOp> {
+        Some(match s {
+            "=" => AssignmentOp::Assign,
+            "+=" => AssignmentOp::AddAssign,
+            "-=" => AssignmentOp::SubAssign,
+            "*=" => AssignmentOp::MulAssign,
+            "/=" => AssignmentOp::DivAssign,
+            "%=" => AssignmentOp::ModAssign,
+            "**=" => AssignmentOp::PowAssign,
+            "&=" => AssignmentOp::BitAndAssign,
+            "|=" => AssignmentOp::BitOrAssign,
+            "^=" => AssignmentOp::BitXorAssign,
+            "<<=" => AssignmentOp::ShlAssign,
+            ">>=" => AssignmentOp::ShrAssign,
+            ">>>=" => AssignmentOp::UShrAssign,
+            _ => return None,
+        })
+    }
 }
 
 /// Expressions in the Fire language
@@ -275,7 +302,10 @@ pub enum BinaryOperator {
     Add, Sub, Mul, Div, Mod, Pow,
     Eq, Ne, Lt, Le, Gt, Ge,
     And, Or,
+    /// `|` and `&`: a union / intersection in a type, bitwise or / and on ints
     TypeOr, TypeAnd,
+    /// `>>` keeps the sign, `>>>` shifts in zeros
+    BitXor, Shl, Shr, UShr,
 }
 
 /// Unary operators
@@ -463,15 +493,9 @@ fn parse_assignment_statement(pair: Pair<'_>) -> Result<Statement> {
                 pending = Some(expression_to_pattern(parse_expression(inner.clone())?, &inner)?);
             }
             Rule::assignment_op => {
-                let op = match inner.as_str() {
-                    "=" => AssignmentOp::Assign,
-                    "+=" => AssignmentOp::AddAssign,
-                    "-=" => AssignmentOp::SubAssign,
-                    "*=" => AssignmentOp::MulAssign,
-                    "/=" => AssignmentOp::DivAssign,
-                    "%=" => AssignmentOp::ModAssign,
-                    "**=" => AssignmentOp::PowAssign,
-                    other => return err(&inner, format!("unknown assignment operator '{}'", other)),
+                let op = match AssignmentOp::from_str(inner.as_str()) {
+                    Some(op) => op,
+                    None => return err(&inner, format!("unknown assignment operator '{}'", inner.as_str())),
                 };
                 match pending.take() {
                     Some(p) => targets.push((p, op)),
@@ -960,15 +984,9 @@ fn parse_expression_inner(pair: Pair<'_>) -> Result<Expression> {
                 let mut iter = children.into_iter();
                 while let (Some(target_pair), Some(op_pair)) = (iter.next(), iter.next()) {
                     let target = expression_to_pattern(parse_expression(target_pair.clone())?, &target_pair)?;
-                    let op = match op_pair.as_str() {
-                        "=" => AssignmentOp::Assign,
-                        "+=" => AssignmentOp::AddAssign,
-                        "-=" => AssignmentOp::SubAssign,
-                        "*=" => AssignmentOp::MulAssign,
-                        "/=" => AssignmentOp::DivAssign,
-                        "%=" => AssignmentOp::ModAssign,
-                        "**=" => AssignmentOp::PowAssign,
-                        other => return err(&op_pair, format!("unknown assignment operator '{}'", other)),
+                    let op = match AssignmentOp::from_str(op_pair.as_str()) {
+                        Some(op) => op,
+                        None => return err(&op_pair, format!("unknown assignment operator '{}'", op_pair.as_str())),
                     };
                     targets.push((target, op));
                 }
@@ -1003,9 +1021,13 @@ fn parse_expression_inner(pair: Pair<'_>) -> Result<Expression> {
         Rule::comparison_simple => parse_binary_chain(pair, &[Rule::comparison_op]),
         Rule::type_or => parse_binary_with_block(pair, Rule::type_or_block),
         Rule::type_or_simple => parse_binary_chain(pair, &[Rule::type_or_op]),
+        Rule::xor => parse_binary_with_block(pair, Rule::xor_block),
+        Rule::xor_simple => parse_binary_chain(pair, &[Rule::xor_op]),
         Rule::type_and => parse_binary_with_block(pair, Rule::type_and_block),
         Rule::type_and_simple => parse_binary_chain(pair, &[Rule::type_and_op]),
         Rule::range => parse_range_expression(pair),
+        Rule::shift => parse_binary_with_block(pair, Rule::shift_block),
+        Rule::shift_simple => parse_binary_chain(pair, &[Rule::shift_op]),
         Rule::additive => parse_binary_with_block(pair, Rule::additive_block),
         Rule::additive_simple => parse_binary_chain(pair, &[Rule::add_op]),
         Rule::multiplicative => parse_binary_with_block(pair, Rule::multiplicative_block),
@@ -1165,6 +1187,10 @@ fn binary_op_from_str(pair: &Pair<'_>) -> Result<BinaryOperator> {
         "or" => BinaryOperator::Or,
         "|" => BinaryOperator::TypeOr,
         "&" => BinaryOperator::TypeAnd,
+        "^" => BinaryOperator::BitXor,
+        "<<" => BinaryOperator::Shl,
+        ">>" => BinaryOperator::Shr,
+        ">>>" => BinaryOperator::UShr,
         other => return err(pair, format!("unknown binary operator '{}'", other)),
     })
 }
@@ -2078,6 +2104,12 @@ impl fmt::Display for AssignmentOp {
             AssignmentOp::DivAssign => "/=",
             AssignmentOp::ModAssign => "%=",
             AssignmentOp::PowAssign => "**=",
+            AssignmentOp::BitAndAssign => "&=",
+            AssignmentOp::BitOrAssign => "|=",
+            AssignmentOp::BitXorAssign => "^=",
+            AssignmentOp::ShlAssign => "<<=",
+            AssignmentOp::ShrAssign => ">>=",
+            AssignmentOp::UShrAssign => ">>>=",
         };
         write!(f, "{}", s)
     }
@@ -2298,6 +2330,10 @@ impl fmt::Display for BinaryOperator {
             BinaryOperator::Or => "or",
             BinaryOperator::TypeOr => "|",
             BinaryOperator::TypeAnd => "&",
+            BinaryOperator::BitXor => "^",
+            BinaryOperator::Shl => "<<",
+            BinaryOperator::Shr => ">>",
+            BinaryOperator::UShr => ">>>",
         };
         write!(f, "{}", s)
     }

@@ -99,8 +99,12 @@ internal `TypeError`), the runner falls back to the JavaScript lane.
 
 The prelude (`src/prelude.bend`) holds everything the generated code calls
 that Base does not provide: list, string, map and float helpers, `show`
-formatting, the pure crash, sorting. It must stay in dependency order and
-free of mutual recursion; after editing it run
+formatting, the pure crash, sorting. Only the items a program reaches are
+emitted (`src/prune.rs` walks the references from the generated defs
+through the prelude's `def` and `type` blocks), so a small program carries
+a few dozen lines of it rather than all ~1500, and Bend checks that much
+less. The prelude must stay in dependency order and free of mutual
+recursion; after editing it run
 
 ```bash
 python3 tools/prelude_sort.py src/prelude.bend

@@ -1,0 +1,16 @@
+# [T] is a list type, {} a dictionary, {name: T} a record
+xs: [int] = [1, 2]
+def head(ys: [int]): int
+    ys[0]
+def mk(): [int]
+    [1]
+def add(zs: [int], v)
+    zs.push(v)
+    zs
+counts: {} = {}
+counts["a"] = 1
+def named(p: {name: str, age: int}): str
+    "{p.name} is {p.age}"
+grid: [[int]] = [[1, 2], [3]]
+maybe: [int] | nothing = nothing
+print(head(xs), mk(), add([1], 2), counts, named({name: 'ada', age: 36}), grid, maybe or [])

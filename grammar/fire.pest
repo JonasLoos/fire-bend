@@ -86,6 +86,9 @@ statement_raw = _{
 
 /// A single-line comment, starting with `#`.
 comment = { "#" ~ (!nl ~ ANY)* }
+/// A comment closing a block header (`if x > 2  # big`); silent, so the AST
+/// builder never sees it among the block's statements.
+trailing_comment = _{ w* ~ "#" ~ (!nl ~ ANY)* }
 /// A documentation comment, starting with `##`.
 documentation = { "##" ~ (!nl ~ ANY)* }
 /// Variable declaration statement, e.g. `public var a = 1` or `a : int = 1`.
@@ -131,6 +134,8 @@ indentation = _{ " "+ }
 // PEEK_ALL checks the current indentation level without consuming input.
 /// An indented block of statements.
 block = _{
+    // A header may end in a comment: `def f(x)  # doubles`.
+    trailing_comment? ~
     nls ~
     // Capture the indentation of the first line.
     PEEK_ALL ~ PUSH(indentation) ~ statement ~
@@ -186,18 +191,27 @@ logic_not = { (kw_not ~ w+)? ~ comparison }
 comparison = { comparison_simple ~ comparison_block? }
 /// A single line or part of a comparison expression.
 comparison_simple = { type_or ~ (w* ~ comparison_op ~ w* ~ type_or)* }
-/// Type OR expression (`|`), possibly spanning multiple lines (used for union types).
+/// `|` expression, possibly spanning multiple lines: a union in a type
+/// (`int | nothing`), bitwise or on ints.
 type_or = { type_or_simple ~ type_or_block? }
-/// A single line or part of a type OR expression.
-type_or_simple = { type_and ~ (w* ~ type_or_op ~ w* ~ type_and)* }
-/// Type AND expression (`&`), possibly spanning multiple lines (used for intersection types).
+/// A single line or part of a `|` expression.
+type_or_simple = { xor ~ (w* ~ type_or_op ~ w* ~ xor)* }
+/// Bitwise xor (`^`), possibly spanning multiple lines.
+xor = { xor_simple ~ xor_block? }
+/// A single line or part of a xor expression.
+xor_simple = { type_and ~ (w* ~ xor_op ~ w* ~ type_and)* }
+/// `&` expression, possibly spanning multiple lines: bitwise and on ints.
 type_and = { type_and_simple ~ type_and_block? }
-/// A single line or part of a type AND expression.
+/// A single line or part of an `&` expression.
 type_and_simple = { range ~ (w* ~ type_and_op ~ w* ~ range)* }
-/// Range expression (`..`). Left-factored: the leading `additive` is parsed
+/// Range expression (`..`). Left-factored: the leading `shift` is parsed
 /// exactly once (re-trying it per alternative made nested expressions
 /// exponentially slow to parse).
-range = { additive ~ (w* ~ range_op ~ (w* ~ additive)?)? | range_op ~ w* ~ additive }
+range = { shift ~ (w* ~ range_op ~ (w* ~ shift)?)? | range_op ~ w* ~ shift }
+/// Shift expression (`<<`, `>>`), possibly spanning multiple lines.
+shift = { shift_simple ~ shift_block? }
+/// A single line or part of a shift expression.
+shift_simple = { additive ~ (w* ~ shift_op ~ w* ~ additive)* }
 /// Additive expression (+, -), possibly spanning multiple lines.
 additive = { additive_simple ~ additive_block? }
 /// A single line or part of an additive expression.
@@ -221,8 +235,15 @@ call_or_access = { call_or_access_simple ~ access_block? }
 /// A single line or part of a function call or member access expression.
 call_or_access_simple = { atom ~ (member_access_op ~ atom | function_call_args | list_access_args)* }
 
-/// Arguments for a function call (within parentheses).
-function_call_args = { w* ~ "(" ~ call_arg_list ~ ")" }
+/// Arguments for a function call (within parentheses). Like a list, the
+/// arguments may continue on indented lines: `f(a,\n    b)`.
+function_call_args = { w* ~ "(" ~ w* ~ (call_args? ~ w* ~ call_block?) ~ w* ~ ")" }
+/// Comma-separated call arguments (trailing comma allowed).
+call_args = _{ call_arg ~ w* ~ ("," ~ w* ~ call_arg)* ~ (w* ~ ",")? }
+/// Indented continuation lines of a call's arguments.
+call_block = _{ nls ~ PEEK_ALL ~ PUSH(indentation) ~ call_line ~ (block_nl ~ call_line)* ~ DROP ~ block_nl? }
+/// One line of a multi-line call: arguments with an optional trailing comment, or a comment-only line.
+call_line = _{ call_args ~ (w* ~ comment)? | comment }
 /// Arguments for list access (within square brackets).
 list_access_args = { w* ~ "[" ~ call_arg_list ~ "]" }
 /// Comma-separated list of arguments for function calls or list access.
@@ -254,10 +275,18 @@ comparison_block_line = { comparison_op ~ w* ~ comparison_simple ~ w* ~ comment?
 type_or_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ type_or_block_line ~ (block_nl ~ type_or_block_line)* ~ DROP }
 /// A single line within a type OR block.
 type_or_block_line = { type_or_op ~ w* ~ type_or_simple ~ w* ~ comment? }
+/// An indented block continuing a xor expression.
+xor_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ xor_block_line ~ (block_nl ~ xor_block_line)* ~ DROP }
+/// A single line within a xor block.
+xor_block_line = { xor_op ~ w* ~ xor_simple ~ w* ~ comment? }
 /// An indented block continuing a type AND expression.
 type_and_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ type_and_block_line ~ (block_nl ~ type_and_block_line)* ~ DROP }
 /// A single line within a type AND block.
 type_and_block_line = { type_and_op ~ w* ~ type_and_simple ~ w* ~ comment? }
+/// An indented block continuing a shift expression.
+shift_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ shift_block_line ~ (block_nl ~ shift_block_line)* ~ DROP }
+/// A single line within a shift block.
+shift_block_line = { shift_op ~ w* ~ shift_simple ~ w* ~ comment? }
 /// An indented block continuing an additive expression.
 additive_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ additive_block_line ~ (block_nl ~ additive_block_line)* ~ DROP }
 /// A single line within an additive block.
@@ -310,13 +339,17 @@ pipeline_op = { "|>" | "*>" | "?>" | "!>" }
 /// Lambda operator: `=>`.
 lambda_op = { "=>" }
 /// Assignment operators: `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `**=`.
-assignment_op = { "**=" | "+=" | "-=" | "*=" | "/=" | "%=" | ("=" ~ !("=" | ">")) }
-/// Type OR operator: `|`.
-type_or_op = { "|" ~ !">" }
-/// Type AND operator: `&`.
-type_and_op = { "&" }
+assignment_op = { "**=" | "<<=" | ">>>=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | ("=" ~ !("=" | ">")) }
+/// `|`: a union in a type, bitwise or on ints.
+type_or_op = { "|" ~ !(">" | "=") }
+/// `&`: bitwise and on ints.
+type_and_op = { "&" ~ !"=" }
+/// Bitwise xor: `^`.
+xor_op = { "^" ~ !"=" }
+/// Shifts: `<<`, `>>`.
+shift_op = { ("<<" | ">>>" | ">>") ~ !"=" }
 /// Comparison operators: `==`, `!=`, `>=`, `<=`, `>`, `<`.
-comparison_op = { "==" | "!=" | ">=" | "<=" | ">" | "<" }
+comparison_op = { "==" | "!=" | ">=" | "<=" | ">" ~ !">" | "<" ~ !"<" }
 /// Range operator: `..`.
 range_op = { ".." ~ !"." }
 /// Additive operators: `+`, `-`.
@@ -331,7 +364,7 @@ unary_op = { "+" | "-" | "..." }
 typecheck_op = { ":" }
 /// Member access operators: `.` (normal), `?.` (safe navigation).
 member_access_op = { ("?." | ".") ~ !"." }
-// unused: ! @ ~ ; ^ // << >> && ||
+// unused: ! @ ~ ; // && ||
 
 // --- Primitives ---
 // `@` is used for atomic rules, which do not produce sub-terms

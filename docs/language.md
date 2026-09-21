@@ -32,10 +32,11 @@ with align `<` `>` `^`. Numbers pad on the left, text on the right:
 "{'ada':*^9}"         # ***ada***
 ```
 
-Blocks are introduced by indentation, never by a colon. A multi-line
-expression continues on lines that *start* with an operator (`|>`, `.`,
-`+`, `and`, ...). List and record literals may span lines; commas are then
-optional.
+Blocks are introduced by indentation, never by a colon; a comment may close
+the header line (`def f(x)  # doubles`). A multi-line expression continues
+on lines that *start* with an operator (`|>`, `.`, `+`, `and`, ...). List
+and record literals and the arguments of a call may span indented lines;
+commas are then optional.
 
 Identifiers are `[A-Za-z_][A-Za-z0-9_]*`. Reserved: `def return public var
 if elif else for in while break continue match not and or do true false
@@ -60,6 +61,10 @@ annotations are checked, never required:
 age: int = 30
 def area(w: float, h: float): float
     w * h
+names: [str] = []                    # a list type is [T]
+counts: {} = {}                      # a dictionary
+def greet(p: {name: str, age: int})  # a record type lists its fields
+    "hi {p.name}"
 ```
 
 Rebinding never affects another binding that received the same value:
@@ -133,7 +138,10 @@ print(c.count)    # 1
 print(c)          # Counter{count: 1}
 ```
 
-* Everything not `public` is private state, visible to the methods only.
+* Everything not `public` is private state, visible to the methods only. A
+  private function that a method calls is a method too; like any method it
+  sees the whole object, so the constructor body can only call it once every
+  member is declared.
 * `public` parameters declare members directly: `def Todo(public title,
   public var done = false)` is a complete constructor.
 * Methods call their siblings by bare name (`fact(n - 1)`); `self.fact(...)`
@@ -175,7 +183,12 @@ mutating method on `self`, on a member, or on its parent counts as mutating
 too. Calling a mutating method on a temporary (`Counter().increment()`) is
 allowed; the result is dropped. The same holds for lists and dictionaries:
 `xs.push(v)`, `xs.pop()` and `m[k] = v` rebind the binding they are applied
-to (any binding, `var` or not) and no other.
+to (any binding, `var` or not) and no other. That includes a parameter, a
+member, and a lambda whose whole body is the mutation (`public add = v =>
+items.push(v)`); a lambda that pushes onto its *own* parameter answers the
+extended list instead, since nothing outside could see the rebinding.
+Writes go through any chain of indexes and members: `rows[r][c] = v`,
+`d[k].push(v)`, `xs[i].name = v`.
 
 Printing an object shows its public data members in declaration order;
 `==` compares them structurally. Methods are neither printed nor compared.
@@ -252,8 +265,9 @@ node.op                                 # field access
 ```
 
 Two records with the same field names and types have the same type. Fields
-are read with `.name`; `node["op"]` is not allowed on a record (it is the
-dictionary lookup).
+are read with `.name` and assigned with `node.op = '-'` (the record is a
+value, so the binding holding it rebinds); `node["op"]` is not allowed on a
+record (it is the dictionary lookup).
 
 ## 5. Pipelines
 
@@ -402,7 +416,10 @@ with `float(x)` and `int(x)`. Only an int *literal* adapts to a float
 context (`1 + 2.5` is `3.5`). Int `/` rounds toward negative infinity and `%`
 is Euclidean (`-7 % 3` is `2`); division by zero yields `0`. `**` on ints
 is an int power; on floats the exponent must be an integer literal
-(otherwise use `$math.pow`).
+(otherwise use `$math.pow`). Ints also have the bit operations `& | ^`,
+the shifts `<< >>` (`>>` keeps the sign) and `>>>` (shifts in zeros), and
+the matching compound assignments (`x ^= x << 13`). Between two values `|`
+is bitwise or; between types (`int | nothing`) it is a union.
 
 **Absent values.** `xs[i]` on a list aborts when out of range, but a
 lookup that can miss has type `T | nothing`: `m[k]`, `xs.first()`,
@@ -510,7 +527,9 @@ Loosest to tightest:
 | comprehension | `for … do`, inline `if … do … else` |
 | logic | `or`, then `and`, then `not` |
 | comparison | `==` `!=` `<` `<=` `>` `>=` |
+| bits | `\|`, then `^`, then `&` |
 | range | `..` |
+| shifts | `<<` `>>` `>>>` |
 | arithmetic | `+` `-`, then `*` `/` `%`, then unary `-`, then `**` |
 | annotation | `:` |
 | access | `.member` `f(args)` `xs[i]` |

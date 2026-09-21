@@ -96,6 +96,10 @@ fn unsupported_programs_are_rejected_with_a_message() {
         ("xs = [1, 'a']\n", "expected int, found str"),
         ("def f()\n    return async 1\n", "async"),
         ("\"{h}:{m}\" = \"1:2\"\n", "f-string"),
+        // a helper a method uses is a method: it cannot run before the members exist
+        ("def G\n    def h(x)\n        x\n    x = h(1)\n    public p = () => h(x)\nprint(G().p())\n", "before member x exists"),
+        ("x = 1.5 & 2.5\n", "not defined on float"),
+        ("xs: [int, str] = [1]\n", "one element type"),
     ];
     for (src, fragment) in cases {
         match fire_bend::compile(src) {
