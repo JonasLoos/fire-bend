@@ -1,0 +1,35 @@
+# push/pop rebind a list whose type is only known from the call site: a
+# parameter, a copy of one, a member declared by a parameter, and a lambda
+# whose whole body is the mutation
+def add(xs, v)
+    xs.push(v)
+    xs
+def add_copy(xs, v)
+    var ys = xs
+    ys.push(v)
+    ys
+def take_last(xs)
+    x = xs.pop()
+    [x, len(xs)]
+print(add([1, 2], 3), add_copy([1, 2], 3), take_last([1, 2, 3]))
+def Bag(public var items)
+    public add = v => items.push(v)
+    public take = () => items.pop()
+var b = Bag([1])
+b.add(2)
+b.add(3)
+last = b.take()
+print(last, b.items)
+# a class with a push method of its own is not a list
+def Stack
+    public var items = []
+    public push = v => items.push(v)
+    public size = () => len(items)
+def fill(s: Stack)
+    s.push(1)
+    s.push(2)
+    s
+print(fill(Stack()).size())
+# on its own parameter the body stays a value
+extend = ys => ys.push(9)
+print(extend([1]), [[1], [2]] *> $.push(0))

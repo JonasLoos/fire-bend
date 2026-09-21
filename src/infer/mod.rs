@@ -113,6 +113,10 @@ pub(super) enum Pending {
     IndexCur { recv: Type, idx: Type, ret: Type, line: usize },
     /// `ty` is used as a number (unary minus).
     Numeric { ty: Type, line: usize },
+    /// `recv.method()` (push/pop) was left open because a class declares
+    /// `method` too; if `recv` turns out to be a list the statement was
+    /// typed too early to rebind it, which is an error.
+    ListMutation { recv: Type, method: String, line: usize },
 }
 
 impl Pending {
@@ -131,6 +135,7 @@ impl Pending {
                 v
             }
             Pending::Arith { ty, .. } | Pending::Numeric { ty, .. } => vec![ty.clone()],
+            Pending::ListMutation { recv, .. } => vec![recv.clone()],
             Pending::Index { recv, idx, ret, .. } | Pending::IndexCur { recv, idx, ret, .. } => vec![recv.clone(), idx.clone(), ret.clone()],
             Pending::Iter { recv, elem, .. } => vec![recv.clone(), elem.clone()],
             Pending::Or { lhs, rhs, ret, .. } => vec![lhs.clone(), rhs.clone(), ret.clone()],
@@ -249,7 +254,9 @@ impl Infer {
             None => {
                 let name = format!("Rec_{}", names.join("_"));
                 let n = names.len();
-                let id = self.new_record(&name, RecordKind::Literal, key.clone(), vec![true; n], vec![false; n]);
+                // a record is a value, so its fields may be assigned (the
+                // binding holding it rebinds); `var` is for class members
+                let id = self.new_record(&name, RecordKind::Literal, key.clone(), vec![true; n], vec![true; n]);
                 self.literal_shapes.insert(key, id);
                 id
             }
@@ -556,7 +563,8 @@ impl Infer {
                         }
                         final_pass
                     }
-                    Type::Int | Type::Float => true,
+                    Type::Int => true,
+                    Type::Float if !op.is_bitwise() => true,
                     Type::Str if *op == BinOp::Add => true,
                     Type::List(_) if *op == BinOp::Add => true,
                     Type::Record(_, _) if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) => true,
@@ -565,6 +573,16 @@ impl Infer {
                         self.error(*line, format!("operator {:?} is not defined on {}", op, n));
                         true
                     }
+                }
+            }
+            Pending::ListMutation { recv, method, line } => {
+                match self.store.shallow(recv) {
+                    Type::Var(_) => final_pass,
+                    Type::List(_) => {
+                        self.error(*line, format!("the receiver of .{}() is a list, but that was only known after the statement was typed (a class declares .{}() too); annotate the parameter with its list type", method, method));
+                        true
+                    }
+                    _ => true,
                 }
             }
             Pending::Numeric { ty, line } => {
@@ -1453,7 +1471,14 @@ pub(super) fn free_names_expr(e: &ast::Expression, out: &mut HashSet<String>) {
                 free_names_expr(a, out);
             }
         }
-        MemberAccess { object, .. } | SpreadMember { object } => free_names_expr(object, out),
+        MemberAccess { object, member, .. } => {
+            // `self.helper` names the member as much as bare `helper` does
+            if matches!(&**object, Identifier(n) if n == "self") {
+                out.insert(member.clone());
+            }
+            free_names_expr(object, out);
+        }
+        SpreadMember { object } => free_names_expr(object, out),
         Index { object, index } => {
             free_names_expr(object, out);
             free_names_expr(index, out);

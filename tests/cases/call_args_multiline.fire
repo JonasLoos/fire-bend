@@ -1,0 +1,18 @@
+# call arguments continue on indented lines, like list entries
+def add3(a, b, c = 0)
+    a + b + c
+x = add3(1,
+    2,
+    3)
+y = add3(
+    1,
+    2,      # a comment
+    c = 3,
+)
+z = add3(1, 2,
+         3)
+def Box(public w = 1, public h = 2)
+b = Box(
+    w = 4,
+    h = 5)
+print(x, y, z, b)

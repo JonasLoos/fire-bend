@@ -1,0 +1,23 @@
+# & | ^ << >> >>> on ints; >> keeps the sign, >>> shifts in zeros
+print(5 & 3, 5 | 3, 5 ^ 3, 1 << 4, 16 >> 2, -8 >> 1, -8 >>> 28)
+print(1 << 4 == 16, 6 & 3 | 8, 1 | 2 ^ 3, 0 .. 5 << 1 |> len)
+def xorshift(seed)
+    var s = seed
+    s ^= s << 13
+    s ^= s >>> 17
+    s ^= s << 5
+    s
+print(xorshift(1), xorshift(xorshift(1)))
+var m = 0
+m |= 4
+m &= 6
+m <<= 2
+m >>= 1
+m >>>= 1
+print(m)
+# `|` between values is bitwise or; between types it is still a union
+flags = 4 | 1
+Level = 'low' | 'high'
+lvl: Level = 'low'
+opt: int | nothing = nothing
+print(flags, lvl, opt or 7)

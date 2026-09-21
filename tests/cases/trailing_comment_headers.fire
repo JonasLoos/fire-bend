@@ -1,0 +1,24 @@
+def f(x)  # a block header may end in a comment
+    x * 2
+if f(2) > 2  # big
+    print("big")
+elif f(2) > 1  # medium
+    print("medium")
+else  # small
+    print("small")
+for i, word in 0.., ["a", "b"]       # loops zip; an open range counts
+    print("{i}: {word}")
+while false  # never
+    print("no")
+match f(1)  # two?
+    2 => print("two")
+    other => print("other")
+classify = x =>  # a lambda with a block body
+    if x > 1 do 'big' else 'small'
+print(classify(3))
+def Counter(start = 0)   # a class
+    public var count = start
+    public increment = () => count += 1
+var c = Counter()
+c.increment()
+print(c.count)

@@ -100,7 +100,7 @@ compiler turns this into Bend is in [`docs/compiler.md`](docs/compiler.md).
 | `src/infer/` | type and effect inference |
 | `src/lower/` | lowering to Bend IR |
 | `src/ir.rs` | the IR and its printer |
-| `src/prelude.bend` | runtime library emitted into every program |
+| `src/prelude.bend` | runtime library; the part a program uses is emitted with it |
 | `examples/` | programs with their expected output (`.out`) |
 | `tests/cases/` | one small program per language rule or fixed bug |
 
