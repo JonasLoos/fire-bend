@@ -90,6 +90,9 @@ print(evens.take(4))                      # [0, 2, 4, 6]
 
 The full reference is [`docs/language.md`](docs/language.md); how the
 compiler turns this into Bend is in [`docs/compiler.md`](docs/compiler.md).
+Where the language is going, and why, is [`docs/design.md`](docs/design.md):
+declared data types, laws, and a Bend image that Bend's own checker can
+certify total.
 
 ## Layout
 
@@ -102,6 +105,7 @@ compiler turns this into Bend is in [`docs/compiler.md`](docs/compiler.md).
 | `src/ir.rs` | the IR and its printer |
 | `src/prelude.bend` | runtime library; the part a program uses is emitted with it |
 | `examples/` | programs with their expected output (`.out`) |
+| `docs/design/` | the Bend shapes the redesign emits, each checked by `bend` in the tests |
 | `tests/cases/` | one small program per language rule or fixed bug |
 
 ## Testing
