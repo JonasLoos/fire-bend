@@ -308,7 +308,12 @@ pub fn describe_types(source: &str) -> Result<String, Vec<Diag>> {
         if matches!(d.kind, core::DefKind::Lambda | core::DefKind::Law) || d.name.starts_with("__") {
             continue;
         }
-        let ty = types::TypeDisplay { store: &core.store, ty: &d.scheme.ty, names: &names };
+        let mut shown: Vec<&types::Type> = vec![&d.scheme.ty];
+        for c in &d.scheme.dicts {
+            shown.push(&core.store.constraints[*c].subject);
+        }
+        let vars = types::var_names(&core.store, &shown);
+        let ty = types::TypeDisplay { store: &core.store, ty: &d.scheme.ty, names: &names, vars: &vars };
         let mut tags: Vec<String> = vec![d.effect.to_string()];
         if d.relies_on_unsafe {
             tags.push("unsafe".into());
@@ -327,7 +332,7 @@ pub fn describe_types(source: &str) -> Result<String, Vec<Diag>> {
         } else {
             let ds: Vec<String> = d.scheme.dicts.iter().map(|c| {
                 let cc = &core.store.constraints[*c];
-                let subject = types::TypeDisplay { store: &core.store, ty: &cc.subject, names: &names };
+                let subject = types::TypeDisplay { store: &core.store, ty: &cc.subject, names: &names, vars: &vars };
                 format!("{} on {}", check::describe_class(&cc.class), subject)
             }).collect();
             format!(" needs {}", ds.join(", "))
@@ -337,9 +342,11 @@ pub fn describe_types(source: &str) -> Result<String, Vec<Diag>> {
         out.push_str(&format!("{} : {} [{}]{}{}{}\n", d.name, ty, tags.join(", "), descent, dicts, captures));
     }
     for t in core.types.iter().skip(types::BUILTIN_TYPES) {
+        let params: Vec<types::Type> = t.params.iter().map(|v| types::Type::Var(*v)).collect();
+        let vars = types::var_names(&core.store, &params.iter().collect::<Vec<_>>());
         let ctors: Vec<String> = t.ctors.iter().map(|c| {
             let fields: Vec<String> = c.fields.iter().map(|f| {
-                let ty = types::TypeDisplay { store: &core.store, ty: &f.ty, names: &names };
+                let ty = types::TypeDisplay { store: &core.store, ty: &f.ty, names: &names, vars: &vars };
                 format!("{}{}: {}", if f.public { "" } else { "~" }, f.name, ty)
             }).collect();
             if fields.is_empty() { c.name.clone() } else { format!("{}({})", c.name, fields.join(", ")) }

@@ -156,6 +156,19 @@ impl Class {
     /// Classes whose operation may abort for some subjects (indexing,
     /// methods, conversions): their dictionary form answers a result, and
     /// a def that takes such a dictionary may abort.
+    /// The same operation (types aside): same class, same name, same
+    /// operator, same literal index.
+    pub fn same_op(&self, other: &Class) -> bool {
+        match (self, other) {
+            (Class::Field(x, _), Class::Field(y, _)) | (Class::SetField(x, _), Class::SetField(y, _)) => x == y,
+            (Class::Method(x, a, _), Class::Method(y, b, _)) => x == y && a.len() == b.len(),
+            (Class::Convert(x, _), Class::Convert(y, _)) => x == y,
+            (Class::Arith(x), Class::Arith(y)) => x == y,
+            (Class::Index(_, _, x), Class::Index(_, _, y)) => x == y,
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
+    }
+
     pub fn fallible(&self) -> bool {
         matches!(self, Class::Index(..) | Class::IndexSet(..) | Class::Method(..) | Class::Convert(..))
     }
@@ -615,13 +628,36 @@ pub struct TypeDisplay<'a> {
     pub store: &'a TypeStore,
     pub ty: &'a Type,
     pub names: &'a dyn Fn(TypeId) -> String,
+    /// Names for type variables (a quantified variable shows as `a`, ...);
+    /// others show as `?n`.
+    pub vars: &'a [(TVar, String)],
+}
+
+/// Letters for the variables of a type, in order of appearance.
+pub fn var_names(store: &TypeStore, tys: &[&Type]) -> Vec<(TVar, String)> {
+    let mut vs = Vec::new();
+    for t in tys {
+        store.free_vars(t, &mut vs);
+    }
+    let mut out: Vec<(TVar, String)> = Vec::new();
+    for v in vs {
+        if !out.iter().any(|(w, _)| *w == v) {
+            let i = out.len();
+            let n = if i < 26 { ((b'a' + i as u8) as char).to_string() } else { format!("t{}", i) };
+            out.push((v, n));
+        }
+    }
+    out
 }
 
 impl fmt::Display for TypeDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fn go(store: &TypeStore, t: &Type, names: &dyn Fn(TypeId) -> String, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn go(store: &TypeStore, t: &Type, names: &dyn Fn(TypeId) -> String, vars: &[(TVar, String)], f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match store.shallow(t) {
-                Type::Var(v) => write!(f, "?{}", v),
+                Type::Var(v) => match vars.iter().find(|(w, _)| *w == v) {
+                    Some((_, n)) => write!(f, "{}", n),
+                    None => write!(f, "?{}", v),
+                },
                 Type::Int => write!(f, "int"),
                 Type::Float => write!(f, "float"),
                 Type::Str => write!(f, "str"),
@@ -629,12 +665,12 @@ impl fmt::Display for TypeDisplay<'_> {
                 Type::Unit => write!(f, "nothing"),
                 Type::List(e) => {
                     write!(f, "[")?;
-                    go(store, &e, names, f)?;
+                    go(store, &e, names, vars, f)?;
                     write!(f, "]")
                 }
                 Type::Map(e) => {
                     write!(f, "{{str: ")?;
-                    go(store, &e, names, f)?;
+                    go(store, &e, names, vars, f)?;
                     write!(f, "}}")
                 }
                 Type::Fn(ps, r, _) => {
@@ -643,20 +679,20 @@ impl fmt::Display for TypeDisplay<'_> {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
-                        go(store, p, names, f)?;
+                        go(store, p, names, vars, f)?;
                     }
                     write!(f, ") -> ")?;
-                    go(store, &r, names, f)
+                    go(store, &r, names, vars, f)
                 }
                 Type::Data(MAYBE, args) => {
-                    go(store, &args[0], names, f)?;
+                    go(store, &args[0], names, vars, f)?;
                     write!(f, " | nothing")
                 }
                 Type::Data(RESULT, args) => {
                     write!(f, "result(ok: ")?;
-                    go(store, &args[1], names, f)?;
+                    go(store, &args[1], names, vars, f)?;
                     write!(f, ", err: ")?;
-                    go(store, &args[0], names, f)?;
+                    go(store, &args[0], names, vars, f)?;
                     write!(f, ")")
                 }
                 Type::Data(RANGE, _) => write!(f, "range"),
@@ -668,7 +704,7 @@ impl fmt::Display for TypeDisplay<'_> {
                             if i > 0 {
                                 write!(f, ", ")?;
                             }
-                            go(store, a, names, f)?;
+                            go(store, a, names, vars, f)?;
                         }
                         write!(f, ">")?;
                     }
@@ -676,7 +712,7 @@ impl fmt::Display for TypeDisplay<'_> {
                 }
             }
         }
-        go(self.store, self.ty, self.names, f)
+        go(self.store, self.ty, self.names, self.vars, f)
     }
 }
 

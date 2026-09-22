@@ -392,7 +392,8 @@ impl Checker {
 
     pub(crate) fn show_type(&self, t: &Type) -> String {
         let names = |id: TypeId| self.types[id].name.clone();
-        format!("{}", TypeDisplay { store: &self.store, ty: t, names: &names })
+        let vars = var_names(&self.store, &[t]);
+        format!("{}", TypeDisplay { store: &self.store, ty: t, names: &names, vars: &vars })
     }
 
     pub(crate) fn resolve(&self, t: &Type) -> Type {
@@ -687,6 +688,7 @@ impl Checker {
         // a mutating method's type was not visible to its recursive calls
         let _ = self.store.unify(&mono, &fty);
         let scheme = if is_top { self.store.generalize(&fty, id) } else { Scheme { vars: vec![], dicts: vec![], ty: self.resolve(&fty) } };
+        let scheme = self.merge_dicts(scheme);
         // a dictionary of a fallible class answers a result whatever the
         // instantiation: the def may abort
         if scheme.dicts.iter().any(|c| self.store.constraints[*c].class.fallible()) {
@@ -992,6 +994,37 @@ impl Checker {
             let subject = self.show_type(&c.subject);
             self.error(c.line, format!("cannot resolve {} on a value of type {}", what, subject));
         }
+    }
+
+    /// One dictionary per operation and subject: a second constraint for
+    /// the same operation on the same type is the first one (their types
+    /// are then the same, as the subject determines them) and is answered
+    /// by it.
+    fn merge_dicts(&mut self, scheme: Scheme) -> Scheme {
+        let mut kept: Vec<ConstraintId> = Vec::new();
+        for &d in &scheme.dicts {
+            let c = self.store.constraints[d].clone();
+            let subject = self.resolve(&c.subject);
+            let found = kept.iter().position(|&k| {
+                let o = &self.store.constraints[k];
+                o.class.same_op(&c.class) && self.resolve(&o.subject) == subject
+            });
+            match found {
+                Some(i) => {
+                    let o = self.store.constraints[kept[i]].class.clone();
+                    let (a, b) = (TypeStore::class_types(&o), TypeStore::class_types(&c.class));
+                    let ok = a.iter().zip(b.iter()).all(|(x, y)| self.store.unify(x, y).is_ok());
+                    if ok {
+                        self.store.constraints[d].solution = Some(Solution::Param(i));
+                    } else {
+                        kept.push(d);
+                    }
+                }
+                None => kept.push(d),
+            }
+        }
+        let vars: Vec<TVar> = scheme.vars.iter().cloned().filter(|v| matches!(self.shallow(&Type::Var(*v)), Type::Var(w) if w == *v)).collect();
+        Scheme { vars, dicts: kept, ty: self.resolve(&scheme.ty) }
     }
 
     /// Whether a class could be solved on a candidate type (for choosing
