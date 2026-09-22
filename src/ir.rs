@@ -1137,11 +1137,10 @@ pub fn find_mutual_recursion(defs: &[Def]) -> Option<Vec<String>> {
                     let pos = stack.iter().position(|&k| k == j).unwrap();
                     return Some(stack[pos..].iter().map(|&k| defs[k].name.clone()).collect());
                 }
-                if state[j] == 0 {
-                    if let Some(c) = visit(j, defs, index, state, stack) {
+                if state[j] == 0
+                    && let Some(c) = visit(j, defs, index, state, stack) {
                         return Some(c);
                     }
-                }
             }
         }
         stack.pop();
@@ -1149,11 +1148,10 @@ pub fn find_mutual_recursion(defs: &[Def]) -> Option<Vec<String>> {
         None
     }
     for i in 0..defs.len() {
-        if state[i] == 0 {
-            if let Some(c) = visit(i, defs, &index, &mut state, &mut stack) {
+        if state[i] == 0
+            && let Some(c) = visit(i, defs, &index, &mut state, &mut stack) {
                 return Some(c);
             }
-        }
     }
     None
 }

@@ -246,11 +246,10 @@ impl<'a> Lower<'a> {
                 }
             }
             ExprKind::CallClosure(f, _) => {
-                if let Type::Fn(_, _, c) = self.store.shallow(&f.ty) {
-                    if self.closure_mode(c) != Mode::Pure {
+                if let Type::Fn(_, _, c) = self.store.shallow(&f.ty)
+                    && self.closure_mode(c) != Mode::Pure {
                         pure = false;
                     }
-                }
             }
             ExprKind::Dict { id, .. } => {
                 if self.dict_mode(*id) != Mode::Pure {
@@ -274,11 +273,10 @@ impl<'a> Lower<'a> {
         let mut found = false;
         let me = ctx.self_def;
         walk_expr(e, &mut |x: &Expr| {
-            if let ExprKind::Call { def, .. } = &x.kind {
-                if *def == me {
+            if let ExprKind::Call { def, .. } = &x.kind
+                && *def == me {
                     found = true;
                 }
-            }
         });
         found
     }
@@ -337,8 +335,8 @@ impl<'a> Lower<'a> {
             }
         }
         // fuel
-        if img.fuel {
-            if let Descent::Fuel(i) = def.descent {
+        if img.fuel
+            && let Descent::Fuel(i) = def.descent {
                 if d == ctx.self_def {
                     call_args.push(Term::var("fuel_"));
                 } else {
@@ -346,7 +344,6 @@ impl<'a> Lower<'a> {
                     call_args.push(Term::call("F.i32.fuel", vec![p]));
                 }
             }
-        }
         // environment: the captured locals, which the caller has too
         if img.env.is_some() {
             let e = self.env_record(ctx, d);
@@ -559,11 +556,10 @@ impl<'a> Lower<'a> {
                 args.push(Term::TyArg(t.clone()));
             }
         }
-        if img.fuel {
-            if let Descent::Fuel(i) = def.descent {
+        if img.fuel
+            && let Descent::Fuel(i) = def.descent {
                 args.push(Term::call("F.i32.fuel", vec![Term::var(&params[i])]));
             }
-        }
         if img.env.is_some() {
             args.push(Term::var("__e"));
         }
@@ -585,11 +581,15 @@ impl<'a> Lower<'a> {
         self.wrap_in_sum(fv.env, d, ty, line)
     }
 
-    fn def_as_value(&mut self, ctx: &mut FnCtx, d: DefId, targs: &[Type], dicts: &[ConstraintId], ty: &Type, line: usize) -> Term {
+    /// A top-level def stored as a value (in a list, a record, a variable
+    /// that several functions flow into): its environment in the sum. The
+    /// sum's `call` def calls it without type arguments, so a def that
+    /// needs operations on its types cannot be stored this way.
+    fn def_as_value(&mut self, _ctx: &mut FnCtx, d: DefId, _targs: &[Type], _dicts: &[ConstraintId], ty: &Type, line: usize) -> Term {
         let img = self.images[d].clone().unwrap();
-        if !img.tparams.is_empty() || !img.dicts.is_empty() {
-            // a generic def as a value needs a wrapper closure
-            let _ = (targs, dicts);
+        if img.template {
+            let name = self.core.defs[d].name.clone();
+            self.error(line, format!("{} is generic in operations its callers supply and cannot be stored as a value; store a lambda that calls it (`x => {}(x)`)", name, name));
         }
         self.wrap_in_sum(Term::unit(), d, ty, line)
     }
@@ -1388,15 +1388,16 @@ impl<'a> Lower<'a> {
         let ts: Vec<Term> = args.iter().map(|a| self.expr(ctx, a, pre)).collect();
         let rty = self.ty_in(ctx, ret_ty, line);
         let a = |i: usize| ts.get(i).cloned().unwrap_or(Term::unit());
-        let t = match name {
+        
+        match name {
             "print" => {
                 let text = ts.iter().cloned().reduce(|x, y| Term::cat(Term::cat(x, Term::Str(" ".into())), y)).unwrap_or(Term::Str(String::new()));
                 let t = Term::call("IO.print", vec![text]);
-                return self.bind_monadic(ctx, t, Mode::Io, &Ty::Unit, pre, line);
+                self.bind_monadic(ctx, t, Mode::Io, &Ty::Unit, pre, line)
             }
             "assert" => {
                 let t = Term::call("F.assert", vec![a(0), a(1)]);
-                return self.bind_monadic(ctx, t, Mode::Result, &Ty::Unit, pre, line);
+                self.bind_monadic(ctx, t, Mode::Result, &Ty::Unit, pre, line)
             }
             "maybe.or" => {
                 let et = rty.clone();
@@ -1404,7 +1405,7 @@ impl<'a> Lower<'a> {
             }
             "maybe.unwrap" => {
                 let t = Term::call("F.maybe.unwrap", vec![Term::TyArg(rty.clone()), a(0)]);
-                return self.bind_monadic(ctx, t, Mode::Result, &rty, pre, line);
+                self.bind_monadic(ctx, t, Mode::Result, &rty, pre, line)
             }
             "result.unwrap_ok" => {
                 let et = match self.store.shallow(&args[0].ty) {
@@ -1412,7 +1413,7 @@ impl<'a> Lower<'a> {
                     _ => Ty::Str,
                 };
                 let t = Term::call("F.result.unwrap_ok", vec![Term::TyArg(et), Term::TyArg(rty.clone()), a(0)]);
-                return self.bind_monadic(ctx, t, Mode::Result, &rty, pre, line);
+                self.bind_monadic(ctx, t, Mode::Result, &rty, pre, line)
             }
             "result.unwrap_err" => {
                 let at = match self.store.shallow(&args[0].ty) {
@@ -1420,12 +1421,12 @@ impl<'a> Lower<'a> {
                     _ => Ty::Str,
                 };
                 let t = Term::call("F.result.unwrap_err", vec![Term::TyArg(rty.clone()), Term::TyArg(at), a(0)]);
-                return self.bind_monadic(ctx, t, Mode::Result, &rty, pre, line);
+                self.bind_monadic(ctx, t, Mode::Result, &rty, pre, line)
             }
             "list.at" => {
                 let et = rty.clone();
                 let t = Term::call("F.list.index", vec![Term::TyArg(et), a(0), a(1)]);
-                return self.bind_monadic(ctx, t, Mode::Result, &rty, pre, line);
+                self.bind_monadic(ctx, t, Mode::Result, &rty, pre, line)
             }
             "list.drop" => {
                 let et = match self.store.shallow(&args[0].ty) {
@@ -1441,7 +1442,7 @@ impl<'a> Lower<'a> {
                 };
                 let f = if name == "list.need_exactly" { "F.list.need_exactly" } else { "F.list.need_at_least" };
                 let t = Term::call(f, vec![Term::TyArg(et), a(0), a(1)]);
-                return self.bind_monadic(ctx, t, Mode::Result, &Ty::Unit, pre, line);
+                self.bind_monadic(ctx, t, Mode::Result, &Ty::Unit, pre, line)
             }
             "float.fixed" => Term::call("F.f32.show_fixed", vec![a(0), a(1)]),
             "int.and" => Term::call("U32.and", vec![a(0), a(1)]),
@@ -1510,22 +1511,21 @@ impl<'a> Lower<'a> {
             }
             "io.read_file" => {
                 let t = Term::call("F.io.read_file", vec![a(0)]);
-                return self.bind_monadic(ctx, t, Mode::Io, &rty, pre, line);
+                self.bind_monadic(ctx, t, Mode::Io, &rty, pre, line)
             }
             "io.write_file" => {
                 let t = Term::call("F.io.write_file", vec![a(0), a(1)]);
-                return self.bind_monadic(ctx, t, Mode::Io, &rty, pre, line);
+                self.bind_monadic(ctx, t, Mode::Io, &rty, pre, line)
             }
             "time.now" => {
                 let t = Term::call("F.time.now", vec![]);
-                return self.bind_monadic(ctx, t, Mode::Io, &rty, pre, line);
+                self.bind_monadic(ctx, t, Mode::Io, &rty, pre, line)
             }
             other => {
                 self.error(line, format!("unknown builtin {}", other));
                 Term::unit()
             }
-        };
-        t
+        }
     }
 
     /// Apply a format spec to a rendered value.

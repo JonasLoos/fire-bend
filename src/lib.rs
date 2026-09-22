@@ -1,7 +1,11 @@
 // src/lib.rs
-// Fire: parse a program (grammar/fire.pest → ast.rs), infer types and
-// effects (infer/), lower to Bend IR (lower/) and print it (ir.rs).
-// See docs/compiler.md.
+// Fire: parse a program (grammar/fire.pest → ast.rs), check it (check/:
+// types, effects, termination, laws) into Core (core.rs), lower Core to
+// Bend IR (lower/) and print it (ir.rs). See docs/compiler.md.
+
+// Passing the lowering context and a def's parts separately reads better
+// than bundling them into structs used once.
+#![allow(clippy::too_many_arguments)]
 
 use pest::Parser;
 use pest_derive::Parser;

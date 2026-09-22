@@ -80,12 +80,11 @@ impl Checker {
             ast::Expression::FString(parts) => self.check_fstring(parts),
             ast::Expression::Boolean(b) => self.lit(Lit::Bool(*b)),
             ast::Expression::Nothing => {
-                if let Some(t) = expected {
-                    if let Type::Data(MAYBE, args) = self.shallow(t) {
+                if let Some(t) = expected
+                    && let Type::Data(MAYBE, args) = self.shallow(t) {
                         let t = Type::maybe(args[0].clone());
                         return self.expr(ExprKind::Con(MAYBE, 0, vec![]), t);
                     }
-                }
                 self.lit(Lit::Nothing)
             }
             ast::Expression::Ellipsis => {
@@ -502,14 +501,12 @@ impl Checker {
                     _ => ArithOp::Pow,
                 };
                 // an operator a class defines: a method call, the right operand free
-                if let Type::Data(tid, _) = self.shallow(&a.ty) {
-                    if !matches!(self.types[tid].kind, DataKind::Builtin) {
-                        if let Some(m) = self.method_through_parents(tid, aop.symbol()) {
+                if let Type::Data(tid, _) = self.shallow(&a.ty)
+                    && !matches!(self.types[tid].kind, DataKind::Builtin)
+                        && let Some(m) = self.method_through_parents(tid, aop.symbol()) {
                             let _ = m;
                             return self.method_call_on(a, aop.symbol(), std::slice::from_ref(right), &[], expected, line);
                         }
-                    }
-                }
                 let b = self.check_expr(right, Some(&a.ty));
                 let (a, b) = self.adapt_literals(a, b);
                 self.unify(&a.ty, &b.ty, line);
@@ -669,14 +666,13 @@ impl Checker {
                     Some(Binding::ModuleMember(m, n)) => return self.call_module(&m, &n, args),
                     Some(Binding::Local { ty, .. }) => {
                         // a named lambda: its defaults may be left out
-                        if let Some(d) = self.lookup_hoisted(name) {
-                            if matches!(self.defs[d].kind, DefKind::Lambda) && self.defs[d].state == State::Done {
+                        if let Some(d) = self.lookup_hoisted(name)
+                            && matches!(self.defs[d].kind, DefKind::Lambda) && self.defs[d].state == State::Done {
                                 let f = self.var(name, ty);
                                 let params = self.defs[d].params.clone();
                                 let xs = self.arrange_args(d, name, &params, args, named, 0);
                                 return self.apply(f, xs);
                             }
-                        }
                     }
                     Some(Binding::Member { .. }) => {}
                     None => {
@@ -693,16 +689,13 @@ impl Checker {
                 if let ast::Expression::Import(m) = &**object {
                     return self.call_module(m, member, args);
                 }
-                if let ast::Expression::Identifier(n) = &**object {
-                    if n == "self" {
-                        if let FrameKind::Ctor(tid) | FrameKind::Method(tid) = self.frame_ref().kind {
-                            if let Some(m) = self.method_through_parents(tid, member) {
+                if let ast::Expression::Identifier(n) = &**object
+                    && n == "self"
+                        && let FrameKind::Ctor(tid) | FrameKind::Method(tid) = self.frame_ref().kind
+                            && let Some(m) = self.method_through_parents(tid, member) {
                                 let _ = m;
                                 return self.call_def_by_name(member, args, named, expected);
                             }
-                        }
-                    }
-                }
                 return self.check_method_call(object, member, args, named, expected);
             }
             _ => {}
@@ -879,8 +872,8 @@ impl Checker {
         }
         // a dictionary element used as the receiver of a mutation is the
         // element itself (a missing key aborts)
-        if matches!(member, "push" | "pop" | "sort" | "set" | "remove" | "delete") {
-            if let (ExprKind::Dict { .. }, Type::Data(MAYBE, _)) = (&recv.kind, self.shallow(&recv.ty)) {
+        if matches!(member, "push" | "pop" | "sort" | "set" | "remove" | "delete")
+            && let (ExprKind::Dict { .. }, Type::Data(MAYBE, _)) = (&recv.kind, self.shallow(&recv.ty)) {
                 self.effect(Effect::ABORT);
                 let inner = match self.shallow(&recv.ty) {
                     Type::Data(MAYBE, a) => a[0].clone(),
@@ -888,7 +881,6 @@ impl Checker {
                 };
                 recv = self.expr(ExprKind::Builtin("maybe.unwrap".into(), vec![recv]), inner);
             }
-        }
         let rt = self.shallow(&recv.ty);
         if let Type::Data(tid, _) = &rt {
             let tid = *tid;
@@ -902,8 +894,8 @@ impl Checker {
             }
         }
         // a function-valued field
-        if let Type::Data(tid, _) = &rt {
-            if self.types[*tid].field_index(member).is_some() {
+        if let Type::Data(tid, _) = &rt
+            && self.types[*tid].field_index(member).is_some() {
                 let f = self.check_member_of(recv.clone(), member);
                 if let Type::Fn(..) = self.shallow(&f.ty) {
                     let mut xs = Vec::new();
@@ -919,7 +911,6 @@ impl Checker {
                     return self.expr(ExprKind::CallClosure(Box::new(f), xs), ret);
                 }
             }
-        }
         if !named.is_empty() {
             self.error(line, "builtin methods take positional arguments");
         }
@@ -1032,12 +1023,11 @@ impl Checker {
         let rt = self.shallow(&recv.ty);
         if let Type::Data(tid, _) = &rt {
             let tid = *tid;
-            if self.types[tid].field_index(member).is_none() {
-                if let Some(m) = self.method_through_parents(tid, member) {
+            if self.types[tid].field_index(member).is_none()
+                && let Some(m) = self.method_through_parents(tid, member) {
                     self.error(line, format!("{}.{} is a method: call it, or wrap it in a lambda", self.types[tid].name, member));
                     let _ = m;
                 }
-            }
         }
         let ty = self.fresh();
         let subject = recv.ty.clone();
@@ -1821,7 +1811,7 @@ pub(crate) fn mentions_dollar(e: &ast::Expression) -> bool {
         E::BinaryOp { left, right, .. } => mentions_dollar(left) || mentions_dollar(right),
         E::UnaryOp { operand, .. } => mentions_dollar(operand),
         E::Lambda { .. } => false,
-        E::Block(stmts) => stmts.iter().any(|s| stmt_mentions_dollar(s)),
+        E::Block(stmts) => stmts.iter().any(stmt_mentions_dollar),
         E::Call { function, args, named_args } => mentions_dollar(function) || args.iter().any(mentions_dollar) || named_args.iter().any(|(_, a)| mentions_dollar(a)),
         E::MemberAccess { object, .. } | E::SpreadMember { object } => mentions_dollar(object),
         E::Index { object, index } => mentions_dollar(object) || mentions_dollar(index),

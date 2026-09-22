@@ -245,13 +245,11 @@ impl Checker {
             // a method name that only one builtin type has fixes the receiver
             if let Class::Method(name, _, _) = &c.class {
                 let has_class_method = self.types.iter().any(|t| t.method(name).is_some());
-                if !has_class_method {
-                    if let Some(t) = unique_receiver(&mut self.store, name) {
-                        if self.store.unify(&subject, &t).is_ok() {
+                if !has_class_method
+                    && let Some(t) = unique_receiver(&mut self.store, name)
+                        && self.store.unify(&subject, &t).is_ok() {
                             return self.solve_one(id);
                         }
-                    }
-                }
             }
             return false;
         }
@@ -447,10 +445,7 @@ impl Checker {
                                     let want = self.store.fresh_fn(args.clone(), ret.clone());
                                     // the method's first parameter is self
                                     let mut full = vec![subject.clone()];
-                                    match &want {
-                                        Type::Fn(ps, _, _) => full.extend(ps.iter().cloned()),
-                                        _ => {}
-                                    }
+                                    if let Type::Fn(ps, _, _) = &want { full.extend(ps.iter().cloned()) }
                                     let want_full = self.store.fresh_fn(full, ret.clone());
                                     match self.store.unify(&mt, &want_full) {
                                         Ok(()) => {
@@ -601,14 +596,12 @@ impl Checker {
         if let Some(idx) = dt.field_index(name) {
             return Some((vec![idx], dt.ctors[0].fields[idx].ty.clone()));
         }
-        if let Some(pidx) = dt.parent_field() {
-            if let Type::Data(ptid, _) = self.shallow(&dt.ctors[0].fields[pidx].ty) {
-                if let Some((mut path, t)) = self.field_through_parents(ptid, name) {
+        if let Some(pidx) = dt.parent_field()
+            && let Type::Data(ptid, _) = self.shallow(&dt.ctors[0].fields[pidx].ty)
+                && let Some((mut path, t)) = self.field_through_parents(ptid, name) {
                     path.insert(0, pidx);
                     return Some((path, t));
                 }
-            }
-        }
         None
     }
 
@@ -618,11 +611,10 @@ impl Checker {
         if let Some(m) = dt.method(name) {
             return Some(m);
         }
-        if let Some(pidx) = dt.parent_field() {
-            if let Type::Data(ptid, _) = self.shallow(&dt.ctors[0].fields[pidx].ty) {
+        if let Some(pidx) = dt.parent_field()
+            && let Type::Data(ptid, _) = self.shallow(&dt.ctors[0].fields[pidx].ty) {
                 return self.method_through_parents(ptid, name);
             }
-        }
         None
     }
 

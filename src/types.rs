@@ -369,11 +369,10 @@ impl TypeStore {
     fn adjust_levels(&mut self, t: &Type, level: u32) {
         match self.shallow(t) {
             Type::Var(w) => {
-                if let Binding::Unbound { level: l } = &mut self.vars[w as usize] {
-                    if *l > level {
+                if let Binding::Unbound { level: l } = &mut self.vars[w as usize]
+                    && *l > level {
                         *l = level;
                     }
-                }
             }
             Type::List(e) | Type::Map(e) => self.adjust_levels(&e, level),
             Type::Fn(ps, r, _) => {
@@ -399,11 +398,10 @@ impl TypeStore {
     }
 
     fn bind(&mut self, v: TVar, t: Type) -> Result<(), UnifyError> {
-        if let Type::Var(w) = self.shallow(&t) {
-            if w == v {
+        if let Type::Var(w) = self.shallow(&t)
+            && w == v {
                 return Ok(());
             }
-        }
         if self.occurs(v, &t) {
             return Err(UnifyError { left: Type::Var(v), right: t });
         }

@@ -585,12 +585,11 @@ impl<'a> Lower<'a> {
         let mut ctors = Vec::new();
         for d in set {
             let et = self.env_ty(*d, None, &[], line);
-            if let Ty::Named(_, args) = &et {
-                if !args.is_empty() {
+            if let Ty::Named(_, args) = &et
+                && !args.is_empty() {
                     let dn = self.def_names[*d].clone();
                     self.error(line, format!("the function {} captures values of a generic type and cannot be mixed with other functions in one value", dn));
                 }
-            }
             ctors.push((format!("{}.{}", name, self.def_names[*d].replace('.', "_")), vec![("env".to_string(), et)]));
         }
         self.types.push(TypeDef { name: name.clone(), params: vec![], ctors });
@@ -731,11 +730,10 @@ impl<'a> Lower<'a> {
     fn only_called(&self, def: &Def, name: &str, kinds: &[Vec<bool>]) -> bool {
         let mut ok = true;
         let check_arg = |a: &Expr, callee_template: bool, ok: &mut bool| {
-            if let ExprKind::Var(v) = &a.kind {
-                if v == name && !callee_template {
+            if let ExprKind::Var(v) = &a.kind
+                && v == name && !callee_template {
                     *ok = false;
                 }
-            }
         };
         walk_block(&def.body, &mut |e: &Expr| {
             match &e.kind {
@@ -1189,7 +1187,7 @@ impl<'a> Lower<'a> {
                         }
                         parts.push(piece);
                     }
-                    let inner = parts.into_iter().reduce(|a, b| Term::cat(a, b)).unwrap_or(Term::Str(String::new()));
+                    let inner = parts.into_iter().reduce(Term::cat).unwrap_or(Term::Str(String::new()));
                     let text = if c.fields.is_empty() {
                         Term::Str(label)
                     } else if matches!(t.kind, DataKind::Declared) {
@@ -1576,11 +1574,10 @@ fn mark_body(b: &mut Body, counts: &HashMap<String, usize>) {
                     }
                 }
                 // `1n++p`: a reusable predecessor
-                if let ir::Pat::Succ(p) = pat {
-                    if !p.starts_with('+') && counts.get(p.as_str()).cloned().unwrap_or(0) > 1 {
+                if let ir::Pat::Succ(p) = pat
+                    && !p.starts_with('+') && counts.get(p.as_str()).cloned().unwrap_or(0) > 1 {
                         *p = format!("+{}", p);
                     }
-                }
                 mark_body(body, counts);
             }
         }

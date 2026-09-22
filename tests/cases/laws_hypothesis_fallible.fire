@@ -1,0 +1,29 @@
+# laws with a hypothesis and over a fallible def; a nested match on a piece
+def sorted_list(xs)
+    match xs
+        [] => true
+        [a, ...rest] =>
+            match rest
+                [] => true
+                [b, ..._] => a <= b and sorted_list(rest)
+
+def insert(x, xs)
+    match xs
+        [] => [x]
+        [h, ...t] => if x <= h do [x] + xs else [h] + insert(x, t)
+
+def head_or(xs, d)
+    if len(xs) == 0 do d else xs[0]
+
+law insert_keeps_sorted
+    for x: int, xs: [int] if sorted_list(xs)
+    sorted_list(insert(x, xs))
+
+law head_of_single
+    for x: int
+    head_or([x], 0) == x
+
+law head_closed
+    head_or([4, 5], 0) == 4
+
+print(insert(3, [1, 2, 5]), head_or([], 9))

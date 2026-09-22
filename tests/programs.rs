@@ -158,6 +158,6 @@ fn laws_are_classified_and_property_tested() {
     let out = String::from_utf8_lossy(&run.stdout);
     assert!(run.status.success(), "{}", out);
     for law in ["cycle_of_three", "twice_small", "twice_length"] {
-        assert!(out.contains(&format!("law {}: holds on", law)), "{}", out);
+        assert!(out.contains(&format!("law {}: holds", law)), "{}", out);
     }
 }

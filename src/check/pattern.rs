@@ -25,13 +25,12 @@ impl Checker {
                     }
                     return Pat::Con(tid, ci, vec![]);
                 }
-                if maybe_value {
-                    if let Type::Data(MAYBE, args) = &st {
+                if maybe_value
+                    && let Type::Data(MAYBE, args) = &st {
                         let inner = args[0].clone();
                         self.declare(name, Binding::Local { ty: inner, mutable: false });
                         return Pat::Con(MAYBE, 1, vec![Pat::Bind(name.clone())]);
                     }
-                }
                 self.declare(name, Binding::Local { ty: subject.clone(), mutable: false });
                 Pat::Bind(name.clone())
             }
@@ -91,13 +90,12 @@ impl Checker {
             }
             ast::Pattern::List(items) => {
                 // a pair destructures as [key, value]
-                if let Type::Data(PAIR, args) = &st {
-                    if items.len() == 2 && !items.iter().any(|i| matches!(i, ast::Pattern::Rest(_))) {
+                if let Type::Data(PAIR, args) = &st
+                    && items.len() == 2 && !items.iter().any(|i| matches!(i, ast::Pattern::Rest(_))) {
                         let k = self.check_pattern(&items[0], &args[0].clone(), false);
                         let v = self.check_pattern(&items[1], &args[1].clone(), false);
                         return Pat::Con(PAIR, 0, vec![k, v]);
                     }
-                }
                 let elem = match &st {
                     Type::List(e) => (**e).clone(),
                     _ => {
@@ -210,8 +208,8 @@ impl Checker {
                 let vt = value.ty.clone();
                 let mut out = vec![Stmt { kind: StmtKind::Let { name: tmp.clone(), value }, line }];
                 let st = self.shallow(&vt);
-                if let Type::Data(PAIR, args) = &st {
-                    if items.len() == 2 {
+                if let Type::Data(PAIR, args) = &st
+                    && items.len() == 2 {
                         for (i, it) in items.iter().enumerate() {
                             let tv = self.var(&tmp, vt.clone());
                             let x = self.expr(ExprKind::Field(Box::new(tv), PAIR, i), args[i].clone());
@@ -219,11 +217,10 @@ impl Checker {
                         }
                         return out;
                     }
-                }
                 // [a, b] on a value not known yet: a pair or a list, decided
                 // later; each side is an indexed read
-                if let Type::Var(_) = &st {
-                    if items.len() == 2 && !items.iter().any(|i| matches!(i, ast::Pattern::Rest(_))) {
+                if let Type::Var(_) = &st
+                    && items.len() == 2 && !items.iter().any(|i| matches!(i, ast::Pattern::Rest(_))) {
                         for (i, it) in items.iter().enumerate() {
                             let tv = self.var(&tmp, vt.clone());
                             let n = self.lit(Lit::Int(i as i64));
@@ -233,7 +230,6 @@ impl Checker {
                         }
                         return out;
                     }
-                }
                 let elem = match &st {
                     Type::List(e) => (**e).clone(),
                     _ => {

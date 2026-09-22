@@ -60,11 +60,10 @@ impl Checker {
                 vec![]
             }
             ast::Statement::Declaration { is_public, is_mutable, pattern, value } => {
-                if let FrameKind::Ctor(tid) = self.frame_ref().kind {
-                    if self.frame_ref().scopes.len() == 1 {
+                if let FrameKind::Ctor(tid) = self.frame_ref().kind
+                    && self.frame_ref().scopes.len() == 1 {
                         return self.check_member_declaration(tid, *is_public, *is_mutable, pattern, value);
                     }
-                }
                 if *is_public {
                     self.error(line, "`public` is only valid inside a class constructor");
                 }
@@ -162,18 +161,14 @@ impl Checker {
             ast::Statement::Expression(e) => {
                 let x = self.check_expr(e, None);
                 // `xs.push(v)`, `xs.sort()`, `m.set(k, v)` as a statement store back
-                if let ast::Expression::Call { function, .. } = e {
-                    if let ast::Expression::MemberAccess { member, .. } = &**function {
-                        if matches!(member.as_str(), "push" | "sort" | "set" | "remove" | "delete") {
-                            if let ExprKind::Dict { id, args } = &x.kind {
-                                if matches!(&self.store.constraints[*id].class, Class::Method(..)) && self.is_path(&args[0]) {
+                if let ast::Expression::Call { function, .. } = e
+                    && let ast::Expression::MemberAccess { member, .. } = &**function
+                        && matches!(member.as_str(), "push" | "sort" | "set" | "remove" | "delete")
+                            && let ExprKind::Dict { id, args } = &x.kind
+                                && matches!(&self.store.constraints[*id].class, Class::Method(..)) && self.is_path(&args[0]) {
                                     let recv = args[0].clone();
                                     return self.rebind_path(&recv, x);
                                 }
-                            }
-                        }
-                    }
-                }
                 vec![self.stmt(StmtKind::Expr(x))]
             }
         }
@@ -250,12 +245,11 @@ impl Checker {
     /// value.
     fn match_subject_is_maybe(&mut self, subject: &Type, arms: &[ast::MatchArm]) -> bool {
         let has_nothing = arms.iter().any(|a| matches!(&a.pattern, ast::Pattern::Literal(ast::Expression::Nothing)));
-        if has_nothing {
-            if let Type::Var(_) = self.shallow(subject) {
+        if has_nothing
+            && let Type::Var(_) = self.shallow(subject) {
                 let inner = self.fresh();
                 let _ = self.store.unify(subject, &Type::maybe(inner));
             }
-        }
         matches!(self.shallow(subject), Type::Data(MAYBE, _)) && has_nothing
     }
 
@@ -303,28 +297,24 @@ impl Checker {
         // a plain name that is not bound yet: a new immutable binding
         if let [(ast::Pattern::Identifier(name), ast::AssignmentOp::Assign)] = targets {
             // a private method declared by assignment in a class body
-            if let (Some(Binding::Func(m)), ast::Expression::Lambda { .. }) = (self.lookup(name), value) {
-                if let FrameKind::Ctor(tid) = self.frame_ref().kind {
-                    if self.types[tid].method(name) == Some(m) {
+            if let (Some(Binding::Func(m)), ast::Expression::Lambda { .. }) = (self.lookup(name), value)
+                && let FrameKind::Ctor(tid) = self.frame_ref().kind
+                    && self.types[tid].method(name) == Some(m) {
                         self.ensure_def(m, line);
                         return vec![];
                     }
-                }
-            }
             if self.lookup(name).is_none() && !self.is_global(name) {
-                if let FrameKind::Ctor(tid) = self.frame_ref().kind {
-                    if self.frame_ref().scopes.len() == 1 {
+                if let FrameKind::Ctor(tid) = self.frame_ref().kind
+                    && self.frame_ref().scopes.len() == 1 {
                         return self.check_member_declaration(tid, false, false, &targets[0].0, value);
                     }
-                }
                 return self.check_let(&targets[0].0, value, false);
             }
         }
-        if let [(pat @ (ast::Pattern::List(_) | ast::Pattern::Object(_) | ast::Pattern::Typed { .. }), ast::AssignmentOp::Assign)] = targets {
-            if self.pattern_all_new(pat) {
+        if let [(pat @ (ast::Pattern::List(_) | ast::Pattern::Object(_) | ast::Pattern::Typed { .. }), ast::AssignmentOp::Assign)] = targets
+            && self.pattern_all_new(pat) {
                 return self.check_let(pat, value, false);
             }
-        }
         // `x = stack.pop()`: a mutating call whose value is bound
         let mut stmts = Vec::new();
         let x = self.check_expr(value, None);

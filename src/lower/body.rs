@@ -70,6 +70,9 @@ pub struct FnCtx {
     pub ret: Ty,
     /// Fire types of the locals, for match compilation.
     pub local_types: HashMap<String, Type>,
+    /// A name bound to a pattern variable (`rest` for `__f36`): a match on
+    /// the name is a match on the pattern variable, which Bend can inspect.
+    pub aliases: HashMap<String, String>,
 }
 
 impl FnCtx {
@@ -91,6 +94,7 @@ impl FnCtx {
             loop_: None,
             ret: img.ret.clone(),
             local_types: HashMap::new(),
+            aliases: HashMap::new(),
         }
     }
 
@@ -112,6 +116,7 @@ impl FnCtx {
             loop_: None,
             ret: Ty::Unit,
             local_types: HashMap::new(),
+            aliases: HashMap::new(),
         }
     }
 
@@ -199,7 +204,7 @@ impl<'a> Lower<'a> {
                 _ => ctx.bind(&local_name(&p.name), img.params[i].clone(), Some(&p.ty)),
             }
         }
-        for (n, t) in &unit_def.params.iter().zip(unit_img.fnp.iter()).filter_map(|(p, k)| match k {
+        for (n, t) in &unit_def.params.iter().zip(unit_img.fnp.iter()).filter_map(|(_, k)| match k {
             FnParamKind::Template { env, env_ty, .. } => Some((env.clone(), Ty::Param(env_ty.clone()))),
             _ => None,
         }).collect::<Vec<_>>() {
@@ -247,11 +252,10 @@ impl<'a> Lower<'a> {
                 // exactly that type (any value does: the branch is dead)
                 let mut vals: Vec<(TVar, Term)> = vec![];
                 for (i, p) in def.params.iter().enumerate() {
-                    if let (Type::Var(v), FnParamKind::Value) = (self.store.shallow(&p.ty), &img.fnp[i]) {
-                        if !vals.iter().any(|(w, _)| *w == v) {
+                    if let (Type::Var(v), FnParamKind::Value) = (self.store.shallow(&p.ty), &img.fnp[i])
+                        && !vals.iter().any(|(w, _)| *w == v) {
                             vals.push((v, Term::var(&local_name(&p.name))));
                         }
-                    }
                 }
                 let t = self.default_value(ctx, &def.ret, &vals, line);
                 let rty = ctx.ret.clone();
@@ -438,7 +442,9 @@ impl<'a> Lower<'a> {
                     let n = local_name(name);
                     out.push(ir::Stmt::Let { name: n.clone(), reusable: false, ty: Some(ty.clone()), value: t });
                     ctx.bind(&n, ty, Some(&value.ty));
-                    ctx.structural = ctx.structural && true;
+                    // a name bound to something else is no longer a piece
+                    ctx.pieces.remove(&n);
+                    ctx.aliases.remove(&n);
                 }
                 StmtKind::Bind { name, def } => {
                     let e = Expr { kind: ExprKind::Lambda(*def), ty: self.core.defs[*def].scheme.ty.clone(), line };
@@ -449,11 +455,10 @@ impl<'a> Lower<'a> {
                 }
                 StmtKind::Expr(e) => {
                     // the last expression of a value leaf is the answer
-                    if i + 1 == stmts.len() {
-                        if let Leaf::Value = leaf {
+                    if i + 1 == stmts.len()
+                        && let Leaf::Value = leaf {
                             return Some(self.expr_tail(ctx, e, out));
                         }
-                    }
                     self.expr_stmt(ctx, e, out);
                 }
                 StmtKind::Return(e) => {
@@ -514,33 +519,29 @@ impl<'a> Lower<'a> {
         let line = e.line;
         // a match on a parameter (or a piece of one) as the value: a real
         // match, so that recursion under it descends structurally
-        if let ExprKind::Match(subject, arms) = &e.kind {
-            if self.match_is_structural(ctx, subject, arms) {
-                if let Some(ans) = self.lower_match_stmt(ctx, subject, arms, &[], out, &Leaf::Value, line) {
+        if let ExprKind::Match(subject, arms) = &e.kind
+            && self.match_is_structural(ctx, subject, arms)
+                && let Some(ans) = self.lower_match_stmt(ctx, subject, arms, &[], out, &Leaf::Value, line) {
                     return ans;
                 }
-            }
-        }
         if ctx.mode != Mode::Pure && ctx.loop_.is_none() {
             let mode = self.expr_mode(ctx, e);
-            if mode == ctx.mode {
-                if let ExprKind::Call { .. } | ExprKind::CallClosure(..) | ExprKind::Builtin(..) | ExprKind::Abort(_) = &e.kind {
+            if mode == ctx.mode
+                && let ExprKind::Call { .. } | ExprKind::CallClosure(..) | ExprKind::Builtin(..) | ExprKind::Abort(_) = &e.kind {
                     // lower without binding the outermost call
                     let mut sub = Vec::new();
                     let t = self.expr(ctx, e, &mut sub);
                     // the last statement is the bind of the call itself
-                    if let Some(ir::Stmt::Bind { name, value, .. }) = sub.last().cloned() {
-                        if matches!(&t, Term::Var(v) if *v == name) {
+                    if let Some(ir::Stmt::Bind { name, value, .. }) = sub.last().cloned()
+                        && matches!(&t, Term::Var(v) if *v == name) {
                             sub.pop();
                             out.extend(sub);
                             let _ = line;
                             return Ans::Monadic(value);
                         }
-                    }
                     out.extend(sub);
                     return Ans::Value(t);
                 }
-            }
         }
         let t = self.expr(ctx, e, out);
         Ans::Value(t)
@@ -572,14 +573,13 @@ impl<'a> Lower<'a> {
             let t = self.expr(ctx, e, &mut sub);
             // a unit action is a step of the do-block; a value is bound and dropped
             let unit = matches!(self.store.shallow(&e.ty), Type::Unit);
-            if let Some(ir::Stmt::Bind { name, value, .. }) = sub.last().cloned() {
-                if unit && matches!(&t, Term::Var(v) if *v == name) {
+            if let Some(ir::Stmt::Bind { name, value, .. }) = sub.last().cloned()
+                && unit && matches!(&t, Term::Var(v) if *v == name) {
                     sub.pop();
                     out.extend(sub);
                     out.push(ir::Stmt::Step(value));
                     return;
                 }
-            }
             out.extend(sub);
             return;
         }
@@ -720,11 +720,10 @@ impl<'a> Lower<'a> {
     fn block_has_self_call(&self, ctx: &FnCtx, b: &Block) -> bool {
         let mut found = false;
         walk_block(b, &mut |e: &Expr| {
-            if let ExprKind::Call { def, .. } = &e.kind {
-                if *def == ctx.self_def {
+            if let ExprKind::Call { def, .. } = &e.kind
+                && *def == ctx.self_def {
                     found = true;
                 }
-            }
         });
         found
     }
@@ -954,6 +953,7 @@ impl<'a> Lower<'a> {
             ExprKind::Var(v) => Some(local_name(v)),
             _ => None,
         };
+
         ctx.structural && !ctx.term_mode && subject_var.as_ref().is_some_and(|v| ctx.pieces.contains(v)) && arms.iter().all(|a| a.guard.is_none() && self.constructor_shaped(&a.pat))
     }
 
@@ -964,7 +964,7 @@ impl<'a> Lower<'a> {
         };
         let structural = self.match_is_structural(ctx, subject, arms);
         // arm bodies as statement lists
-        let arm_stmts: Vec<Vec<Stmt>> = arms.iter().map(|a| arm_block(a)).collect();
+        let arm_stmts: Vec<Vec<Stmt>> = arms.iter().map(arm_block).collect();
         if structural {
             // a real match: the statements so far are sunk into every arm,
             // and the rest of the block follows each arm
@@ -976,7 +976,9 @@ impl<'a> Lower<'a> {
                 }
                 Row { pats: vec![a.pat.clone()], guard: None, body: stmts, binds: vec![] }
             }).collect();
+            // match the pattern variable the name stands for
             let sv = subject_var.unwrap();
+            let sv = ctx.aliases.get(&sv).cloned().unwrap_or(sv);
             let sty = subject.ty.clone();
             let body = self.compile_rows(ctx, vec![(sv, sty)], rows, true, leaf, &sunk, line);
             return Some(Ans::Whole(body));
@@ -1265,11 +1267,10 @@ impl<'a> Lower<'a> {
         let rty = ctx.wrap(ret.clone());
         let mut lits: Vec<Lit> = Vec::new();
         for r in &rows {
-            if let Pat::Lit(l) = &r.pats[0] {
-                if !lits.contains(l) {
+            if let Pat::Lit(l) = &r.pats[0]
+                && !lits.contains(l) {
                     lits.push(l.clone());
                 }
-            }
         }
         // the rows accepting a value: `Some(l)` a literal, `None` any other
         let accept = |want: Option<&Lit>| -> Vec<Row> {
@@ -1357,6 +1358,8 @@ impl<'a> Lower<'a> {
             sub.bind(n, bt, Some(t));
             if sub.pieces.contains(from) {
                 sub.pieces.insert(n.clone());
+                let target = sub.aliases.get(from).cloned().unwrap_or_else(|| from.clone());
+                sub.aliases.insert(n.clone(), target);
             }
         }
         let ans = self.lower_stmts_into(&mut sub, &row.body, &mut out, leaf);
@@ -1436,7 +1439,7 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
-                Iter::Items(e, cid) => {
+                Iter::Items(_, cid) => {
                     let c = self.store.constraints[*cid].clone();
                     let elem = match &c.class {
                         Class::Iter(t) => t.clone(),
@@ -1450,15 +1453,14 @@ impl<'a> Lower<'a> {
                     match acc.take() {
                         None => (list, elem),
                         Some((prev, pt)) => {
-                            if let Term::Var(v) = &prev {
-                                if v == "__counter" {
+                            if let Term::Var(v) = &prev
+                                && v == "__counter" {
                                     // a counter before this source
                                     let et = self.ty_in(ctx, &elem, line);
                                     let start = self.counter_start(ctx, iters, out);
                                     acc = Some((Term::call("F.list.enumerate_from", vec![Term::TyArg(et), list, start]), Type::pair(Type::Int, elem)));
                                     continue;
                                 }
-                            }
                             let at = self.ty_in(ctx, &pt, line);
                             let bt = self.ty_in(ctx, &elem, line);
                             (Term::call("F.list.zip", vec![Term::TyArg(at), Term::TyArg(bt), prev, list]), Type::pair(pt, elem))
@@ -1530,7 +1532,7 @@ impl<'a> Lower<'a> {
         let env_ty = self.pack_ty(&in_tys);
         // the body def
         let (elem_param, elem_bind): (Vec<(String, Ty)>, Vec<Stmt>) = match &kind {
-            LoopKind::For { elem_ty, pat, .. } => {
+            LoopKind::For { elem_ty, .. } => {
                 let et = self.ty_in(ctx, elem_ty, line);
                 (vec![("__x".to_string(), et)], vec![])
             }

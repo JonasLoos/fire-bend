@@ -67,16 +67,12 @@ pub(crate) enum State {
 /// The source of a hoisted def, inferred when first needed.
 #[derive(Debug, Clone)]
 pub(crate) struct Source {
-    pub is_public: bool,
     pub params: Vec<ast::Param>,
     pub return_type: Option<ast::Expression>,
     pub body: Vec<ast::Stmt>,
     /// The frame index and scope depth where the def was declared.
     pub frame: usize,
     pub depth: usize,
-    /// Whether the def is a class constructor (its body or parameters
-    /// declare public members).
-    pub is_class: bool,
 }
 
 /// A def while it is being checked.
@@ -566,24 +562,22 @@ impl Checker {
             _ => None,
         };
         for s in stmts {
-            if let ast::Statement::Def { is_public, is_unsafe, name, params, return_type, body } = &s.node {
+            if let ast::Statement::Def { is_public: _, is_unsafe, name, params, return_type, body } = &s.node {
                 if let Some(tid) = in_ctor {
                     self.declare_method(tid, name, params, return_type.clone(), body.clone(), *is_unsafe, s.line);
                     continue;
                 }
-                let is_class = params.iter().any(|p| p.is_public) || body.iter().any(|b| stmt_declares_public(b));
+                let is_class = params.iter().any(|p| p.is_public) || body.iter().any(stmt_declares_public);
                 let unit = if self.frame_ref().kind == FrameKind::Main { None } else { Some(self.unit()) };
                 let kind = DefKind::Plain;
                 let id = self.new_def(name, kind, unit, s.line);
                 self.defs[id].unsafe_ = *is_unsafe || self.frame_ref().unsafe_;
                 self.defs[id].source = Some(Source {
-                    is_public: *is_public,
                     params: params.clone(),
                     return_type: return_type.clone(),
                     body: body.clone(),
                     frame: frame_index,
                     depth,
-                    is_class,
                 });
                 if is_class {
                     let tid = self.declare_class(name, id, body, s.line);
@@ -859,11 +853,10 @@ impl Checker {
             }
         }
         // a trailing expression statement is the return value
-        if matches!(body.stmts.last(), Some(Stmt { kind: StmtKind::Expr(_), .. })) {
-            if let Some(Stmt { kind: StmtKind::Expr(e), line: l }) = body.stmts.pop() {
+        if matches!(body.stmts.last(), Some(Stmt { kind: StmtKind::Expr(_), .. }))
+            && let Some(Stmt { kind: StmtKind::Expr(e), line: l }) = body.stmts.pop() {
                 body.stmts.push(Stmt { kind: StmtKind::Return(e), line: l });
             }
-        }
         self.join_return_values(body, &ret, line);
     }
 
@@ -1065,7 +1058,7 @@ impl Checker {
         }
     }
 
-    fn finish(mut self) -> Program {
+    fn finish(self) -> Program {
         let mut defs = Vec::new();
         let n = self.defs.len();
         for id in 0..n {

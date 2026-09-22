@@ -42,8 +42,9 @@ pub fn test_program(program: &ast::Program, core: &Program) -> Result<ast::Progr
                 for p in pools.iter_mut() {
                     p.truncate(per);
                 }
-                out.push(predicate_def(name, vars, hyp.as_ref(), claim, s.line));
-                checks.extend(check_loop(name, vars, &pools, s.line));
+                let (defs, run) = check_law(name, vars, hyp.as_ref(), claim, &pools, s.line);
+                out.extend(defs);
+                checks.extend(run);
             }
             _ => {}
         }
@@ -78,92 +79,105 @@ fn int(i: i64) -> E {
     }
 }
 
-/// `def __law_name(x: T, ...)`: whether the law holds for these values
-/// (a false hypothesis makes it hold).
-fn predicate_def(name: &str, vars: &[(String, E)], hyp: Option<&E>, claim: &E, line: usize) -> Stmt {
+/// `def __law_name(x: T, ...)`: whether the claim holds for these values;
+/// `def __hyp_name(x: T, ...)`: whether they meet the hypothesis.
+fn predicate_def(prefix: &str, name: &str, vars: &[(String, E)], body: &E, line: usize) -> Stmt {
     let params = vars.iter().map(|(v, t)| ast::Param {
         is_public: false,
         is_var: false,
         pattern: Pattern::Typed { pattern: Box::new(Pattern::Identifier(v.clone())), type_expr: t.clone() },
         default: None,
     }).collect();
-    let mut body = Vec::new();
-    if let Some(h) = hyp {
-        body.push(stmt(S::If {
-            condition: E::UnaryOp { op: ast::UnaryOperator::Not, operand: Box::new(h.clone()) },
-            body: vec![stmt(S::Return(Some(E::Boolean(true))), line)],
-            elif_branches: vec![],
-            else_body: None,
-        }, line));
-    }
-    body.push(stmt(S::Return(Some(claim.clone())), line));
-    stmt(S::Def { is_public: false, is_unsafe: false, name: format!("__law_{}", name), params, return_type: None, body }, line)
+    stmt(S::Def { is_public: false, is_unsafe: false, name: format!("{}_{}", prefix, name), params, return_type: None, body: vec![stmt(S::Return(Some(body.clone())), line)] }, line)
 }
 
-/// Nested loops over the instances; the first counterexample is reported.
-fn check_loop(name: &str, vars: &[(String, E)], pools: &[Vec<E>], line: usize) -> Vec<Stmt> {
+fn text(parts: Vec<ast::FStringPart>) -> E {
+    E::FString(parts)
+}
+
+fn t(s: &str) -> ast::FStringPart {
+    ast::FStringPart::Text(s.into())
+}
+
+fn v(name: &str) -> ast::FStringPart {
+    ast::FStringPart::Expression(E::Identifier(name.into()), None)
+}
+
+fn set(name: &str, value: E, line: usize) -> Stmt {
+    stmt(S::Assignment { targets: vec![(Pattern::Identifier(name.into()), ast::AssignmentOp::Assign)], value }, line)
+}
+
+fn when(cond: E, body: Vec<Stmt>, else_body: Option<Vec<Stmt>>, line: usize) -> Stmt {
+    stmt(S::If { condition: cond, body, elif_branches: vec![], else_body }, line)
+}
+
+fn eq(a: E, b: E) -> E {
+    E::BinaryOp { left: Box::new(a), op: ast::BinaryOperator::Eq, right: Box::new(b) }
+}
+
+fn not(a: E) -> E {
+    E::UnaryOp { op: ast::UnaryOperator::Not, operand: Box::new(a) }
+}
+
+/// The law's defs and the loops over the instances; the first
+/// counterexample is reported, and a law whose hypothesis no generated case
+/// meets is reported as untested.
+fn check_law(name: &str, vars: &[(String, E)], hyp: Option<&E>, claim: &E, pools: &[Vec<E>], line: usize) -> (Vec<Stmt>, Vec<Stmt>) {
+    let mut defs = vec![predicate_def("__law", name, vars, claim, line)];
+    if let Some(h) = hyp {
+        defs.push(predicate_def("__hyp", name, vars, h, line));
+    }
     let bad = format!("__bad_{}", name);
-    let count = format!("__cases_{}", name);
+    let met = format!("__met_{}", name);
     let args: Vec<E> = vars.iter().map(|(v, _)| E::Identifier(v.clone())).collect();
     // "x = {x}, t = {t}"
     let mut parts = Vec::new();
-    for (i, (v, _)) in vars.iter().enumerate() {
+    for (i, (n, _)) in vars.iter().enumerate() {
         if i > 0 {
-            parts.push(ast::FStringPart::Text(", ".into()));
+            parts.push(t(", "));
         }
-        parts.push(ast::FStringPart::Text(format!("{} = ", v)));
-        parts.push(ast::FStringPart::Expression(E::Identifier(v.clone()), None));
-    }
-    let record = stmt(S::If {
-        condition: E::BinaryOp { left: Box::new(E::Identifier(bad.clone())), op: ast::BinaryOperator::Eq, right: Box::new(E::Str(String::new())) },
-        body: vec![stmt(S::Assignment { targets: vec![(Pattern::Identifier(bad.clone()), ast::AssignmentOp::Assign)], value: E::FString(parts) }, line)],
-        elif_branches: vec![],
-        else_body: None,
-    }, line);
-    let mut inner = vec![
-        stmt(S::If {
-            condition: E::UnaryOp { op: ast::UnaryOperator::Not, operand: Box::new(call(&format!("__law_{}", name), args)) },
-            body: vec![record],
-            elif_branches: vec![],
-            else_body: None,
-        }, line),
-        stmt(S::Assignment { targets: vec![(Pattern::Identifier(count.clone()), ast::AssignmentOp::AddAssign)], value: int(1) }, line),
-    ];
-    for (i, (v, _)) in vars.iter().enumerate().rev() {
-        inner = vec![stmt(S::For { pattern: Pattern::Identifier(v.clone()), iterables: vec![E::List(pools[i].clone())], body: inner }, line)];
+        parts.push(t(&format!("{} = ", n)));
+        parts.push(v(n));
     }
     if vars.is_empty() {
-        inner = vec![stmt(S::If {
-            condition: E::UnaryOp { op: ast::UnaryOperator::Not, operand: Box::new(call(&format!("__law_{}", name), vec![])) },
-            body: vec![stmt(S::Assignment { targets: vec![(Pattern::Identifier(bad.clone()), ast::AssignmentOp::Assign)], value: E::Str("the closed claim".into()) }, line)],
-            elif_branches: vec![],
-            else_body: None,
-        }, line), stmt(S::Assignment { targets: vec![(Pattern::Identifier(count.clone()), ast::AssignmentOp::AddAssign)], value: int(1) }, line)];
+        parts.push(t("its sides"));
     }
-    let ok = E::FString(vec![
-        ast::FStringPart::Text(format!("law {}: holds on ", name)),
-        ast::FStringPart::Expression(E::Identifier(count.clone()), None),
-        ast::FStringPart::Text(" cases".into()),
-    ]);
-    let fail = E::FString(vec![
-        ast::FStringPart::Text(format!("law {}: FAILS for ", name)),
-        ast::FStringPart::Expression(E::Identifier(bad.clone()), None),
-    ]);
+    let record = when(eq(E::Identifier(bad.clone()), E::Str(String::new())), vec![set(&bad, text(parts), line)], None, line);
+    let test = when(not(call(&format!("__law_{}", name), args.clone())), vec![record], None, line);
+    let mut inner = match hyp {
+        Some(_) => vec![when(call(&format!("__hyp_{}", name), args), vec![
+            stmt(S::Assignment { targets: vec![(Pattern::Identifier(met.clone()), ast::AssignmentOp::AddAssign)], value: int(1) }, line),
+            test,
+        ], None, line)],
+        None => vec![test],
+    };
+    for (i, (n, _)) in vars.iter().enumerate().rev() {
+        inner = vec![stmt(S::For { pattern: Pattern::Identifier(n.clone()), iterables: vec![E::List(pools[i].clone())], body: inner }, line)];
+    }
+    let cases: usize = pools.iter().map(|p| p.len()).product();
+    let ok = match (vars.is_empty(), hyp.is_some()) {
+        (true, _) => text(vec![t(&format!("law {}: holds", name))]),
+        (false, false) => text(vec![t(&format!("law {}: holds on {} generated cases", name, cases))]),
+        (false, true) => text(vec![t(&format!("law {}: holds on the ", name)), v(&met), t(&format!(" of {} generated cases that meet its hypothesis", cases))]),
+    };
+    let fail = text(vec![t(&format!("law {}: FAILS for ", name)), v(&bad)]);
     let mut out = vec![
         stmt(S::Declaration { is_public: false, is_mutable: true, pattern: Pattern::Identifier(bad.clone()), value: E::Str(String::new()) }, line),
-        stmt(S::Declaration { is_public: false, is_mutable: true, pattern: Pattern::Identifier(count.clone()), value: int(0) }, line),
+        stmt(S::Declaration { is_public: false, is_mutable: true, pattern: Pattern::Identifier(met.clone()), value: int(0) }, line),
     ];
     out.extend(inner);
-    out.push(stmt(S::If {
-        condition: E::BinaryOp { left: Box::new(E::Identifier(bad.clone())), op: ast::BinaryOperator::Eq, right: Box::new(E::Str(String::new())) },
-        body: vec![stmt(S::Expression(call("print", vec![ok])), line)],
-        elif_branches: vec![],
-        else_body: Some(vec![
-            stmt(S::Expression(call("print", vec![fail])), line),
-            stmt(S::Assignment { targets: vec![(Pattern::Identifier("__all_hold".into()), ast::AssignmentOp::Assign)], value: E::Boolean(false) }, line),
-        ]),
-    }, line));
-    out
+    let report_ok = if hyp.is_some() {
+        when(eq(E::Identifier(met.clone()), int(0)),
+            vec![stmt(S::Expression(call("print", vec![text(vec![t(&format!("law {}: untested, no generated case meets its hypothesis", name))])])), line)],
+            Some(vec![stmt(S::Expression(call("print", vec![ok])), line)]), line)
+    } else {
+        stmt(S::Expression(call("print", vec![ok])), line)
+    };
+    out.push(when(eq(E::Identifier(bad.clone()), E::Str(String::new())), vec![report_ok], Some(vec![
+        stmt(S::Expression(call("print", vec![fail])), line),
+        set("__all_hold", E::Boolean(false), line),
+    ]), line));
+    (defs, out)
 }
 
 /// Sample values of a type, as Fire expressions: small, varied, and for a

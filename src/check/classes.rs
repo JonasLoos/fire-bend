@@ -127,11 +127,10 @@ impl Checker {
         self.types[tid].params.push(v);
         self.types[tid].ctors[0].fields.push(FieldDef { name: name.to_string(), ty: Type::Var(v), public });
         let idx = self.types[tid].ctors[0].fields.len() - 1;
-        if public {
-            if let DataKind::Class { show_order, .. } = &mut self.types[tid].kind {
+        if public
+            && let DataKind::Class { show_order, .. } = &mut self.types[tid].kind {
                 show_order.push(idx);
             }
-        }
         (idx, Type::Var(v))
     }
 
@@ -379,13 +378,12 @@ impl Checker {
         for (n, m) in methods {
             self.declare(&n, Binding::Func(m));
         }
-        if let Some(gp) = self.types[ptid].parent_field() {
-            if let Type::Data(gtid, gargs) = self.shallow(&ftys[gp]) {
+        if let Some(gp) = self.types[ptid].parent_field()
+            && let Type::Data(gtid, gargs) = self.shallow(&ftys[gp]) {
                 let mut p = path.clone();
                 p.push((ptid, gp));
                 self.declare_inherited(root, root_ty, gtid, &gargs, p);
             }
-        }
     }
 
     /// Read a member: the root local, projected along the path.
@@ -462,13 +460,11 @@ impl Checker {
         self.defs[id].unsafe_ = is_unsafe || self.frame_ref().unsafe_;
         self.defs[id].class = Some(tid);
         self.defs[id].source = Some(Source {
-            is_public: true,
             params: params.to_vec(),
             return_type,
             body,
             frame: frame_index,
             depth: 0,
-            is_class: false,
         });
         if let DataKind::Class { methods, .. } = &mut self.types[tid].kind {
             methods.retain(|(n, _)| n != name);

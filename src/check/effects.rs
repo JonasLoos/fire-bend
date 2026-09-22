@@ -36,11 +36,10 @@ impl Checker {
             });
             let mut stmts_abort = false;
             for_each_stmt(&body, &mut |s: &Stmt| {
-                if let StmtKind::Match { arms, .. } = &s.kind {
-                    if !arms_exhaustive(arms, &self.types) {
+                if let StmtKind::Match { arms, .. } = &s.kind
+                    && !arms_exhaustive(arms, &self.types) {
                         stmts_abort = true;
                     }
-                }
             });
             if aborts || stmts_abort {
                 self.defs[d].own_effect = self.defs[d].own_effect.join(Effect::ABORT);
@@ -58,11 +57,10 @@ impl Checker {
         // constraints resolving to class methods: the def performing the
         // operation calls the method
         for c in &self.store.constraints {
-            if let Some(Solution::Method(m, _, _)) = &c.solution {
-                if c.user < n {
+            if let Some(Solution::Method(m, _, _)) = &c.solution
+                && c.user < n {
                     edges[c.user].insert(*m);
                 }
-            }
         }
         let mut effects: Vec<Effect> = self.defs.iter().map(|d| d.own_effect).collect();
         let mut unsafe_: Vec<bool> = self.defs.iter().map(|d| d.unsafe_).collect();

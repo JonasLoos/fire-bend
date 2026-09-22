@@ -115,11 +115,10 @@ impl Checker {
         // a parameter that is reassigned is no longer the parameter
         let mut reassigned: HashSet<String> = HashSet::new();
         for_each_stmt_local(&def.body, &mut |s: &Stmt| {
-            if let StmtKind::Assign { name, .. } = &s.kind {
-                if params.contains(name) {
+            if let StmtKind::Assign { name, .. } = &s.kind
+                && params.contains(name) {
                     reassigned.insert(name.clone());
                 }
-            }
         });
         self.collect_calls(d, &def.body, &mut Vec::new(), &mut pieces, &params, &mut calls, &mut in_loop_calls, false);
         for line in in_loop_calls {
@@ -196,22 +195,19 @@ impl Checker {
         if let ExprKind::Dict { id, args } = &arg.kind {
             let c = &self.store.constraints[*id];
             // `int(p / 2)`: the conversion of an int is the int itself
-            if let (Class::Convert("int", _), [inner]) = (&c.class, args.as_slice()) {
-                if matches!(self.shallow(&inner.ty), Type::Int) {
+            if let (Class::Convert("int", _), [inner]) = (&c.class, args.as_slice())
+                && matches!(self.shallow(&inner.ty), Type::Int) {
                     return self.decrement_of(inner, p);
                 }
-            }
-            if args.len() == 2 {
-                if let (ExprKind::Var(v), ExprKind::Lit(Lit::Int(k))) = (&args[0].kind, &args[1].kind) {
-                    if v == p {
+            if args.len() == 2
+                && let (ExprKind::Var(v), ExprKind::Lit(Lit::Int(k))) = (&args[0].kind, &args[1].kind)
+                    && v == p {
                         match c.class {
                             Class::Arith(ArithOp::Sub) if *k >= 1 => return Some(*k),
                             Class::Arith(ArithOp::Div) if *k >= 2 => return Some(1),
                             _ => {}
                         }
                     }
-                }
-            }
         }
         None
     }

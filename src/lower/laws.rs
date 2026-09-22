@@ -43,23 +43,18 @@ impl<'a> Lower<'a> {
             names.push(local_name(v));
         }
         for (i, h) in law.hyps.iter().enumerate() {
-            let mut pre = Vec::new();
-            let t = self.expr(&mut ctx, h, &mut pre);
-            out.push_str(&format!("  for h{}: {{{} == True{{}} : Bool}}\n", i, render_term(&t)));
+            let (t, ty) = self.law_sides(&mut ctx, &[h], &Type::Bool, line);
+            out.push_str(&format!("  for h{}: {{{} == {} : {}}}\n", i, render_term(&t[0]), render_term(&t[1]), ty.render()));
             names.push(format!("h{}", i));
         }
         let claim = match &law.claim {
             Claim::Equation(a, b, t) => {
-                let mut pre = Vec::new();
-                let ta = self.expr(&mut ctx, a, &mut pre);
-                let tb = self.expr(&mut ctx, b, &mut pre);
-                let ty = self.ty_in(&ctx, t, line);
-                format!("{{{} == {} : {}}}", render_term(&ta), render_term(&tb), ty.render())
+                let (ts, ty) = self.law_sides(&mut ctx, &[a, b], t, line);
+                format!("{{{} == {} : {}}}", render_term(&ts[0]), render_term(&ts[1]), ty.render())
             }
             Claim::Holds(x) => {
-                let mut pre = Vec::new();
-                let t = self.expr(&mut ctx, x, &mut pre);
-                format!("{{{} == True{{}} : Bool}}", render_term(&t))
+                let (ts, ty) = self.law_sides(&mut ctx, &[x], &Type::Bool, line);
+                format!("{{{} == {} : {}}}", render_term(&ts[0]), render_term(&ts[1]), ty.render())
             }
         };
         out.push_str(&format!("  {}\n", claim));
@@ -76,6 +71,34 @@ impl<'a> Lower<'a> {
             Proof::Open => {}
         }
         out
+    }
+
+    /// The two sides of an equation (one side and `true` for a boolean),
+    /// and the type they are compared at. When a side may abort, both are
+    /// results (`Done{v}` for a pure side), so a law can speak about
+    /// fallible defs: it states their outcome, failure included.
+    fn law_sides(&mut self, ctx: &mut FnCtx, sides: &[&Expr], ty: &Type, line: usize) -> (Vec<Term>, Ty) {
+        let fallible = sides.iter().any(|e| !self.is_pure_expr(e));
+        let inner = self.ty_in(ctx, ty, line);
+        let mut terms: Vec<Term> = sides.iter().map(|e| {
+            if fallible {
+                if self.is_pure_expr(e) {
+                    let mut pre = Vec::new();
+                    Term::ctor("Done", vec![self.expr(ctx, e, &mut pre)])
+                } else {
+                    self.expr_as_term(ctx, e, Mode::Result)
+                }
+            } else {
+                let mut pre = Vec::new();
+                self.expr(ctx, e, &mut pre)
+            }
+        }).collect();
+        if sides.len() == 1 {
+            let t = Term::boolean(true);
+            terms.push(if fallible { Term::ctor("Done", vec![t]) } else { t });
+        }
+        let ty = if fallible { Mode::Result.wrap(inner) } else { inner };
+        (terms, ty)
     }
 
     /// Nested matches over every variable of a finite type, `{==}` at the
