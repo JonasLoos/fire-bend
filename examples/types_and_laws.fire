@@ -1,0 +1,84 @@
+# Declared types and laws. A `type` lists its constructors; a field without
+# a type is a type parameter, so one Tree holds ints or strings. A `match`
+# must cover every constructor, and recursion on the pieces a match binds
+# always ends. Laws state what the defs guarantee; the compiler proves the
+# ones it can and hands the rest to Bend as claims.
+
+type Shape
+    Circle(radius: float)
+    Rect(width: float, height: float)
+    Square(side: float)
+
+def area(s: Shape)
+    match s
+        Circle(r) => 3.14159 * r * r
+        Rect(w, h) => w * h
+        Square(a) => a * a
+
+type Tree
+    Leaf
+    Node(left: Tree, value, right: Tree)
+
+def insert(x, t)
+    match t
+        Leaf => Node(Leaf, x, Leaf)
+        Node(l, v, r) =>
+            if x < v do Node(insert(x, l), v, r)
+            elif x > v do Node(l, v, insert(x, r))
+            else t
+
+def to_list(t)
+    match t
+        Leaf => []
+        Node(l, v, r) => to_list(l) + [v] + to_list(r)
+
+def size(t)
+    match t
+        Leaf => 0
+        Node(l, _, r) => size(l) + 1 + size(r)
+
+def contains(t, x)
+    match t
+        Leaf => false
+        Node(l, v, r) =>
+            if x == v do true
+            elif x < v do contains(l, x)
+            else contains(r, x)
+
+def from_list(xs)
+    var t = Leaf
+    for x in xs do t = insert(x, t)
+    t
+
+type Player
+    X
+    O
+
+def other(p: Player)
+    match p
+        X => O
+        O => X
+
+shapes = [Circle(1.0), Rect(2.0, 3.0), Square(1.5)]
+print(shapes *> area($))
+print(shapes)
+
+t = from_list([5, 2, 8, 1, 9, 2, 7])
+print(to_list(t), size(t), contains(t, 7), contains(t, 4))
+words = from_list(["pear", "fig", "apple", "fig"])
+print(to_list(words), size(words))
+print(other(X), other(other(X)))
+
+# a closed law: both sides are computed at compile time
+law small_tree
+    to_list(from_list([3, 1, 2])) == [1, 2, 3]
+
+# a law over a finite type: proven by trying every constructor
+law other_twice
+    for p: Player
+    other(other(p)) == p
+
+# a law over an infinite type: a claim Bend records, and `fire --test` samples
+law insert_contains
+    for x: int, t: Tree
+    contains(insert(x, t), x)

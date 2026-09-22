@@ -31,21 +31,19 @@ pub fn prune_prelude(prelude: &str, program: &str) -> String {
     let mut keep = vec![false; blocks.len()];
     let mut work: Vec<usize> = Vec::new();
     for tok in tokens(program) {
-        if let Some(&i) = owner.get(tok) {
-            if !keep[i] {
+        if let Some(&i) = owner.get(tok)
+            && !keep[i] {
                 keep[i] = true;
                 work.push(i);
             }
-        }
     }
     while let Some(i) = work.pop() {
         for r in &blocks[i].refs {
-            if let Some(&j) = owner.get(r.as_str()) {
-                if !keep[j] {
+            if let Some(&j) = owner.get(r.as_str())
+                && !keep[j] {
                     keep[j] = true;
                     work.push(j);
                 }
-            }
         }
     }
     let header_end = blocks.first().map(|b| b.lines.start).unwrap_or(lines.len());

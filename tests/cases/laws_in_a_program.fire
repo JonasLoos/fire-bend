@@ -1,0 +1,28 @@
+# laws live beside the defs; proven ones are checked when the program is
+# built, open ones are claims that do not stop it from running
+type Light
+    Red
+    Amber
+    Green
+
+def next_light(l: Light)
+    match l
+        Red => Green
+        Green => Amber
+        Amber => Red
+
+def twice(xs)
+    xs + xs
+
+law cycle_of_three
+    for l: Light
+    next_light(next_light(next_light(l))) == l
+
+law twice_small
+    twice([1, 2]) == [1, 2, 1, 2]
+
+law twice_length
+    for xs: [int]
+    len(twice(xs)) == 2 * len(xs)
+
+print(next_light(Red), twice([7]))

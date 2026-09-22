@@ -1,26 +1,27 @@
 # Fire runtime prelude, emitted at the top of every compiled program (see docs/compiler.md).
-# Everything the generated code calls that Bend's Base does not provide.
-# Helpers precede their callers; `+` marks reusable values.
-# -- Generic helpers ----------------------------------------------------------
-# The pair shape used by entries(), zip, enumerate, and zipping loops.
+# Everything the generated code calls that Bend's Base does not provide: the
+# loop drivers, the case eliminators, the derived operations of the builtin
+# types, and the string, number, list and map helpers behind Fire's builtin
+# methods. Helpers precede their callers; `+` marks reusable values. The
+# compiler keeps only the blocks a program reaches.
+# -- Core types ---------------------------------------------------------------
+# The pair shape used by entries(), zip, enumerate, pop and zipping loops.
 
 type F.Pair<-A: Data, -B: Data> is Data:
-  F.Pair.mk{key: A, value: B}
+  F.Pair{key: A, value: B}
 
-# a mutating method's answer: the new receiver and the value
-type F.Ret<-S: Data, -V: Data> is Data:
-  F.Ret.mk{obj: S, value: V}
+# A range `a..b`: the end is exclusive.
+type F.Range is Data:
+  F.Range{start: U32, end: U32}
 
-def F.ret.self(-S: Data, -V: Data, r: F.Ret<S, V>) -> S:
-  match r:
-    case F.Ret.mk{obj, value}:
-      obj
+# What one turn of a loop body answers: go on with a state, leave the loop
+# with a state, or return from the enclosing def with a value.
+type F.Ctl<-S: Data, -R: Data> is Data:
+  F.Next{s: S}
+  F.Break{s: S}
+  F.Return{r: R}
 
-def F.ret.value(-S: Data, -V: Data, r: F.Ret<S, V>) -> V:
-  match r:
-    case F.Ret.mk{obj, value}:
-      value
-
+# -- Generic helpers ----------------------------------------------------------
 def F.fst(-A: Data, -B: Data, p: A & B) -> A:
   (a, b) = p
   a
@@ -29,30 +30,13 @@ def F.snd(-A: Data, -B: Data, p: A & B) -> B:
   (a, b) = p
   b
 
+# an abort inside IO ends the program with the message
 def F.io_unwrap(-A: Data, r: Result<&2, &2, String, A>) -> IO(A):
   match r:
     case Done{v}:
       IO.pure(A, v)
     case Fail{e}:
       IO.die(A, 1, e)
-
-# A pure abort: swapping into an unbalanced array traps the runtime
-# ("runtime fail-stop"). The trap's result must feed the recursion, or the
-# compiler drops the unused swap and the loop below runs forever.
-def F.crash.arm(r: Array<U32> & U32) -> Bool:
-  (na, x) = r
-  U32.is_eq(x, 0)
-
-@unsafe
-def F.crash.go(-A: Data, +msg: String, b: Bool) -> A:
-  match b:
-    case True{}:
-      F.crash.go(A, msg, False{})
-    case False{}:
-      F.crash.go(A, msg, True{})
-
-def F.crash(-A: Data, +msg: String) -> A:
-  F.crash.go(A, msg, F.crash.arm(Array.swap(U32, ANode{ALeaf{0}, ANode{ALeaf{0}, ALeaf{0}}}, 3, 0)))
 
 def F.assert.k(msg: String, c: Bool) -> Result<&2, &2, String, Unit>:
   match c:
@@ -64,11 +48,217 @@ def F.assert.k(msg: String, c: Bool) -> Result<&2, &2, String, Unit>:
 def F.assert(c: Bool, msg: String) -> Result<&2, &2, String, Unit>:
   F.assert.k(msg, c)
 
+# -- Loop control -------------------------------------------------------------
+# After a loop: continue with the returned value, or with the final state.
+def F.ctl.case(-S: Data, -R: Data, -T: Data, c: F.Ctl<S, R>, kr: R -> T, ks: S -> T) -> T:
+  match c:
+    case F.Next{s}:
+      ks(s)
+    case F.Break{s}:
+      ks(s)
+    case F.Return{r}:
+      kr(r)
+
+# the final state of a loop that cannot return (`d` is never reached)
+def F.ctl.state(-S: Data, -R: Data, c: F.Ctl<S, R>, d: S) -> S:
+  match c:
+    case F.Next{s}:
+      s
+    case F.Break{s}:
+      s
+    case F.Return{r}:
+      d
+
+# -- Loop drivers -------------------------------------------------------------
+# A `for` over a list is a fold of the body over the elements, stopping at
+# the first Break or Return. The body is a template (code) with an
+# environment value; the state is whatever the loop updates.
+def F.for_list(~S: Data, ~R: Data, ~A: Data, ~E: Data, ~body: E -> S -> A -> F.Ctl<S, R>, +env: E, xs: List<&2, A>, c: F.Ctl<S, R>) -> F.Ctl<S, R>:
+  match xs:
+    case Nil{}:
+      c
+    case Con{+h, t}:
+      match c:
+        case F.Next{+s}:
+          F.for_list(~S, ~R, ~A, ~E, ~body, env, t, body(env, s, h))
+        case F.Break{s}:
+          F.Break{s}
+        case F.Return{r}:
+          F.Return{r}
+
+def F.for_list_res(~S: Data, ~R: Data, ~A: Data, ~E: Data, ~body: E -> S -> A -> Result<&2, &2, String, F.Ctl<S, R>>, +env: E, xs: List<&2, A>, c: F.Ctl<S, R>) -> Result<&2, &2, String, F.Ctl<S, R>>:
+  match xs:
+    case Nil{}:
+      Done{c}
+    case Con{+h, t}:
+      match c:
+        case F.Next{+s}:
+          do Result<&2, &2, String, F.Ctl<S, R>>:
+            c2 : F.Ctl<S, R> <- body(env, s, h)
+            F.for_list_res(~S, ~R, ~A, ~E, ~body, env, t, c2)
+        case F.Break{s}:
+          Done{F.Break{s}}
+        case F.Return{r}:
+          Done{F.Return{r}}
+
+def F.for_list_io(~S: Data, ~R: Data, ~A: Data, ~E: Data, ~body: E -> S -> A -> IO(F.Ctl<S, R>), +env: E, xs: List<&2, A>, c: F.Ctl<S, R>) -> IO(F.Ctl<S, R>):
+  match xs:
+    case Nil{}:
+      IO.pure(F.Ctl<S, R>, c)
+    case Con{+h, t}:
+      match c:
+        case F.Next{+s}:
+          do IO<F.Ctl<S, R>>:
+            c2 : F.Ctl<S, R> <- body(env, s, h)
+            F.for_list_io(~S, ~R, ~A, ~E, ~body, env, t, c2)
+        case F.Break{s}:
+          IO.pure(F.Ctl<S, R>, F.Break{s})
+        case F.Return{r}:
+          IO.pure(F.Ctl<S, R>, F.Return{r})
+
+# A `for` over a range counts a Nat down; the body sees the current index.
+def F.for_range.go(~S: Data, ~R: Data, ~E: Data, ~body: E -> S -> U32 -> F.Ctl<S, R>, +env: E, n: Nat, +i: U32, c: F.Ctl<S, R>) -> F.Ctl<S, R>:
+  match n:
+    case 0n:
+      c
+    case 1n+p:
+      match c:
+        case F.Next{+s}:
+          F.for_range.go(~S, ~R, ~E, ~body, env, p, (i + 1 : U32), body(env, s, i))
+        case F.Break{s}:
+          F.Break{s}
+        case F.Return{r}:
+          F.Return{r}
+
+def F.i32.gt(a: U32, b: U32) -> Bool:
+  U32.is_gt(U32.xor(a, 2147483648), U32.xor(b, 2147483648))
+
+def F.i32.min.k(+a: U32, +b: U32, lt: Bool) -> U32:
+  match lt:
+    case True{}:
+      a
+    case False{}:
+      b
+
+def F.i32.max(+a: U32, +b: U32) -> U32:
+  F.i32.min.k(a, b, F.i32.gt(a, b))
+
+def F.for_range(~S: Data, ~R: Data, ~E: Data, ~body: E -> S -> U32 -> F.Ctl<S, R>, +env: E, r: F.Range, c: F.Ctl<S, R>) -> F.Ctl<S, R>:
+  match r:
+    case F.Range{+s, e}:
+      F.for_range.go(~S, ~R, ~E, ~body, env, U32.to_nat(F.i32.max((e - s : U32), 0)), s, c)
+
+def F.for_range_res.go(~S: Data, ~R: Data, ~E: Data, ~body: E -> S -> U32 -> Result<&2, &2, String, F.Ctl<S, R>>, +env: E, n: Nat, +i: U32, c: F.Ctl<S, R>) -> Result<&2, &2, String, F.Ctl<S, R>>:
+  match n:
+    case 0n:
+      Done{c}
+    case 1n+p:
+      match c:
+        case F.Next{+s}:
+          do Result<&2, &2, String, F.Ctl<S, R>>:
+            c2 : F.Ctl<S, R> <- body(env, s, i)
+            F.for_range_res.go(~S, ~R, ~E, ~body, env, p, (i + 1 : U32), c2)
+        case F.Break{s}:
+          Done{F.Break{s}}
+        case F.Return{r}:
+          Done{F.Return{r}}
+
+def F.for_range_res(~S: Data, ~R: Data, ~E: Data, ~body: E -> S -> U32 -> Result<&2, &2, String, F.Ctl<S, R>>, +env: E, r: F.Range, c: F.Ctl<S, R>) -> Result<&2, &2, String, F.Ctl<S, R>>:
+  match r:
+    case F.Range{+s, e}:
+      F.for_range_res.go(~S, ~R, ~E, ~body, env, U32.to_nat(F.i32.max((e - s : U32), 0)), s, c)
+
+def F.for_range_io.go(~S: Data, ~R: Data, ~E: Data, ~body: E -> S -> U32 -> IO(F.Ctl<S, R>), +env: E, n: Nat, +i: U32, c: F.Ctl<S, R>) -> IO(F.Ctl<S, R>):
+  match n:
+    case 0n:
+      IO.pure(F.Ctl<S, R>, c)
+    case 1n+p:
+      match c:
+        case F.Next{+s}:
+          do IO<F.Ctl<S, R>>:
+            c2 : F.Ctl<S, R> <- body(env, s, i)
+            F.for_range_io.go(~S, ~R, ~E, ~body, env, p, (i + 1 : U32), c2)
+        case F.Break{s}:
+          IO.pure(F.Ctl<S, R>, F.Break{s})
+        case F.Return{r}:
+          IO.pure(F.Ctl<S, R>, F.Return{r})
+
+def F.for_range_io(~S: Data, ~R: Data, ~E: Data, ~body: E -> S -> U32 -> IO(F.Ctl<S, R>), +env: E, r: F.Range, c: F.Ctl<S, R>) -> IO(F.Ctl<S, R>):
+  match r:
+    case F.Range{+s, e}:
+      F.for_range_io.go(~S, ~R, ~E, ~body, env, U32.to_nat(F.i32.max((e - s : U32), 0)), s, c)
+
+# A `while` (only inside an unsafe def): the body runs until it breaks or
+# returns; the condition is part of the body.
+@unsafe
+def F.loop(~S: Data, ~R: Data, ~E: Data, ~body: E -> S -> F.Ctl<S, R>, +env: E, c: F.Ctl<S, R>) -> F.Ctl<S, R>:
+  match c:
+    case F.Next{+s}:
+      F.loop(~S, ~R, ~E, ~body, env, body(env, s))
+    case F.Break{s}:
+      F.Break{s}
+    case F.Return{r}:
+      F.Return{r}
+
+@unsafe
+def F.loop_res(~S: Data, ~R: Data, ~E: Data, ~body: E -> S -> Result<&2, &2, String, F.Ctl<S, R>>, +env: E, c: F.Ctl<S, R>) -> Result<&2, &2, String, F.Ctl<S, R>>:
+  match c:
+    case F.Next{+s}:
+      do Result<&2, &2, String, F.Ctl<S, R>>:
+        c2 : F.Ctl<S, R> <- body(env, s)
+        F.loop_res(~S, ~R, ~E, ~body, env, c2)
+    case F.Break{s}:
+      Done{F.Break{s}}
+    case F.Return{r}:
+      Done{F.Return{r}}
+
+@unsafe
+def F.loop_io(~S: Data, ~R: Data, ~E: Data, ~body: E -> S -> IO(F.Ctl<S, R>), +env: E, c: F.Ctl<S, R>) -> IO(F.Ctl<S, R>):
+  match c:
+    case F.Next{+s}:
+      do IO<F.Ctl<S, R>>:
+        c2 : F.Ctl<S, R> <- body(env, s)
+        F.loop_io(~S, ~R, ~E, ~body, env, c2)
+    case F.Break{s}:
+      IO.pure(F.Ctl<S, R>, F.Break{s})
+    case F.Return{r}:
+      IO.pure(F.Ctl<S, R>, F.Return{r})
+
+# -- Case eliminators ---------------------------------------------------------
+# A match on a computed value: one continuation per constructor.
+def F.list.case(-A: Data, -R: Data, xs: List<&2, A>, kn: Unit -> R, kc: A -> List<&2, A> -> R) -> R:
+  match xs:
+    case Nil{}:
+      kn(Unit{})
+    case Con{h, t}:
+      kc(h, t)
+
+def F.maybe.case(-A: Data, -R: Data, m: Maybe<&2, A>, kn: Unit -> R, ks: A -> R) -> R:
+  match m:
+    case None{}:
+      kn(Unit{})
+    case Some{v}:
+      ks(v)
+
+def F.result.case(-E: Data, -A: Data, -R: Data, r: Result<&2, &2, E, A>, kf: E -> R, kd: A -> R) -> R:
+  match r:
+    case Fail{e}:
+      kf(e)
+    case Done{v}:
+      kd(v)
+
+# -- Unit and Bool ------------------------------------------------------------
 def F.unit.show(u: Unit) -> String:
   "nothing"
 
 def F.unit.eq(a: Unit, b: Unit) -> Bool:
   True{}
+
+def F.unit.lt(a: Unit, b: Unit) -> Bool:
+  False{}
+
+def F.unit.default() -> Unit:
+  Unit{}
 
 def F.bool.show(b: Bool) -> String:
   match b:
@@ -82,6 +272,9 @@ def F.bool.eq(a: Bool, b: Bool) -> Bool:
 
 def F.bool.lt(a: Bool, b: Bool) -> Bool:
   Bool.and(Bool.not(a), b)
+
+def F.bool.default() -> Bool:
+  False{}
 
 # -- 32-bit signed integers over U32 -----------------------------------------
 def F.i32.neg(+x: U32) -> Bool:
@@ -98,17 +291,23 @@ def F.i32.shr.go(x: U32, n: Nat, neg: Bool) -> U32:
 def F.i32.shr(+x: U32, n: Nat) -> U32:
   F.i32.shr.go(x, n, F.i32.neg(x))
 
+def F.i32.add(a: U32, b: U32) -> U32:
+  (a + b : U32)
+
+def F.i32.eq(a: U32, b: U32) -> Bool:
+  U32.is_eq(a, b)
+
 def F.i32.lt(a: U32, b: U32) -> Bool:
   U32.is_lt(U32.xor(a, 2147483648), U32.xor(b, 2147483648))
 
 def F.i32.le(a: U32, b: U32) -> Bool:
   U32.is_le(U32.xor(a, 2147483648), U32.xor(b, 2147483648))
 
-def F.i32.gt(a: U32, b: U32) -> Bool:
-  U32.is_gt(U32.xor(a, 2147483648), U32.xor(b, 2147483648))
-
 def F.i32.ge(a: U32, b: U32) -> Bool:
   U32.is_ge(U32.xor(a, 2147483648), U32.xor(b, 2147483648))
+
+def F.i32.default() -> U32:
+  0
 
 def F.i32.abs.k(+x: U32, neg: Bool) -> U32:
   match neg:
@@ -120,18 +319,13 @@ def F.i32.abs.k(+x: U32, neg: Bool) -> U32:
 def F.i32.abs(+x: U32) -> U32:
   F.i32.abs.k(x, F.i32.neg(x))
 
-def F.i32.min.k(+a: U32, +b: U32, lt: Bool) -> U32:
-  match lt:
-    case True{}:
-      a
-    case False{}:
-      b
-
 def F.i32.min(+a: U32, +b: U32) -> U32:
   F.i32.min.k(a, b, F.i32.lt(a, b))
 
-def F.i32.max(+a: U32, +b: U32) -> U32:
-  F.i32.min.k(a, b, F.i32.gt(a, b))
+# The fuel of a def that recurses on an int decreased by literals under a
+# guard: one more than the int, so the fuel outlasts every call.
+def F.i32.fuel(+x: U32) -> Nat:
+  (1n + U32.to_nat(F.i32.max(x, 0)) : Nat)
 
 # Euclidean division: the remainder is never negative.
 def F.i32.divmod.fix(+q: U32, +r: U32, +b: U32, bneg: Bool) -> U32 & U32:
@@ -245,10 +439,6 @@ def F.i32.parse_result(+s: String) -> Result<&2, &2, String, U32>:
 def F.i32.parse_or_abort(+s: String) -> Result<&2, &2, String, U32>:
   F.i32.parse_result(s)
 
-# affine wrappers for use as template arguments
-def F.i32.show.t(x: U32) -> String:
-  F.i32.show(x)
-
 # -- Floats -------------------------------------------------------------------
 def F.f32.show.k(+s: String, has_dot: Bool) -> String:
   match has_dot:
@@ -263,6 +453,18 @@ def F.f32.has_dot(+s: String) -> Bool:
 def F.f32.show(+x: F32) -> String:
   F.f32.show.k(F32.show(x), F.f32.has_dot(F32.show(x)))
 
+def F.f32.add(a: F32, b: F32) -> F32:
+  (a + b : F32)
+
+def F.f32.eq(a: F32, b: F32) -> Bool:
+  F32.is_eq(a, b)
+
+def F.f32.lt(a: F32, b: F32) -> Bool:
+  F32.is_lt(a, b)
+
+def F.f32.default() -> F32:
+  0.0
+
 def F.f32.pow10.go(n: Nat, +acc: F32) -> F32:
   match n:
     case 0n:
@@ -273,13 +475,13 @@ def F.f32.pow10.go(n: Nat, +acc: F32) -> F32:
 def F.f32.pow10(+n: U32) -> F32:
   F.f32.pow10.go(U32.to_nat(n), 1.0)
 
-@unsafe
-def F.f32.pad_frac(+s: String, +want: U32, +have: U32, done: Bool) -> String:
-  match done:
-    case True{}:
+# pad the fraction with zeros up to `want` digits
+def F.f32.pad_frac(n: Nat, +s: String) -> String:
+  match n:
+    case 0n:
       s
-    case False{}:
-      F.f32.pad_frac(s ++ "0", want, (have + 1 : U32), U32.is_ge((have + 1 : U32), want))
+    case 1n+p:
+      F.f32.pad_frac(p, s ++ "0")
 
 # digits after the dot (0 without a dot): one walk, the dot seen so far
 def F.f32.frac_len.go(s: String, +seen: Bool, +n: U32) -> U32:
@@ -300,7 +502,7 @@ def F.f32.show_fixed.dot(+s: String, has: Bool) -> String:
       s ++ "."
 
 def F.f32.show_fixed.k(+s: String, +digits: U32) -> String:
-  F.f32.pad_frac(F.f32.show_fixed.dot(s, String.contains(s, ".")), digits, F.f32.frac_len(s), U32.is_ge(F.f32.frac_len(s), digits))
+  F.f32.pad_frac(U32.to_nat(F.i32.max((digits - F.f32.frac_len(s) : U32), 0)), F.f32.show_fixed.dot(s, String.contains(s, ".")))
 
 def F.f32.to_i32.k(+x: F32, neg: Bool) -> U32:
   match neg:
@@ -325,9 +527,6 @@ def F.f32.show_fixed.pick(+x: F32, +digits: U32, zero: Bool) -> String:
 def F.f32.show_fixed(+x: F32, +digits: U32) -> String:
   F.f32.show_fixed.pick(x, digits, U32.is_zero(digits))
 
-def F.f32.round_to_int(x: F32) -> U32:
-  F.f32.to_i32(F32.round(x))
-
 def F.f32.round_digits(+x: F32, +digits: U32) -> F32:
   (F32.round((x * F.f32.pow10(digits) : F32)) / F.f32.pow10(digits) : F32)
 
@@ -350,34 +549,22 @@ def F.f32.parse_result(+s: String) -> Result<&2, &2, String, F32>:
 def F.f32.parse_or_abort(+s: String) -> Result<&2, &2, String, F32>:
   F.f32.parse_result(s)
 
-def F.f32.show.t(x: F32) -> String:
-  F.f32.show(x)
-
 # -- Strings ------------------------------------------------------------------
-def F.str.id(s: String) -> String:
+def F.str.show(s: String) -> String:
   s
 
-# `sep ++ s` unless s is empty (joining an inherited member list)
-def F.str.join_nonempty.k(sep: String, s: String, empty: Bool) -> String:
-  match empty:
-    case True{}:
-      ""
-    case False{}:
-      (sep ++ s)
+# a string inside a container shows quoted
+def F.str.repr(s: String) -> String:
+  "'" ++ s ++ "'"
 
-def F.str.join_nonempty(sep: String, +s: String) -> String:
-  F.str.join_nonempty.k(sep, s, String.is_empty(s))
+def F.str.eq(a: String, b: String) -> Bool:
+  String.eq(a, b)
 
-# `s ++ sep` unless s is empty
-def F.str.join_nonempty_after.k(s: String, sep: String, empty: Bool) -> String:
-  match empty:
-    case True{}:
-      ""
-    case False{}:
-      (s ++ sep)
+def F.str.lt(a: String, b: String) -> Bool:
+  String.is_lt(a, b)
 
-def F.str.join_nonempty_after(+s: String, sep: String) -> String:
-  F.str.join_nonempty_after.k(s, sep, String.is_empty(s))
+def F.str.default() -> String:
+  ""
 
 def F.str.len(s: String) -> U32:
   U32.from_nat(String.length(s))
@@ -399,12 +586,14 @@ def F.str.slice.k(s: String, +a: U32, +b: U32) -> String:
 def F.str.slice(+s: String, +a: U32, +b: U32) -> String:
   F.str.slice.k(s, F.str.clamp(F.str.len(s), a), F.str.clamp(F.str.len(s), b))
 
+def F.str.slice_range(s: String, r: F.Range) -> String:
+  match r:
+    case F.Range{a, b}:
+      F.str.slice(s, a, b)
+
 # drop a known prefix and the final character (`Name{a: 1}` -> `a: 1`)
 def F.str.strip_wrapper(prefix: String, +s: String) -> String:
   F.str.slice(s, F.str.len(prefix), (F.str.len(s) - 1 : U32))
-
-def F.str.repr(s: String) -> String:
-  "'" ++ s ++ "'"
 
 def F.str.nat_index.k(+len: U32, +i: U32, neg: Bool) -> Nat:
   match neg:
@@ -426,9 +615,6 @@ def F.str.index.k(m: Maybe<&2, Char>) -> Result<&2, &2, String, String>:
 
 def F.str.index(+s: String, +i: U32) -> Result<&2, &2, String, String>:
   F.str.index.k(String.get(s, F.str.nat_index(F.str.len(s), i)))
-
-def F.str.slice_from(+s: String, +a: U32) -> String:
-  String.drop(s, U32.to_nat(F.str.clamp(F.str.len(s), a)))
 
 def F.str.take(s: String, +n: U32) -> String:
   String.take(s, U32.to_nat(F.i32.max(n, 0)))
@@ -456,26 +642,25 @@ def F.str.char_code(s: String) -> U32:
 def F.str.from_char_code(c: U32) -> String:
   SCon{Char.from_u32(c), SNil{}}
 
-@unsafe
-def F.str.split.go(hit: Bool, +s: String, +sep: String, +cur: String, +acc: List<&2, String>) -> List<&2, String>:
-  match hit:
-    case True{}:
-      +rest = String.drop(s, String.length(sep))
-      F.str.split.go(String.starts_with(rest, sep), rest, sep, SNil{}, (String.reverse(cur) <> acc))
-    case False{}:
+# split at every occurrence of `sep`: one character per turn of the fuel
+def F.str.split.go(n: Nat, +s: String, +sep: String, +cur: String, +acc: List<&2, String>) -> List<&2, String>:
+  match n:
+    case 0n:
+      List.reverse(&2, String, (String.reverse(cur) <> acc))
+    case 1n+p:
       match s:
         case SNil{}:
           List.reverse(&2, String, (String.reverse(cur) <> acc))
         case SCon{h, t}:
-          +t2 = t
-          F.str.split.go(String.starts_with(t2, sep), t2, sep, SCon{h, cur}, acc)
+          +hit = String.starts_with(s, sep)
+          F.str.split.go(p, (Bool.pick(Unit -> String, hit, _ => String.drop(s, String.length(sep)), _ => t))(Unit{}), sep, (Bool.pick(Unit -> String, hit, _ => SNil{}, _ => SCon{h, cur}))(Unit{}), (Bool.pick(Unit -> List<&2, String>, hit, _ => (String.reverse(cur) <> acc), _ => acc))(Unit{}))
 
 def F.str.split.pick(+s: String, +sep: String, empty: Bool) -> List<&2, String>:
   match empty:
     case True{}:
       F.str.chars(s)
     case False{}:
-      F.str.split.go(String.starts_with(s, sep), s, sep, SNil{}, Nil{})
+      F.str.split.go(String.length(s), s, sep, SNil{}, Nil{})
 
 def F.str.split(+s: String, +sep: String) -> List<&2, String>:
   F.str.split.pick(s, sep, String.is_empty(sep))
@@ -514,45 +699,38 @@ def F.str.split_ws.go(s: String, +cur: String, +acc: List<&2, String>, sp: Bool)
 def F.str.split_ws(+s: String) -> List<&2, String>:
   F.str.split_ws.go(s, SNil{}, Nil{}, F.str.split_ws.head_space(s))
 
-@unsafe
-def F.str.replace.go(hit: Bool, +s: String, +from: String, +to: String, +acc: String) -> String:
-  match hit:
-    case True{}:
-      +rest = String.drop(s, String.length(from))
-      F.str.replace.go(String.starts_with(rest, from), rest, from, to, String.append(String.reverse(to), acc))
-    case False{}:
+# replace every occurrence of `from`: one character per turn of the fuel
+def F.str.replace.go(n: Nat, +s: String, +from: String, +to: String, +acc: String) -> String:
+  match n:
+    case 0n:
+      String.reverse(acc)
+    case 1n+p:
       match s:
         case SNil{}:
           String.reverse(acc)
         case SCon{h, t}:
-          +t2 = t
-          F.str.replace.go(String.starts_with(t2, from), t2, from, to, SCon{h, acc})
+          +hit = String.starts_with(s, from)
+          F.str.replace.go(p, (Bool.pick(Unit -> String, hit, _ => String.drop(s, String.length(from)), _ => t))(Unit{}), from, to, (Bool.pick(Unit -> String, hit, _ => String.append(String.reverse(to), acc), _ => SCon{h, acc}))(Unit{}))
 
 def F.str.replace.pick(+s: String, +from: String, +to: String, empty: Bool) -> String:
   match empty:
     case True{}:
       s
     case False{}:
-      F.str.replace.go(String.starts_with(s, from), s, from, to, SNil{})
+      F.str.replace.go(String.length(s), s, from, to, SNil{})
 
 def F.str.replace(+s: String, +from: String, +to: String) -> String:
   F.str.replace.pick(s, from, to, String.is_empty(from))
 
-@unsafe
-def F.str.index_of.go(hit: Bool, s: String, +p: String, +i: U32) -> Maybe<&2, U32>:
-  match hit:
-    case True{}:
-      Some{i}
-    case False{}:
-      match s:
-        case SNil{}:
-          None{}
-        case SCon{h, t}:
-          +t2 = t
-          F.str.index_of.go(String.starts_with(t2, p), t2, p, (i + 1 : U32))
+def F.str.index_of.go(+s: String, +p: String, +i: U32) -> Maybe<&2, U32>:
+  match s:
+    case SNil{}:
+      None{}
+    case SCon{h, t}:
+      (Bool.pick(Unit -> Maybe<&2, U32>, String.starts_with(s, p), _ => Some{i}, _ => F.str.index_of.go(t, p, (i + 1 : U32))))(Unit{})
 
 def F.str.index_of(+s: String, +p: String) -> Maybe<&2, U32>:
-  F.str.index_of.go(String.starts_with(s, p), s, p, 0)
+  F.str.index_of.go(s, p, 0)
 
 # -- Formatting ---------------------------------------------------------------
 def F.fmt.fill(+n: U32, +c: Char) -> String:
@@ -589,17 +767,14 @@ def F.fmt.pad_center(+s: String, +width: U32, +c: Char) -> String:
   F.fmt.pad_center.k(s, width, c, F.str.len(s), U32.is_lt(F.str.len(s), width))
 
 # -- Ranges -------------------------------------------------------------------
-type F.Range is Data:
-  F.Range.mk{start: U32, end: U32}
-
 def F.range.start(r: F.Range) -> U32:
   match r:
-    case F.Range.mk{s, e}:
+    case F.Range{s, e}:
       s
 
 def F.range.end(r: F.Range) -> U32:
   match r:
-    case F.Range.mk{s, e}:
+    case F.Range{s, e}:
       e
 
 def F.range.to_list.go(n: Nat, +i: U32, +acc: List<&2, U32>) -> List<&2, U32>:
@@ -609,57 +784,95 @@ def F.range.to_list.go(n: Nat, +i: U32, +acc: List<&2, U32>) -> List<&2, U32>:
     case 1n+p:
       F.range.to_list.go(p, (i + 1 : U32), (i <> acc))
 
-def F.range.to_list(+a: U32, +b: U32) -> List<&2, U32>:
-  F.range.to_list.go(U32.to_nat(F.i32.max((b - a : U32), 0)), a, Nil{})
-
-def F.range.list(r: F.Range) -> List<&2, U32>:
+def F.range.to_list(r: F.Range) -> List<&2, U32>:
   match r:
-    case F.Range.mk{s, e}:
-      F.range.to_list(s, e)
+    case F.Range{+s, e}:
+      F.range.to_list.go(U32.to_nat(F.i32.max((e - s : U32), 0)), s, Nil{})
 
 def F.range.len(r: F.Range) -> U32:
   match r:
-    case F.Range.mk{s, e}:
+    case F.Range{s, e}:
       F.i32.max((e - s : U32), 0)
 
 def F.range.contains(r: F.Range, +x: U32) -> Bool:
   match r:
-    case F.Range.mk{s, e}:
+    case F.Range{s, e}:
       Bool.and(F.i32.ge(x, s), F.i32.lt(x, e))
 
-def F.range.index.k(+s: U32, +e: U32, +i: U32, neg: Bool) -> U32:
+def F.range.index.fin(v: U32, ok: Bool) -> Result<&2, &2, String, U32>:
+  match ok:
+    case True{}:
+      Done{v}
+    case False{}:
+      Fail{"range index out of range"}
+
+def F.range.index.k(+s: U32, +e: U32, +i: U32, neg: Bool) -> Result<&2, &2, String, U32>:
   match neg:
     case True{}:
-      (e + i : U32)
+      F.range.index.fin((e + i : U32), F.i32.ge((e + i : U32), s))
     case False{}:
-      (s + i : U32)
+      F.range.index.fin((s + i : U32), F.i32.lt((s + i : U32), e))
 
-def F.range.index(r: F.Range, +i: U32) -> U32:
+def F.range.index(r: F.Range, +i: U32) -> Result<&2, &2, String, U32>:
   match r:
-    case F.Range.mk{s, e}:
+    case F.Range{s, e}:
       F.range.index.k(s, e, i, F.i32.neg(i))
+
+def F.range.first.k(+s: U32, nonempty: Bool) -> Result<&2, &2, String, U32>:
+  match nonempty:
+    case True{}:
+      Done{s}
+    case False{}:
+      Fail{"min() of an empty range"}
+
+def F.range.first(r: F.Range) -> Result<&2, &2, String, U32>:
+  match r:
+    case F.Range{+s, e}:
+      F.range.first.k(s, F.i32.lt(s, e))
+
+def F.range.last.k(+e: U32, nonempty: Bool) -> Result<&2, &2, String, U32>:
+  match nonempty:
+    case True{}:
+      Done{(e - 1 : U32)}
+    case False{}:
+      Fail{"max() of an empty range"}
+
+def F.range.last(r: F.Range) -> Result<&2, &2, String, U32>:
+  match r:
+    case F.Range{s, +e}:
+      F.range.last.k(e, F.i32.lt(s, e))
 
 def F.range.slice(r: F.Range, +a: U32, +b: U32) -> F.Range:
   match r:
-    case F.Range.mk{+s, +e}:
-      F.Range.mk{(s + F.str.clamp((e - s : U32), a) : U32), (s + F.str.clamp((e - s : U32), b) : U32)}
+    case F.Range{+s, +e}:
+      F.Range{(s + F.str.clamp((e - s : U32), a) : U32), (s + F.str.clamp((e - s : U32), b) : U32)}
 
-def F.range.slice_from(r: F.Range, +a: U32) -> F.Range:
-  match r:
-    case F.Range.mk{+s, +e}:
-      F.Range.mk{(s + F.str.clamp((e - s : U32), a) : U32), e}
+def F.range.slice_range(r: F.Range, r2: F.Range) -> F.Range:
+  match r2:
+    case F.Range{a, b}:
+      F.range.slice(r, a, b)
 
 def F.range.show(r: F.Range) -> String:
   match r:
-    case F.Range.mk{s, e}:
+    case F.Range{s, e}:
       F.i32.show(s) ++ ".." ++ F.i32.show(e)
 
 def F.range.eq(a: F.Range, b: F.Range) -> Bool:
   match a:
-    case F.Range.mk{s1, e1}:
+    case F.Range{s1, e1}:
       match b:
-        case F.Range.mk{s2, e2}:
+        case F.Range{s2, e2}:
           Bool.and(U32.is_eq(s1, s2), U32.is_eq(e1, e2))
+
+def F.range.lt(a: F.Range, b: F.Range) -> Bool:
+  match a:
+    case F.Range{+s1, e1}:
+      match b:
+        case F.Range{+s2, e2}:
+          Bool.or(F.i32.lt(s1, s2), Bool.and(U32.is_eq(s1, s2), F.i32.lt(e1, e2)))
+
+def F.range.default() -> F.Range:
+  F.Range{0, 0}
 
 # -- Lists --------------------------------------------------------------------
 def F.list.len(-A: Data, xs: List<&2, A>) -> U32:
@@ -671,27 +884,6 @@ def F.list.is_empty(-A: Data, xs: List<&2, A>) -> Bool:
       True{}
     case h <> t:
       False{}
-
-def F.list.tail(-A: Data, xs: List<&2, A>) -> List<&2, A>:
-  match xs:
-    case Nil{}:
-      Nil{}
-    case h <> t:
-      t
-
-def F.list.head_unsafe(-A: Data, xs: List<&2, A>) -> A:
-  match xs:
-    case Nil{}:
-      F.crash(A, "empty list")
-    case h <> t:
-      h
-
-def F.list.head_or_abort(-A: Data, xs: List<&2, A>) -> Result<&2, &2, String, A>:
-  match xs:
-    case Nil{}:
-      Fail{"the stream produced no item"}
-    case h <> t:
-      Done{h}
 
 def F.list.first(-A: Data, xs: List<&2, A>) -> Maybe<&2, A>:
   match xs:
@@ -714,24 +906,19 @@ def F.list.last(-A: Data, xs: List<&2, A>) -> Maybe<&2, A>:
     case h <> t:
       Some{F.list.last.go(A, t, h)}
 
-def F.list.last_or_abort.k(-A: Data, m: Maybe<&2, A>) -> Result<&2, &2, String, A>:
-  match m:
-    case Some{v}:
-      Done{v}
-    case None{}:
-      Fail{"pop from an empty list"}
-
-def F.list.last_or_abort(-A: Data, xs: List<&2, A>) -> Result<&2, &2, String, A>:
-  F.list.last_or_abort.k(A, F.list.last(A, xs))
-
-def F.list.reverse(-A: Data, xs: List<&2, A>) -> List<&2, A>:
-  List.reverse(&2, A, xs)
-
-def F.list.append(-A: Data, xs: List<&2, A>, ys: List<&2, A>) -> List<&2, A>:
-  List.append(&2, A, xs, ys)
-
 def F.list.push(-A: Data, xs: List<&2, A>, x: A) -> List<&2, A>:
   List.append(&2, A, xs, [x])
+
+# the list without its last element, and that element
+def F.list.pop.k(-A: Data, r: List<&2, A>) -> Result<&2, &2, String, F.Pair<List<&2, A>, A>>:
+  match r:
+    case Nil{}:
+      Fail{"pop from an empty list"}
+    case h <> t:
+      Done{F.Pair{List.reverse(&2, A, t), h}}
+
+def F.list.pop(-A: Data, xs: List<&2, A>) -> Result<&2, &2, String, F.Pair<List<&2, A>, A>>:
+  F.list.pop.k(A, List.reverse(&2, A, xs))
 
 def F.list.drop_last.go(-A: Data, t: List<&2, A>, h: A) -> List<&2, A>:
   match t:
@@ -770,8 +957,10 @@ def F.list.slice.k(-A: Data, xs: List<&2, A>, +a: U32, +b: U32) -> List<&2, A>:
 def F.list.slice(-A: Data, +xs: List<&2, A>, +a: U32, +b: U32) -> List<&2, A>:
   F.list.slice.k(A, xs, F.str.clamp(F.list.len(A, xs), a), F.str.clamp(F.list.len(A, xs), b))
 
-def F.list.slice_from(-A: Data, +xs: List<&2, A>, +a: U32) -> List<&2, A>:
-  List.drop(&2, A, xs, U32.to_nat(F.str.clamp(F.list.len(A, xs), a)))
+def F.list.slice_range(-A: Data, xs: List<&2, A>, r: F.Range) -> List<&2, A>:
+  match r:
+    case F.Range{a, b}:
+      F.list.slice(A, xs, a, b)
 
 def F.list.set.go(-A: Data, xs: List<&2, A>, n: Nat, +v: A) -> List<&2, A>:
   match xs n:
@@ -792,78 +981,60 @@ def F.list.set.k(-A: Data, +xs: List<&2, A>, +i: U32, +v: A, ok: Bool) -> Result
 def F.list.set(-A: Data, +xs: List<&2, A>, +i: U32, +v: A) -> Result<&2, &2, String, List<&2, A>>:
   F.list.set.k(A, xs, i, v, Bool.and(F.i32.lt(i, F.list.len(A, xs)), F.i32.ge(i, (0 - F.list.len(A, xs) : U32))))
 
-def F.list.sum_u32(xs: List<&2, U32>) -> U32:
+# a list pattern needs a list of the right length
+def F.list.need_exactly.k(+n: U32, +len: U32) -> Result<&2, &2, String, Unit>:
+  F.assert(U32.is_eq(len, n), "expected a list of " ++ F.i32.show(n) ++ " elements, got " ++ F.i32.show(len))
+
+def F.list.need_exactly(-A: Data, xs: List<&2, A>, +n: U32) -> Result<&2, &2, String, Unit>:
+  F.list.need_exactly.k(n, F.list.len(A, xs))
+
+def F.list.need_at_least.k(+n: U32, +len: U32) -> Result<&2, &2, String, Unit>:
+  F.assert(U32.is_ge(len, n), "expected a list of at least " ++ F.i32.show(n) ++ " elements, got " ++ F.i32.show(len))
+
+def F.list.need_at_least(-A: Data, xs: List<&2, A>, +n: U32) -> Result<&2, &2, String, Unit>:
+  F.list.need_at_least.k(n, F.list.len(A, xs))
+
+def F.list.sum(~A: Data, ~add: A -> A -> A, xs: List<&2, A>, acc: A) -> A:
   match xs:
     case Nil{}:
-      0
+      acc
     case h <> t:
-      (h + F.list.sum_u32(t) : U32)
+      F.list.sum(~A, ~add, t, add(acc, h))
 
-def F.list.sum_f32(xs: List<&2, F32>) -> F32:
-  match xs:
-    case Nil{}:
-      0.0
-    case h <> t:
-      (h + F.list.sum_f32(t) : F32)
-
-def F.list.fold_i32.pick(+acc: U32, +h: U32, take: Bool) -> U32:
+def F.list.pick(-A: Data, acc: A, h: A, take: Bool) -> A:
   match take:
     case True{}:
       h
     case False{}:
       acc
 
-def F.list.fold_i32.go(xs: List<&2, U32>, +acc: U32, +pick_lt: Bool) -> U32:
+def F.list.min.go(~A: Data, ~lt: A -> A -> Bool, xs: List<&2, A>, +acc: A) -> A:
   match xs:
     case Nil{}:
       acc
     case +h <> t:
-      F.list.fold_i32.go(t, F.list.fold_i32.pick(acc, h, F.bool.eq(pick_lt, F.i32.lt(h, acc))), pick_lt)
+      F.list.min.go(~A, ~lt, t, F.list.pick(A, acc, h, lt(h, acc)))
 
-def F.list.min_i32(xs: List<&2, U32>) -> Result<&2, &2, String, U32>:
+def F.list.min(~A: Data, ~lt: A -> A -> Bool, xs: List<&2, A>) -> Result<&2, &2, String, A>:
   match xs:
     case Nil{}:
       Fail{"min() of an empty list"}
     case h <> t:
-      Done{F.list.fold_i32.go(t, h, True{})}
+      Done{F.list.min.go(~A, ~lt, t, h)}
 
-def F.list.max_i32(xs: List<&2, U32>) -> Result<&2, &2, String, U32>:
-  match xs:
-    case Nil{}:
-      Fail{"max() of an empty list"}
-    case h <> t:
-      Done{F.list.fold_i32.go(t, h, False{})}
-
-def F.list.fold_f32.pick(+acc: F32, +h: F32, take: Bool) -> F32:
-  match take:
-    case True{}:
-      h
-    case False{}:
-      acc
-
-def F.list.fold_f32.go(xs: List<&2, F32>, +acc: F32, +pick_lt: Bool) -> F32:
+def F.list.max.go(~A: Data, ~lt: A -> A -> Bool, xs: List<&2, A>, +acc: A) -> A:
   match xs:
     case Nil{}:
       acc
     case +h <> t:
-      F.list.fold_f32.go(t, F.list.fold_f32.pick(acc, h, F.bool.eq(pick_lt, F32.is_lt(h, acc))), pick_lt)
+      F.list.max.go(~A, ~lt, t, F.list.pick(A, acc, h, lt(acc, h)))
 
-def F.list.min_f32(xs: List<&2, F32>) -> Result<&2, &2, String, F32>:
-  match xs:
-    case Nil{}:
-      Fail{"min() of an empty list"}
-    case h <> t:
-      Done{F.list.fold_f32.go(t, h, True{})}
-
-def F.list.max_f32(xs: List<&2, F32>) -> Result<&2, &2, String, F32>:
+def F.list.max(~A: Data, ~lt: A -> A -> Bool, xs: List<&2, A>) -> Result<&2, &2, String, A>:
   match xs:
     case Nil{}:
       Fail{"max() of an empty list"}
     case h <> t:
-      Done{F.list.fold_f32.go(t, h, False{})}
-
-def F.list.join(xs: List<&2, String>, +sep: String) -> String:
-  String.join(xs, sep)
+      Done{F.list.max.go(~A, ~lt, t, h)}
 
 def F.list.contains(~A: Data, ~eq: A -> A -> Bool, xs: List<&2, A>, +x: A) -> Bool:
   match xs:
@@ -872,20 +1043,15 @@ def F.list.contains(~A: Data, ~eq: A -> A -> Bool, xs: List<&2, A>, +x: A) -> Bo
     case h <> t:
       Bool.or(eq(h, x), F.list.contains(~A, ~eq, t, x))
 
-@unsafe
-def F.list.index_of.go(~A: Data, ~eq: A -> A -> Bool, hit: Bool, xs: List<&2, A>, +x: A, +i: U32) -> Maybe<&2, U32>:
-  match hit:
-    case True{}:
-      Some{i}
-    case False{}:
-      match xs:
-        case Nil{}:
-          None{}
-        case h <> t:
-          F.list.index_of.go(~A, ~eq, eq(h, x), t, x, (i + 1 : U32))
+def F.list.index_of.go(~A: Data, ~eq: A -> A -> Bool, xs: List<&2, A>, +x: A, +i: U32) -> Maybe<&2, U32>:
+  match xs:
+    case Nil{}:
+      None{}
+    case h <> t:
+      (Bool.pick(Unit -> Maybe<&2, U32>, eq(h, x), _ => Some{i}, _ => F.list.index_of.go(~A, ~eq, t, x, (i + 1 : U32))))(Unit{})
 
 def F.list.index_of(~A: Data, ~eq: A -> A -> Bool, xs: List<&2, A>, +x: A) -> Maybe<&2, U32>:
-  F.list.index_of.go(~A, ~eq, False{}, xs, x, (0 - 1 : U32))
+  F.list.index_of.go(~A, ~eq, xs, x, 0)
 
 def F.list.flatten(-A: Data, xss: List<&2, List<&2, A>>) -> List<&2, A>:
   List.concat(&2, A, xss)
@@ -893,15 +1059,15 @@ def F.list.flatten(-A: Data, xss: List<&2, List<&2, A>>) -> List<&2, A>:
 def F.list.repeat(-A: Data, +x: A, +n: U32) -> List<&2, A>:
   List.replicate(A, U32.to_nat(F.i32.max(n, 0)), x)
 
-def F.list.enumerate.go(-A: Data, xs: List<&2, A>, +i: U32) -> List<&2, F.Pair<U32, A>>:
+def F.list.enumerate_from(-A: Data, xs: List<&2, A>, +i: U32) -> List<&2, F.Pair<U32, A>>:
   match xs:
     case Nil{}:
       Nil{}
     case h <> t:
-      (F.Pair.mk{i, h} <> F.list.enumerate.go(A, t, (i + 1 : U32)))
+      (F.Pair{i, h} <> F.list.enumerate_from(A, t, (i + 1 : U32)))
 
 def F.list.enumerate(-A: Data, xs: List<&2, A>) -> List<&2, F.Pair<U32, A>>:
-  F.list.enumerate.go(A, xs, 0)
+  F.list.enumerate_from(A, xs, 0)
 
 def F.list.zip(-A: Data, -B: Data, xs: List<&2, A>, ys: List<&2, B>) -> List<&2, F.Pair<A, B>>:
   match xs ys:
@@ -910,7 +1076,7 @@ def F.list.zip(-A: Data, -B: Data, xs: List<&2, A>, ys: List<&2, B>) -> List<&2,
     case h <> t Nil{}:
       Nil{}
     case h <> t h2 <> t2:
-      (F.Pair.mk{h, h2} <> F.list.zip(A, B, t, t2))
+      (F.Pair{h, h2} <> F.list.zip(A, B, t, t2))
 
 def F.list.show.go(~A: Data, ~f: A -> String, xs: List<&2, A>) -> String:
   match xs:
@@ -937,7 +1103,8 @@ def F.list.eq(~A: Data, ~eq: A -> A -> Bool, xs: List<&2, A>, ys: List<&2, A>) -
     case h <> t h2 <> t2:
       Bool.and(eq(h, h2), F.list.eq(~A, ~eq, t, t2))
 
-def F.list.lt(~A: Data, ~lt: A -> A -> Bool, ~eq: A -> A -> Bool, xs: List<&2, A>, ys: List<&2, A>) -> Bool:
+# lexicographic order from the element order alone
+def F.list.lt(~A: Data, ~lt: A -> A -> Bool, xs: List<&2, A>, ys: List<&2, A>) -> Bool:
   match xs ys:
     case Nil{} Nil{}:
       False{}
@@ -946,21 +1113,31 @@ def F.list.lt(~A: Data, ~lt: A -> A -> Bool, ~eq: A -> A -> Bool, xs: List<&2, A
     case h <> t Nil{}:
       False{}
     case +h <> t +h2 <> t2:
-      Bool.or(lt(h, h2), Bool.and(eq(h, h2), F.list.lt(~A, ~lt, ~eq, t, t2)))
+      Bool.or(lt(h, h2), Bool.and(Bool.not(lt(h2, h)), F.list.lt(~A, ~lt, t, t2)))
 
 def F.list.sort.le(~A: Data, ~lt: A -> A -> Bool, a: A, b: A) -> Bool:
   Bool.not(lt(b, a))
 
+def F.list.sort(~A: Data, ~lt: A -> A -> Bool, xs: List<&2, A>) -> List<&2, A>:
+  List.sort(~A, ~F.list.sort.le(~A, ~lt), xs)
+
 # sort by precomputed keys: zip, sort the pairs by key, drop the keys
 def F.list.sort_decorated.key(~K: Data, ~A: Data, e: Unit, p: F.Pair<K, A>) -> K:
   match p:
-    case F.Pair.mk{k, v}:
+    case F.Pair{k, v}:
       k
 
 def F.list.sort_decorated.val(~K: Data, ~A: Data, e: Unit, p: F.Pair<K, A>) -> A:
   match p:
-    case F.Pair.mk{k, v}:
+    case F.Pair{k, v}:
       v
+
+def F.list.sort_decorated.le(~K: Data, ~A: Data, ~lt: K -> K -> Bool, a: F.Pair<K, A>, b: F.Pair<K, A>) -> Bool:
+  match a:
+    case F.Pair{ka, va}:
+      match b:
+        case F.Pair{kb, vb}:
+          Bool.not(lt(kb, ka))
 
 # -- Lists: higher-order, threading an environment ---------------------------
 def F.list.map_env(~E: Data, ~A: Data, ~B: Data, ~f: E -> A -> B, +e: E, xs: List<&2, A>) -> List<&2, B>:
@@ -970,57 +1147,8 @@ def F.list.map_env(~E: Data, ~A: Data, ~B: Data, ~f: E -> A -> B, +e: E, xs: Lis
     case h <> t:
       (f(e, h) <> F.list.map_env(~E, ~A, ~B, ~f, e, t))
 
-# insertion sort (stable), enough for the sizes tests use
-# does x sort before the head of acc? (true for an empty acc)
-def F.list.sort_by_key_env.before(~E: Data, ~A: Data, ~K: Data, ~key: E -> A -> K, ~lt: K -> K -> Bool, +e: E, +x: A, acc: List<&2, A>) -> Bool:
-  match acc:
-    case Nil{}:
-      True{}
-    case h <> t:
-      lt(key(e, x), key(e, h))
-
-@unsafe
-def F.list.sort_by_key_env.insert(~E: Data, ~A: Data, ~K: Data, ~key: E -> A -> K, ~lt: K -> K -> Bool, before: Bool, +e: E, +x: A, +acc: List<&2, A>) -> List<&2, A>:
-  match before:
-    case True{}:
-      (x <> acc)
-    case False{}:
-      match acc:
-        case Nil{}:
-          [x]
-        case h <> t:
-          +t2 = t
-          (h <> F.list.sort_by_key_env.insert(~E, ~A, ~K, ~key, ~lt, F.list.sort_by_key_env.before(~E, ~A, ~K, ~key, ~lt, e, x, t2), e, x, t2))
-
-def F.list.sort_by_key_env.insert_all(~E: Data, ~A: Data, ~K: Data, ~key: E -> A -> K, ~lt: K -> K -> Bool, +e: E, fuel: Nat, xs: List<&2, A>, +acc: List<&2, A>) -> List<&2, A>:
-  match xs:
-    case Nil{}:
-      acc
-    case +h <> t:
-      +acc2 = acc
-      F.list.sort_by_key_env.insert_all(~E, ~A, ~K, ~key, ~lt, e, fuel, t, F.list.sort_by_key_env.insert(~E, ~A, ~K, ~key, ~lt, F.list.sort_by_key_env.before(~E, ~A, ~K, ~key, ~lt, e, h, acc2), e, h, acc2))
-
-def F.list.sort_by_key_env.merge_sort(~E: Data, ~A: Data, ~K: Data, ~key: E -> A -> K, ~lt: K -> K -> Bool, +e: E, fuel: Nat, +xs: List<&2, A>) -> List<&2, A>:
-  match fuel:
-    case 0n:
-      xs
-    case 1n+f:
-      F.list.sort_by_key_env.insert_all(~E, ~A, ~K, ~key, ~lt, e, f, xs, Nil{})
-
-def F.list.sort_by_key_env.go(~E: Data, ~A: Data, ~K: Data, ~key: E -> A -> K, ~lt: K -> K -> Bool, +e: E, +xs: List<&2, A>) -> List<&2, A>:
-  F.list.sort_by_key_env.merge_sort(~E, ~A, ~K, ~key, ~lt, e, U32.to_nat(F.list.len(A, xs)), xs)
-
-def F.list.sort_by_key_env(~E: Data, ~A: Data, ~K: Data, ~key: E -> A -> K, ~lt: K -> K -> Bool, +e: E, xs: List<&2, A>) -> List<&2, A>:
-  F.list.sort_by_key_env.go(~E, ~A, ~K, ~key, ~lt, e, xs)
-
 def F.list.sort_decorated(~K: Data, ~A: Data, ~lt: K -> K -> Bool, keys: List<&2, K>, xs: List<&2, A>) -> List<&2, A>:
-  F.list.map_env(~Unit, ~F.Pair<K, A>, ~A, ~F.list.sort_decorated.val(~K, ~A), Unit{}, F.list.sort_by_key_env(~Unit, ~F.Pair<K, A>, ~K, ~F.list.sort_decorated.key(~K, ~A), ~lt, Unit{}, F.list.zip(K, A, keys, xs)))
-
-def F.list.sort(~A: Data, ~lt: A -> A -> Bool, xs: List<&2, A>) -> List<&2, A>:
-  List.sort(~A, ~F.list.sort.le(~A, ~lt), xs)
-
-def F.list.sort_by_key_env.le(~E: Data, ~A: Data, ~K: Data, ~key: E -> A -> K, ~lt: K -> K -> Bool, +e: E, +a: A, +b: A) -> Bool:
-  Bool.not(lt(key(e, b), key(e, a)))
+  F.list.map_env(~Unit, ~F.Pair<K, A>, ~A, ~F.list.sort_decorated.val(~K, ~A), Unit{}, List.sort(~F.Pair<K, A>, ~F.list.sort_decorated.le(~K, ~A, ~lt), F.list.zip(K, A, keys, xs)))
 
 def F.list.map_res_env(~E: Data, ~A: Data, ~B: Data, ~f: E -> A -> Result<&2, &2, String, B>, +e: E, xs: List<&2, A>) -> Result<&2, &2, String, List<&2, B>>:
   match xs:
@@ -1042,7 +1170,20 @@ def F.list.map_io_env(~E: Data, ~A: Data, ~B: Data, ~f: E -> A -> IO(B), +e: E, 
         ys : List<&2, B> <- F.list.map_io_env(~E, ~A, ~B, ~f, e, t)
         return (y <> ys)
 
-def F.list.filter.put(-A: Data, h: A, +r: List<&2, A>, keep: Bool) -> List<&2, A>:
+def F.list.sort_by_key_env(~E: Data, ~A: Data, ~K: Data, ~key: E -> A -> K, ~lt: K -> K -> Bool, +e: E, +xs: List<&2, A>) -> List<&2, A>:
+  F.list.sort_decorated(~K, ~A, ~lt, F.list.map_env(~E, ~A, ~K, ~key, e, xs), xs)
+
+def F.list.sort_by_key_res_env(~E: Data, ~A: Data, ~K: Data, ~key: E -> A -> Result<&2, &2, String, K>, ~lt: K -> K -> Bool, +e: E, +xs: List<&2, A>) -> Result<&2, &2, String, List<&2, A>>:
+  do Result<&2, &2, String, List<&2, A>>:
+    keys : List<&2, K> <- F.list.map_res_env(~E, ~A, ~K, ~key, e, xs)
+    return F.list.sort_decorated(~K, ~A, ~lt, keys, xs)
+
+def F.list.sort_by_key_io_env(~E: Data, ~A: Data, ~K: Data, ~key: E -> A -> IO(K), ~lt: K -> K -> Bool, +e: E, +xs: List<&2, A>) -> IO(List<&2, A>):
+  do IO<List<&2, A>>:
+    keys : List<&2, K> <- F.list.map_io_env(~E, ~A, ~K, ~key, e, xs)
+    return F.list.sort_decorated(~K, ~A, ~lt, keys, xs)
+
+def F.list.filter.put(-A: Data, h: A, r: List<&2, A>, keep: Bool) -> List<&2, A>:
   match keep:
     case True{}:
       (h <> r)
@@ -1185,63 +1326,6 @@ def F.list.count_env(~E: Data, ~A: Data, ~f: E -> A -> Bool, +e: E, xs: List<&2,
     case h <> t:
       (Bool.to_u32(f(e, h)) + F.list.count_env(~E, ~A, ~f, e, t) : U32)
 
-# -- Lists of results: the per-element railway --------------------------------
-def F.list.rmap.one(~E: Data, ~A: Data, ~B: Data, ~X: Data, ~f: E -> A -> B, +e: E, r: Result<&2, &2, X, A>) -> Result<&2, &2, X, B>:
-  match r:
-    case Done{v}:
-      Done{f(e, v)}
-    case Fail{x}:
-      Fail{x}
-
-def F.list.rmap_env(~E: Data, ~A: Data, ~B: Data, ~X: Data, ~f: E -> A -> B, +e: E, xs: List<&2, Result<&2, &2, X, A>>) -> List<&2, Result<&2, &2, X, B>>:
-  match xs:
-    case Nil{}:
-      Nil{}
-    case h <> t:
-      (F.list.rmap.one(~E, ~A, ~B, ~X, ~f, e, h) <> F.list.rmap_env(~E, ~A, ~B, ~X, ~f, e, t))
-
-def F.list.rfilter.keep(~E: Data, ~A: Data, ~X: Data, ~f: E -> A -> Bool, +e: E, r: Result<&2, &2, X, A>) -> Bool:
-  match r:
-    case Done{v}:
-      f(e, v)
-    case Fail{x}:
-      True{}
-
-def F.list.rfilter_env(~E: Data, ~A: Data, ~X: Data, ~f: E -> A -> Bool, +e: E, xs: List<&2, Result<&2, &2, X, A>>) -> List<&2, Result<&2, &2, X, A>>:
-  match xs:
-    case Nil{}:
-      Nil{}
-    case +h <> t:
-      F.list.filter.put(Result<&2, &2, X, A>, h, F.list.rfilter_env(~E, ~A, ~X, ~f, e, t), F.list.rfilter.keep(~E, ~A, ~X, ~f, e, h))
-
-def F.list.rhandle.one(~E: Data, ~X: Data, ~A: Data, ~f: E -> X -> A, +e: E, r: Result<&2, &2, X, A>) -> A:
-  match r:
-    case Done{v}:
-      v
-    case Fail{x}:
-      f(e, x)
-
-def F.list.rhandle_env(~E: Data, ~X: Data, ~A: Data, ~f: E -> X -> A, +e: E, xs: List<&2, Result<&2, &2, X, A>>) -> List<&2, A>:
-  match xs:
-    case Nil{}:
-      Nil{}
-    case h <> t:
-      (F.list.rhandle.one(~E, ~X, ~A, ~f, e, h) <> F.list.rhandle_env(~E, ~X, ~A, ~f, e, t))
-
-def F.list.rhandle_value.one(-X: Data, -A: Data, r: Result<&2, &2, X, A>, +d: A) -> A:
-  match r:
-    case Done{v}:
-      v
-    case Fail{x}:
-      d
-
-def F.list.rhandle_value(-X: Data, -A: Data, xs: List<&2, Result<&2, &2, X, A>>, +d: A) -> List<&2, A>:
-  match xs:
-    case Nil{}:
-      Nil{}
-    case h <> t:
-      (F.list.rhandle_value.one(X, A, h, d) <> F.list.rhandle_value(X, A, t, d))
-
 # -- Maybe --------------------------------------------------------------------
 def F.maybe.show(~A: Data, ~f: A -> String, m: Maybe<&2, A>) -> String:
   match m:
@@ -1261,6 +1345,35 @@ def F.maybe.eq(~A: Data, ~eq: A -> A -> Bool, a: Maybe<&2, A>, b: Maybe<&2, A>) 
     case None{} None{}:
       True{}
 
+# nothing sorts before every value
+def F.maybe.lt(~A: Data, ~lt: A -> A -> Bool, a: Maybe<&2, A>, b: Maybe<&2, A>) -> Bool:
+  match a b:
+    case Some{x} Some{y}:
+      lt(x, y)
+    case Some{x} None{}:
+      False{}
+    case None{} Some{y}:
+      True{}
+    case None{} None{}:
+      False{}
+
+def F.maybe.default(~A: Data, ~d: A) -> Maybe<&2, A>:
+  None{}
+
+def F.maybe.or(-A: Data, m: Maybe<&2, A>, d: A) -> A:
+  match m:
+    case Some{v}:
+      v
+    case None{}:
+      d
+
+def F.maybe.unwrap(-A: Data, m: Maybe<&2, A>) -> Result<&2, &2, String, A>:
+  match m:
+    case Some{v}:
+      Done{v}
+    case None{}:
+      Fail{"unwrap of nothing"}
+
 # -- Result -------------------------------------------------------------------
 def F.result.show(~X: Data, ~A: Data, ~fx: X -> String, ~fa: A -> String, r: Result<&2, &2, X, A>) -> String:
   match r:
@@ -1269,33 +1382,31 @@ def F.result.show(~X: Data, ~A: Data, ~fx: X -> String, ~fa: A -> String, r: Res
     case Fail{x}:
       "{err: " ++ fx(x) ++ "}"
 
-def F.result.eq.err(~X: Data, ~A: Data, ~ex: X -> X -> Bool, x: X, b: Result<&2, &2, X, A>) -> Bool:
-  match b:
-    case Done{w}:
+def F.result.eq(~X: Data, ~A: Data, ~ex: X -> X -> Bool, ~ea: A -> A -> Bool, a: Result<&2, &2, X, A>, b: Result<&2, &2, X, A>) -> Bool:
+  match a b:
+    case Done{v} Done{w}:
+      ea(v, w)
+    case Done{v} Fail{y}:
       False{}
-    case Fail{y}:
+    case Fail{x} Done{w}:
+      False{}
+    case Fail{x} Fail{y}:
       ex(x, y)
 
-def F.result.eq.ok(~X: Data, ~A: Data, ~ea: A -> A -> Bool, v: A, b: Result<&2, &2, X, A>) -> Bool:
-  match b:
-    case Done{w}:
-      ea(v, w)
-    case Fail{y}:
+# errors sort before values
+def F.result.lt(~X: Data, ~A: Data, ~lx: X -> X -> Bool, ~la: A -> A -> Bool, a: Result<&2, &2, X, A>, b: Result<&2, &2, X, A>) -> Bool:
+  match a b:
+    case Done{v} Done{w}:
+      la(v, w)
+    case Done{v} Fail{y}:
       False{}
+    case Fail{x} Done{w}:
+      True{}
+    case Fail{x} Fail{y}:
+      lx(x, y)
 
-def F.result.eq(~X: Data, ~A: Data, ~ex: X -> X -> Bool, ~ea: A -> A -> Bool, a: Result<&2, &2, X, A>, +b: Result<&2, &2, X, A>) -> Bool:
-  match a:
-    case Done{v}:
-      F.result.eq.ok(~X, ~A, ~ea, v, b)
-    case Fail{x}:
-      F.result.eq.err(~X, ~A, ~ex, x, b)
-
-def F.result.or(-X: Data, -A: Data, r: Result<&2, &2, X, A>, d: A) -> A:
-  match r:
-    case Done{v}:
-      v
-    case Fail{x}:
-      d
+def F.result.default(~X: Data, ~A: Data, ~dx: X, ~da: A) -> Result<&2, &2, X, A>:
+  Done{da}
 
 def F.result.unwrap_ok(-X: Data, -A: Data, r: Result<&2, &2, X, A>) -> Result<&2, &2, String, A>:
   match r:
@@ -1311,86 +1422,42 @@ def F.result.unwrap_err(-X: Data, -A: Data, r: Result<&2, &2, X, A>) -> Result<&
     case Fail{x}:
       Done{x}
 
-def F.result.map_env(~E: Data, ~X: Data, ~A: Data, ~B: Data, ~f: E -> A -> B, +e: E, r: Result<&2, &2, X, A>) -> Result<&2, &2, X, B>:
-  match r:
-    case Done{v}:
-      Done{f(e, v)}
-    case Fail{x}:
-      Fail{x}
+# -- Pairs --------------------------------------------------------------------
+def F.pair.key(-A: Data, -B: Data, p: F.Pair<A, B>) -> A:
+  match p:
+    case F.Pair{k, v}:
+      k
 
-def F.result.bind_env(~E: Data, ~X: Data, ~A: Data, ~B: Data, ~f: E -> A -> Result<&2, &2, X, B>, +e: E, r: Result<&2, &2, X, A>) -> Result<&2, &2, X, B>:
-  match r:
-    case Done{v}:
-      f(e, v)
-    case Fail{x}:
-      Fail{x}
-
-def F.result.map_res_env(~E: Data, ~X: Data, ~A: Data, ~B: Data, ~f: E -> A -> Result<&2, &2, String, B>, +e: E, r: Result<&2, &2, X, A>) -> Result<&2, &2, String, Result<&2, &2, X, B>>:
-  match r:
-    case Done{v}:
-      do Result<&2, &2, String, Result<&2, &2, X, B>>:
-        w : B <- f(e, v)
-        return Done{w}
-    case Fail{x}:
-      Done{Fail{x}}
-
-def F.result.bind_res_env(~E: Data, ~X: Data, ~A: Data, ~B: Data, ~f: E -> A -> Result<&2, &2, String, Result<&2, &2, X, B>>, +e: E, r: Result<&2, &2, X, A>) -> Result<&2, &2, String, Result<&2, &2, X, B>>:
-  match r:
-    case Done{v}:
-      f(e, v)
-    case Fail{x}:
-      Done{Fail{x}}
-
-def F.result.map_io_env(~E: Data, ~X: Data, ~A: Data, ~B: Data, ~f: E -> A -> IO(B), +e: E, r: Result<&2, &2, X, A>) -> IO(Result<&2, &2, X, B>):
-  match r:
-    case Done{v}:
-      do IO<Result<&2, &2, X, B>>:
-        w : B <- f(e, v)
-        return Done{w}
-    case Fail{x}:
-      IO.pure(Result<&2, &2, X, B>, Fail{x})
-
-def F.result.bind_io_env(~E: Data, ~X: Data, ~A: Data, ~B: Data, ~f: E -> A -> IO(Result<&2, &2, X, B>), +e: E, r: Result<&2, &2, X, A>) -> IO(Result<&2, &2, X, B>):
-  match r:
-    case Done{v}:
-      f(e, v)
-    case Fail{x}:
-      IO.pure(Result<&2, &2, X, B>, Fail{x})
-
-def F.result.handle_env(~E: Data, ~X: Data, ~A: Data, ~f: E -> X -> A, +e: E, r: Result<&2, &2, X, A>) -> A:
-  match r:
-    case Done{v}:
+def F.pair.value(-A: Data, -B: Data, p: F.Pair<A, B>) -> B:
+  match p:
+    case F.Pair{k, v}:
       v
-    case Fail{x}:
-      f(e, x)
 
-def F.result.handle_res_env(~E: Data, ~X: Data, ~A: Data, ~f: E -> X -> Result<&2, &2, String, A>, +e: E, r: Result<&2, &2, X, A>) -> Result<&2, &2, String, A>:
-  match r:
-    case Done{v}:
-      Done{v}
-    case Fail{x}:
-      f(e, x)
+def F.pair.show(~A: Data, ~B: Data, ~fa: A -> String, ~fb: B -> String, p: F.Pair<A, B>) -> String:
+  match p:
+    case F.Pair{k, v}:
+      "[" ++ fa(k) ++ ", " ++ fb(v) ++ "]"
 
-def F.result.handle_io_env(~E: Data, ~X: Data, ~A: Data, ~f: E -> X -> IO(A), +e: E, r: Result<&2, &2, X, A>) -> IO(A):
-  match r:
-    case Done{v}:
-      IO.pure(A, v)
-    case Fail{x}:
-      f(e, x)
+def F.pair.eq(~A: Data, ~B: Data, ~ea: A -> A -> Bool, ~eb: B -> B -> Bool, a: F.Pair<A, B>, b: F.Pair<A, B>) -> Bool:
+  match a:
+    case F.Pair{k1, v1}:
+      match b:
+        case F.Pair{k2, v2}:
+          Bool.and(ea(k1, k2), eb(v1, v2))
+
+def F.pair.lt(~A: Data, ~B: Data, ~la: A -> A -> Bool, ~lb: B -> B -> Bool, a: F.Pair<A, B>, b: F.Pair<A, B>) -> Bool:
+  match a:
+    case F.Pair{+k1, v1}:
+      match b:
+        case F.Pair{+k2, v2}:
+          Bool.or(la(k1, k2), Bool.and(Bool.not(la(k2, k1)), lb(v1, v2)))
+
+def F.pair.default(~A: Data, ~B: Data, ~da: A, ~db: B) -> F.Pair<A, B>:
+  F.Pair{da, db}
 
 # -- Maps (string-keyed dictionaries) -----------------------------------------
 def F.map.lookup(-V: Data, +m: Map<&2, V>, key: String) -> Maybe<&2, V>:
   F.snd(Map<&2, V>, Maybe<&2, V>, Map.pop(&2, V, m, key))
-
-def F.map.get_or_abort.k(-V: Data, m: Maybe<&2, V>) -> Result<&2, &2, String, V>:
-  match m:
-    case Some{v}:
-      Done{v}
-    case None{}:
-      Fail{"missing key"}
-
-def F.map.get_or_abort(-V: Data, +m: Map<&2, V>, key: String) -> Result<&2, &2, String, V>:
-  F.map.get_or_abort.k(V, F.map.lookup(V, m, key))
 
 def F.map.has(-V: Data, +m: Map<&2, V>, key: String) -> Bool:
   F.snd(Map<&2, V>, Bool, Map.has(&2, V, m, key))
@@ -1398,22 +1465,14 @@ def F.map.has(-V: Data, +m: Map<&2, V>, key: String) -> Bool:
 def F.map.size(-V: Data, m: Map<&2, V>) -> U32:
   U32.from_nat(Map.size(&2, V, m))
 
-def F.io.err_text(e: U32 & String) -> String:
-  (code, msg) = e
-  msg
-
-def F.io.read_file.fin(r: Result<&1, &1, U32 & String, String>) -> Result<&2, &2, String, String>:
-  match r:
-    case Done{s}:
-      Done{s}
-    case Fail{e}:
-      Fail{F.io.err_text(e)}
+def F.map.values(-V: Data, m: Map<&2, V>) -> List<&2, V>:
+  Map.values(&2, V, m)
 
 # a key from Map.keys always has a value; a missing one is skipped
 def F.map.entries.one(-V: Data, k: String, mv: Maybe<&2, V>, rest: List<&2, F.Pair<String, V>>) -> List<&2, F.Pair<String, V>>:
   match mv:
     case Some{v}:
-      (F.Pair.mk{k, v} <> rest)
+      (F.Pair{k, v} <> rest)
     case None{}:
       rest
 
@@ -1431,34 +1490,37 @@ def F.map.show.go(~V: Data, ~f: V -> String, kvs: List<&2, F.Pair<String, V>>) -
   match kvs:
     case Nil{}:
       ""
-    case F.Pair.mk{k, v} <> t:
+    case F.Pair{k, v} <> t:
       ", " ++ k ++ ": " ++ f(v) ++ F.map.show.go(~V, ~f, t)
 
 def F.map.show.list(~V: Data, ~f: V -> String, kvs: List<&2, F.Pair<String, V>>) -> String:
   match kvs:
     case Nil{}:
       "{}"
-    case F.Pair.mk{k, v} <> t:
+    case F.Pair{k, v} <> t:
       "{" ++ k ++ ": " ++ f(v) ++ F.map.show.go(~V, ~f, t) ++ "}"
 
 def F.map.show(~V: Data, ~f: V -> String, m: Map<&2, V>) -> String:
   F.map.show.list(~V, ~f, F.map.entries(V, m))
 
-def F.map.eq.lists(~V: Data, ~eq: V -> V -> Bool, xs: List<&2, F.Pair<String, V>>, ys: List<&2, F.Pair<String, V>>) -> Bool:
-  match xs ys:
-    case Nil{} Nil{}:
-      True{}
-    case Nil{} h2 <> t2:
-      False{}
-    case h <> t Nil{}:
-      False{}
-    case F.Pair.mk{k1, v1} <> t F.Pair.mk{k2, v2} <> t2:
-      Bool.and(Bool.and(String.eq(k1, k2), eq(v1, v2)), F.map.eq.lists(~V, ~eq, t, t2))
-
 def F.map.eq(~V: Data, ~eq: V -> V -> Bool, a: Map<&2, V>, b: Map<&2, V>) -> Bool:
-  F.map.eq.lists(~V, ~eq, F.map.entries(V, a), F.map.entries(V, b))
+  F.list.eq(~F.Pair<String, V>, ~F.pair.eq(~String, ~V, ~String.eq, ~eq), F.map.entries(V, a), F.map.entries(V, b))
+
+def F.map.lt(~V: Data, ~lt: V -> V -> Bool, a: Map<&2, V>, b: Map<&2, V>) -> Bool:
+  F.list.lt(~F.Pair<String, V>, ~F.pair.lt(~String, ~V, ~String.is_lt, ~lt), F.map.entries(V, a), F.map.entries(V, b))
 
 # -- Effects ------------------------------------------------------------------
+def F.io.err_text(e: U32 & String) -> String:
+  (code, msg) = e
+  msg
+
+def F.io.read_file.fin(r: Result<&1, &1, U32 & String, String>) -> Result<&2, &2, String, String>:
+  match r:
+    case Done{s}:
+      Done{s}
+    case Fail{e}:
+      Fail{F.io.err_text(e)}
+
 def F.io.read_file.k(m: File & Result<&1, &1, U32 & String, String>) -> IO(Result<&2, &2, String, String>):
   (f, r) = m
   do IO<Result<&2, &2, String, String>>:

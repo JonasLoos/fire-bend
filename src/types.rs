@@ -1,21 +1,34 @@
-// src/bend/types.rs
-// The static type language of the compiler and its unifier.
+// src/types.rs
+// The static type language of the compiler: Hindley-Milner types with
+// constraints on type variables (qualified types) and closure sets.
 //
-// Types are Hindley-Milner with a few Fire-specific constructors. Type
-// variables live in a store with union-find style binding and levels for
-// let-generalization. Function types additionally carry a "closure set"
-// variable that accumulates every lambda or def that can flow into a value
-// of that type; the lowering uses it to pick a representation for function
-// values (see docs/compiler.md).
+// A constraint records one thing a def's body needs from a type it does not
+// know yet: an ordering, a way to show it, a field, a method. While the
+// checker runs, constraints wait on their subject type; once it is known
+// they are solved against it, and a constraint whose subject stays generic
+// when its def is generalized becomes a *dictionary parameter* of that def,
+// which the lowering emits as a Bend template parameter (`~lt: A -> A -> Bool`).
+// The Core IR refers to every such need by constraint id (`Dict`), so the
+// lowering can resolve each one either to a concrete def or to a forwarded
+// template parameter. See docs/compiler.md.
 
 use std::collections::BTreeSet;
 use std::fmt;
 
 pub type TVar = u32;
-pub type RecId = usize;
+/// Index of a data type in the program's type table (core::Program::types).
+pub type TypeId = usize;
 /// A lambda site or a def used as a value.
 pub type ClosId = usize;
 pub type ClosVar = u32;
+pub type ConstraintId = usize;
+
+/// Fixed positions of the builtin data types in every program's type table.
+pub const MAYBE: TypeId = 0;
+pub const RESULT: TypeId = 1;
+pub const PAIR: TypeId = 2;
+pub const RANGE: TypeId = 3;
+pub const BUILTIN_TYPES: usize = 4;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
@@ -27,46 +40,177 @@ pub enum Type {
     /// The type of `nothing` on its own.
     Unit,
     List(Box<Type>),
-    /// A string-keyed dictionary (`{}` used with `[]`).
+    /// A string-keyed dictionary.
     Map(Box<Type>),
-    /// `T | nothing`
-    Maybe(Box<Type>),
-    /// `{err: E}` / `{ok: A}`
-    Result(Box<Type>, Box<Type>),
     /// Parameters, return type, closure set.
     Fn(Vec<Type>, Box<Type>, ClosVar),
-    /// A nominal record (constructor-built object or literal shape) applied
-    /// to its type arguments.
-    Record(RecId, Vec<Type>),
-    /// A closed integer range `a..b`.
-    Range,
-    /// An open range or a lazy pipeline over one, yielding elements of the
-    /// given type.
-    Stream(Box<Type>),
+    /// A data type (declared, class, record shape, or builtin such as
+    /// `Maybe`) applied to its type arguments.
+    Data(TypeId, Vec<Type>),
 }
 
 impl Type {
     pub fn list(t: Type) -> Type {
         Type::List(Box::new(t))
     }
-    pub fn maybe(t: Type) -> Type {
-        Type::Maybe(Box::new(t))
-    }
     pub fn map(t: Type) -> Type {
         Type::Map(Box::new(t))
     }
-    pub fn result(e: Type, a: Type) -> Type {
-        Type::Result(Box::new(e), Box::new(a))
+    pub fn maybe(t: Type) -> Type {
+        Type::Data(MAYBE, vec![t])
     }
-    pub fn stream(t: Type) -> Type {
-        Type::Stream(Box::new(t))
+    pub fn result(e: Type, a: Type) -> Type {
+        Type::Data(RESULT, vec![e, a])
+    }
+    pub fn pair(a: Type, b: Type) -> Type {
+        Type::Data(PAIR, vec![a, b])
+    }
+    pub fn range() -> Type {
+        Type::Data(RANGE, vec![])
+    }
+    pub fn is_maybe(&self) -> bool {
+        matches!(self, Type::Data(MAYBE, _))
+    }
+    pub fn is_result(&self) -> bool {
+        matches!(self, Type::Data(RESULT, _))
     }
 }
 
-/// A type scheme: quantified variables and a body.
+/// An arithmetic operator, each its own constraint (and template parameter).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Pow,
+    Neg,
+}
+
+impl ArithOp {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            ArithOp::Add => "+",
+            ArithOp::Sub => "-",
+            ArithOp::Mul => "*",
+            ArithOp::Div => "/",
+            ArithOp::Mod => "%",
+            ArithOp::Pow => "**",
+            ArithOp::Neg => "-",
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            ArithOp::Add => "add",
+            ArithOp::Sub => "sub",
+            ArithOp::Mul => "mul",
+            ArithOp::Div => "div",
+            ArithOp::Mod => "mod",
+            ArithOp::Pow => "pow",
+            ArithOp::Neg => "neg",
+        }
+    }
+}
+
+/// What a body needs from a type: the class of a constraint.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Class {
+    /// Structural equality (`==`), derived for every type.
+    Eq,
+    /// Ordering (`<`, `sorted`, `min`), derived for every type.
+    Ord,
+    /// Rendering to text (`print`, f-strings, `str`), derived for every type.
+    Show,
+    /// One arithmetic operator: `+` on int, float, str and list; the others
+    /// on int and float; a class may define any of them as a method.
+    Arith(ArithOp),
+    /// `a or b`: logical on bools, the default on `T | nothing`.
+    OrElse(Type, Type),
+    /// `len(x)`: list, str, dict, range.
+    Len,
+    /// The zero a sum starts from: int, float, str, list.
+    Zero,
+    /// `for x in subject` yields `elem`: list, range, str, dict entries.
+    Iter(Type),
+    /// `subject[idx] : elem`: list or str (int index), dict (str index,
+    /// elem is then `T | nothing`), a pair (a literal 0 or 1, which the
+    /// option records).
+    Index(Type, Type, Option<i64>),
+    /// `subject[idx] = value`, answering the updated subject.
+    IndexSet(Type, Type),
+    /// `subject.name : ty`
+    Field(String, Type),
+    /// `subject.name = value`, answering the updated subject.
+    SetField(String, Type),
+    /// `subject.name(args) : ret`: a builtin method or a class method that
+    /// does not mutate its receiver.
+    Method(String, Vec<Type>, Type),
+    /// `str(x)`, `int(x)`, `float(x)`: conversions, overloaded on the
+    /// argument.
+    Convert(&'static str, Type),
+}
+
+/// How a solved constraint is implemented (the lowering reads this).
+impl Class {
+    /// Classes whose operation may abort for some subjects (indexing,
+    /// methods, conversions): their dictionary form answers a result, and
+    /// a def that takes such a dictionary may abort.
+    /// The same operation (types aside): same class, same name, same
+    /// operator, same literal index.
+    pub fn same_op(&self, other: &Class) -> bool {
+        match (self, other) {
+            (Class::Field(x, _), Class::Field(y, _)) | (Class::SetField(x, _), Class::SetField(y, _)) => x == y,
+            (Class::Method(x, a, _), Class::Method(y, b, _)) => x == y && a.len() == b.len(),
+            (Class::Convert(x, _), Class::Convert(y, _)) => x == y,
+            (Class::Arith(x), Class::Arith(y)) => x == y,
+            (Class::Index(_, _, x), Class::Index(_, _, y)) => x == y,
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
+    }
+
+    pub fn fallible(&self) -> bool {
+        matches!(self, Class::Index(..) | Class::IndexSet(..) | Class::Method(..) | Class::Convert(..))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Solution {
+    /// Implemented from the class and the resolved subject type alone
+    /// (builtin methods, derived show/eq/lt, arithmetic), with the
+    /// constraints on the subject's parts it needs in turn (showing a
+    /// list needs showing its elements; summing needs adding them).
+    Concrete(Vec<ConstraintId>),
+    /// A class method: the def, its type arguments and dictionaries at this
+    /// use (an instantiation of its scheme).
+    Method(usize, Vec<Type>, Vec<ConstraintId>),
+    /// A field of a data type (constructor 0), as the (type, field) steps
+    /// from the subject to it: several steps read through adopted parents.
+    Field(Vec<(TypeId, usize)>),
+    /// Forwarded from a dictionary parameter of the enclosing def (its
+    /// index in that def's `dicts`), because the subject stayed generic.
+    Param(usize),
+}
+
+#[derive(Debug, Clone)]
+pub struct Constraint {
+    pub class: Class,
+    pub subject: Type,
+    pub line: usize,
+    pub solution: Option<Solution>,
+    /// The unit the constraint belongs to (whose scheme may quantify it).
+    pub owner: usize,
+    /// The def whose body performs the operation (a lambda inside the
+    /// unit, or the unit itself): where its effect lands.
+    pub user: usize,
+}
+
+/// A type scheme: quantified variables, the constraints on them (by id),
+/// and the body.
 #[derive(Debug, Clone)]
 pub struct Scheme {
     pub vars: Vec<TVar>,
+    pub dicts: Vec<ConstraintId>,
     pub ty: Type,
 }
 
@@ -82,11 +226,12 @@ enum ClosNode {
     Link(ClosVar),
 }
 
-/// Storage for type variables and closure-set variables.
+/// Storage for type variables, closure-set variables and constraints.
 #[derive(Debug, Default, Clone)]
 pub struct TypeStore {
     vars: Vec<Binding>,
     clos: Vec<ClosNode>,
+    pub constraints: Vec<Constraint>,
     pub level: u32,
 }
 
@@ -98,7 +243,7 @@ pub struct UnifyError {
 
 impl TypeStore {
     pub fn new() -> Self {
-        TypeStore { vars: Vec::new(), clos: Vec::new(), level: 1 }
+        TypeStore { vars: Vec::new(), clos: Vec::new(), constraints: Vec::new(), level: 1 }
     }
 
     pub fn fresh(&mut self) -> Type {
@@ -137,7 +282,7 @@ impl TypeStore {
         self.level -= 1;
     }
 
-    fn clos_root(&mut self, mut c: ClosVar) -> ClosVar {
+    fn clos_root(&self, mut c: ClosVar) -> ClosVar {
         loop {
             match &self.clos[c as usize] {
                 ClosNode::Link(n) => c = *n,
@@ -146,7 +291,7 @@ impl TypeStore {
         }
     }
 
-    pub fn clos_set(&mut self, c: ClosVar) -> BTreeSet<ClosId> {
+    pub fn clos_set(&self, c: ClosVar) -> BTreeSet<ClosId> {
         let r = self.clos_root(c);
         match &self.clos[r as usize] {
             ClosNode::Root(s) => s.clone(),
@@ -197,11 +342,8 @@ impl TypeStore {
             Type::Var(v) => Type::Var(v),
             Type::List(e) => Type::List(Box::new(self.resolve(&e))),
             Type::Map(e) => Type::Map(Box::new(self.resolve(&e))),
-            Type::Maybe(e) => Type::Maybe(Box::new(self.resolve(&e))),
-            Type::Stream(e) => Type::Stream(Box::new(self.resolve(&e))),
-            Type::Result(e, a) => Type::Result(Box::new(self.resolve(&e)), Box::new(self.resolve(&a))),
             Type::Fn(ps, r, c) => Type::Fn(ps.iter().map(|p| self.resolve(p)).collect(), Box::new(self.resolve(&r)), c),
-            Type::Record(id, args) => Type::Record(id, args.iter().map(|a| self.resolve(a)).collect()),
+            Type::Data(id, args) => Type::Data(id, args.iter().map(|a| self.resolve(a)).collect()),
             other => other,
         }
     }
@@ -209,15 +351,14 @@ impl TypeStore {
     fn occurs(&self, v: TVar, t: &Type) -> bool {
         match self.shallow(t) {
             Type::Var(w) => w == v,
-            Type::List(e) | Type::Map(e) | Type::Maybe(e) | Type::Stream(e) => self.occurs(v, &e),
-            Type::Result(e, a) => self.occurs(v, &e) || self.occurs(v, &a),
+            Type::List(e) | Type::Map(e) => self.occurs(v, &e),
             Type::Fn(ps, r, _) => ps.iter().any(|p| self.occurs(v, p)) || self.occurs(v, &r),
-            Type::Record(_, args) => args.iter().any(|a| self.occurs(v, a)),
+            Type::Data(_, args) => args.iter().any(|a| self.occurs(v, a)),
             _ => false,
         }
     }
 
-    fn var_level(&self, v: TVar) -> u32 {
+    pub fn var_level(&self, v: TVar) -> u32 {
         match &self.vars[v as usize] {
             Binding::Unbound { level } => *level,
             Binding::Bound(_) => 0,
@@ -228,24 +369,19 @@ impl TypeStore {
     fn adjust_levels(&mut self, t: &Type, level: u32) {
         match self.shallow(t) {
             Type::Var(w) => {
-                if let Binding::Unbound { level: l } = &mut self.vars[w as usize] {
-                    if *l > level {
+                if let Binding::Unbound { level: l } = &mut self.vars[w as usize]
+                    && *l > level {
                         *l = level;
                     }
-                }
             }
-            Type::List(e) | Type::Map(e) | Type::Maybe(e) | Type::Stream(e) => self.adjust_levels(&e, level),
-            Type::Result(e, a) => {
-                self.adjust_levels(&e, level);
-                self.adjust_levels(&a, level);
-            }
+            Type::List(e) | Type::Map(e) => self.adjust_levels(&e, level),
             Type::Fn(ps, r, _) => {
                 for p in &ps {
                     self.adjust_levels(p, level);
                 }
                 self.adjust_levels(&r, level);
             }
-            Type::Record(_, args) => {
+            Type::Data(_, args) => {
                 for a in &args {
                     self.adjust_levels(a, level);
                 }
@@ -262,11 +398,10 @@ impl TypeStore {
     }
 
     fn bind(&mut self, v: TVar, t: Type) -> Result<(), UnifyError> {
-        if let Type::Var(w) = self.shallow(&t) {
-            if w == v {
+        if let Type::Var(w) = self.shallow(&t)
+            && w == v {
                 return Ok(());
             }
-        }
         if self.occurs(v, &t) {
             return Err(UnifyError { left: Type::Var(v), right: t });
         }
@@ -286,16 +421,8 @@ impl TypeStore {
             | (Type::Float, Type::Float)
             | (Type::Str, Type::Str)
             | (Type::Bool, Type::Bool)
-            | (Type::Unit, Type::Unit)
-            | (Type::Range, Type::Range) => Ok(()),
-            (Type::List(x), Type::List(y))
-            | (Type::Map(x), Type::Map(y))
-            | (Type::Maybe(x), Type::Maybe(y))
-            | (Type::Stream(x), Type::Stream(y)) => self.unify(x, y),
-            (Type::Result(e1, a1), Type::Result(e2, a2)) => {
-                self.unify(e1, e2)?;
-                self.unify(a1, a2)
-            }
+            | (Type::Unit, Type::Unit) => Ok(()),
+            (Type::List(x), Type::List(y)) | (Type::Map(x), Type::Map(y)) => self.unify(x, y),
             (Type::Fn(p1, r1, c1), Type::Fn(p2, r2, c2)) => {
                 if p1.len() != p2.len() {
                     return Err(UnifyError { left: a.clone(), right: b.clone() });
@@ -307,7 +434,7 @@ impl TypeStore {
                 self.clos_union(*c1, *c2);
                 Ok(())
             }
-            (Type::Record(i, x), Type::Record(j, y)) if i == j && x.len() == y.len() => {
+            (Type::Data(i, x), Type::Data(j, y)) if i == j && x.len() == y.len() => {
                 for (p, q) in x.iter().zip(y.iter()) {
                     self.unify(p, q)?;
                 }
@@ -317,11 +444,42 @@ impl TypeStore {
         }
     }
 
-    /// Generalize a type over the variables above the current level.
-    pub fn generalize(&self, t: &Type) -> Scheme {
+    /// Generalize a type over the variables above the current level. The
+    /// constraints whose subject mentions a quantified variable become the
+    /// scheme's dictionaries; `owner` limits them to the def being closed.
+    pub fn generalize(&self, t: &Type, owner: usize) -> Scheme {
         let mut vars = Vec::new();
         self.collect_generic(t, &mut vars);
-        Scheme { vars, ty: self.resolve(t) }
+        // constraints on quantified variables come along, and the variables
+        // their classes mention (a field's type, an element type) are
+        // quantified too, with their own constraints, until nothing changes
+        let mut dicts: Vec<ConstraintId> = Vec::new();
+        loop {
+            let before = (vars.len(), dicts.len());
+            for (id, c) in self.constraints.iter().enumerate() {
+                if c.owner != owner || c.solution.is_some() || dicts.contains(&id) {
+                    continue;
+                }
+                let mut fv = Vec::new();
+                self.free_vars(&c.subject, &mut fv);
+                if fv.iter().any(|v| vars.contains(v)) {
+                    dicts.push(id);
+                    for ct in TypeStore::class_types(&c.class) {
+                        let mut cv = Vec::new();
+                        self.collect_generic(&ct, &mut cv);
+                        for v in cv {
+                            if !vars.contains(&v) {
+                                vars.push(v);
+                            }
+                        }
+                    }
+                }
+            }
+            if (vars.len(), dicts.len()) == before {
+                break;
+            }
+        }
+        Scheme { vars, dicts, ty: self.resolve(t) }
     }
 
     fn collect_generic(&self, t: &Type, out: &mut Vec<TVar>) {
@@ -331,18 +489,14 @@ impl TypeStore {
                     out.push(v);
                 }
             }
-            Type::List(e) | Type::Map(e) | Type::Maybe(e) | Type::Stream(e) => self.collect_generic(&e, out),
-            Type::Result(e, a) => {
-                self.collect_generic(&e, out);
-                self.collect_generic(&a, out);
-            }
+            Type::List(e) | Type::Map(e) => self.collect_generic(&e, out),
             Type::Fn(ps, r, _) => {
                 for p in &ps {
                     self.collect_generic(p, out);
                 }
                 self.collect_generic(&r, out);
             }
-            Type::Record(_, args) => {
+            Type::Data(_, args) => {
                 for a in &args {
                     self.collect_generic(a, out);
                 }
@@ -351,18 +505,59 @@ impl TypeStore {
         }
     }
 
-    /// Instantiate a scheme with fresh variables. Returns the type and the
-    /// substitution (quantified var -> fresh var), which the lowering uses
-    /// to monomorphize.
-    pub fn instantiate(&mut self, s: &Scheme) -> (Type, Vec<(TVar, Type)>) {
+    /// Instantiate a scheme with fresh variables. Returns the type, the
+    /// substitution, and one new constraint per dictionary of the scheme
+    /// (raised in `owner`), which the call site passes along.
+    pub fn instantiate(&mut self, s: &Scheme, owner: usize, user: usize, line: usize) -> (Type, Vec<(TVar, Type)>, Vec<ConstraintId>) {
         let subst: Vec<(TVar, Type)> = s.vars.iter().map(|v| (*v, self.fresh())).collect();
         let t = self.substitute(&s.ty, &subst);
-        (t, subst)
+        let mut dicts = Vec::new();
+        for &d in &s.dicts {
+            let c = self.constraints[d].clone();
+            let class = self.substitute_class(&c.class, &subst);
+            let subject = self.substitute(&c.subject, &subst);
+            dicts.push(self.constrain(class, subject, owner, user, line));
+        }
+        (t, subst, dicts)
+    }
+
+    /// Record a new constraint and return its id.
+    pub fn constrain(&mut self, class: Class, subject: Type, owner: usize, user: usize, line: usize) -> ConstraintId {
+        self.constraints.push(Constraint { class, subject, line, solution: None, owner, user });
+        self.constraints.len() - 1
+    }
+
+    /// Whether a type (resolved) mentions a variable.
+    pub fn mentions(&self, t: &Type, v: TVar) -> bool {
+        match self.shallow(t) {
+            Type::Var(w) => w == v,
+            Type::List(e) | Type::Map(e) => self.mentions(&e, v),
+            Type::Fn(ps, r, _) => ps.iter().any(|p| self.mentions(p, v)) || self.mentions(&r, v),
+            Type::Data(_, args) => args.iter().any(|a| self.mentions(a, v)),
+            _ => false,
+        }
+    }
+
+    pub fn substitute_class(&mut self, c: &Class, subst: &[(TVar, Type)]) -> Class {
+        match c {
+            Class::Iter(e) => Class::Iter(self.substitute(e, subst)),
+            Class::OrElse(r, t) => Class::OrElse(self.substitute(r, subst), self.substitute(t, subst)),
+            Class::Index(i, e, l) => Class::Index(self.substitute(i, subst), self.substitute(e, subst), *l),
+            Class::IndexSet(i, v) => Class::IndexSet(self.substitute(i, subst), self.substitute(v, subst)),
+            Class::Field(n, t) => Class::Field(n.clone(), self.substitute(t, subst)),
+            Class::SetField(n, t) => Class::SetField(n.clone(), self.substitute(t, subst)),
+            Class::Method(n, args, ret) => {
+                let args = args.iter().map(|a| self.substitute(a, subst)).collect();
+                Class::Method(n.clone(), args, self.substitute(ret, subst))
+            }
+            Class::Convert(n, t) => Class::Convert(n, self.substitute(t, subst)),
+            other => other.clone(),
+        }
     }
 
     /// Replace quantified variables. Function closure variables are kept:
     /// every instance of a polymorphic function shares the closure set of
-    /// its definition, which is what monomorphization wants.
+    /// its definition.
     pub fn substitute(&mut self, t: &Type, subst: &[(TVar, Type)]) -> Type {
         match self.shallow(t) {
             Type::Var(v) => {
@@ -375,24 +570,17 @@ impl TypeStore {
             }
             Type::List(e) => Type::List(Box::new(self.substitute(&e, subst))),
             Type::Map(e) => Type::Map(Box::new(self.substitute(&e, subst))),
-            Type::Maybe(e) => Type::Maybe(Box::new(self.substitute(&e, subst))),
-            Type::Stream(e) => Type::Stream(Box::new(self.substitute(&e, subst))),
-            Type::Result(e, a) => {
-                let e = self.substitute(&e, subst);
-                let a = self.substitute(&a, subst);
-                Type::Result(Box::new(e), Box::new(a))
-            }
             Type::Fn(ps, r, c) => {
                 let ps = ps.iter().map(|p| self.substitute(p, subst)).collect();
                 let r = self.substitute(&r, subst);
                 Type::Fn(ps, Box::new(r), c)
             }
-            Type::Record(id, args) => Type::Record(id, args.iter().map(|a| self.substitute(a, subst)).collect()),
+            Type::Data(id, args) => Type::Data(id, args.iter().map(|a| self.substitute(a, subst)).collect()),
             other => other,
         }
     }
 
-    /// Free (unbound) variables of a resolved type.
+    /// Free (unbound) variables of a type.
     pub fn free_vars(&self, t: &Type, out: &mut Vec<TVar>) {
         match self.shallow(t) {
             Type::Var(v) => {
@@ -400,18 +588,14 @@ impl TypeStore {
                     out.push(v);
                 }
             }
-            Type::List(e) | Type::Map(e) | Type::Maybe(e) | Type::Stream(e) => self.free_vars(&e, out),
-            Type::Result(e, a) => {
-                self.free_vars(&e, out);
-                self.free_vars(&a, out);
-            }
+            Type::List(e) | Type::Map(e) => self.free_vars(&e, out),
             Type::Fn(ps, r, _) => {
                 for p in &ps {
                     self.free_vars(p, out);
                 }
                 self.free_vars(&r, out);
             }
-            Type::Record(_, args) => {
+            Type::Data(_, args) => {
                 for a in &args {
                     self.free_vars(a, out);
                 }
@@ -419,49 +603,73 @@ impl TypeStore {
             _ => {}
         }
     }
+
+    /// The types a constraint's class mentions besides its subject.
+    pub fn class_types(c: &Class) -> Vec<Type> {
+        match c {
+            Class::Iter(e) => vec![e.clone()],
+            Class::Index(i, e, _) | Class::IndexSet(i, e) | Class::OrElse(i, e) => vec![i.clone(), e.clone()],
+            Class::Field(_, t) | Class::SetField(_, t) | Class::Convert(_, t) => vec![t.clone()],
+            Class::Method(_, args, ret) => {
+                let mut v = args.clone();
+                v.push(ret.clone());
+                v
+            }
+            _ => vec![],
+        }
+    }
 }
 
-/// Human-readable type names for diagnostics. Record names are supplied by
-/// the caller through `names`.
+/// Human-readable type names for diagnostics. Data type names are supplied
+/// by the caller through `names`.
 pub struct TypeDisplay<'a> {
     pub store: &'a TypeStore,
     pub ty: &'a Type,
-    pub names: &'a dyn Fn(RecId) -> String,
+    pub names: &'a dyn Fn(TypeId) -> String,
+    /// Names for type variables (a quantified variable shows as `a`, ...);
+    /// others show as `?n`.
+    pub vars: &'a [(TVar, String)],
+}
+
+/// Letters for the variables of a type, in order of appearance.
+pub fn var_names(store: &TypeStore, tys: &[&Type]) -> Vec<(TVar, String)> {
+    let mut vs = Vec::new();
+    for t in tys {
+        store.free_vars(t, &mut vs);
+    }
+    let mut out: Vec<(TVar, String)> = Vec::new();
+    for v in vs {
+        if !out.iter().any(|(w, _)| *w == v) {
+            let i = out.len();
+            let n = if i < 26 { ((b'a' + i as u8) as char).to_string() } else { format!("t{}", i) };
+            out.push((v, n));
+        }
+    }
+    out
 }
 
 impl fmt::Display for TypeDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fn go(store: &TypeStore, t: &Type, names: &dyn Fn(RecId) -> String, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn go(store: &TypeStore, t: &Type, names: &dyn Fn(TypeId) -> String, vars: &[(TVar, String)], f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match store.shallow(t) {
-                Type::Var(v) => write!(f, "?{}", v),
+                Type::Var(v) => match vars.iter().find(|(w, _)| *w == v) {
+                    Some((_, n)) => write!(f, "{}", n),
+                    None => write!(f, "?{}", v),
+                },
                 Type::Int => write!(f, "int"),
                 Type::Float => write!(f, "float"),
                 Type::Str => write!(f, "str"),
                 Type::Bool => write!(f, "bool"),
                 Type::Unit => write!(f, "nothing"),
-                Type::Range => write!(f, "range"),
                 Type::List(e) => {
-                    write!(f, "list of ")?;
-                    go(store, &e, names, f)
-                }
-                Type::Stream(e) => {
-                    write!(f, "stream of ")?;
-                    go(store, &e, names, f)
+                    write!(f, "[")?;
+                    go(store, &e, names, vars, f)?;
+                    write!(f, "]")
                 }
                 Type::Map(e) => {
-                    write!(f, "dict of ")?;
-                    go(store, &e, names, f)
-                }
-                Type::Maybe(e) => {
-                    go(store, &e, names, f)?;
-                    write!(f, " | nothing")
-                }
-                Type::Result(e, a) => {
-                    write!(f, "result(ok: ")?;
-                    go(store, &a, names, f)?;
-                    write!(f, ", err: ")?;
-                    go(store, &e, names, f)?;
-                    write!(f, ")")
+                    write!(f, "{{str: ")?;
+                    go(store, &e, names, vars, f)?;
+                    write!(f, "}}")
                 }
                 Type::Fn(ps, r, _) => {
                     write!(f, "fn(")?;
@@ -469,12 +677,24 @@ impl fmt::Display for TypeDisplay<'_> {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
-                        go(store, p, names, f)?;
+                        go(store, p, names, vars, f)?;
                     }
                     write!(f, ") -> ")?;
-                    go(store, &r, names, f)
+                    go(store, &r, names, vars, f)
                 }
-                Type::Record(id, args) => {
+                Type::Data(MAYBE, args) => {
+                    go(store, &args[0], names, vars, f)?;
+                    write!(f, " | nothing")
+                }
+                Type::Data(RESULT, args) => {
+                    write!(f, "result(ok: ")?;
+                    go(store, &args[1], names, vars, f)?;
+                    write!(f, ", err: ")?;
+                    go(store, &args[0], names, vars, f)?;
+                    write!(f, ")")
+                }
+                Type::Data(RANGE, _) => write!(f, "range"),
+                Type::Data(id, args) => {
                     write!(f, "{}", names(id))?;
                     if !args.is_empty() {
                         write!(f, "<")?;
@@ -482,7 +702,7 @@ impl fmt::Display for TypeDisplay<'_> {
                             if i > 0 {
                                 write!(f, ", ")?;
                             }
-                            go(store, a, names, f)?;
+                            go(store, a, names, vars, f)?;
                         }
                         write!(f, ">")?;
                     }
@@ -490,7 +710,7 @@ impl fmt::Display for TypeDisplay<'_> {
                 }
             }
         }
-        go(self.store, self.ty, self.names, f)
+        go(self.store, self.ty, self.names, self.vars, f)
     }
 }
 
@@ -505,9 +725,9 @@ mod tests {
         let a = s.fresh();
         let f = s.fresh_fn(vec![a.clone()], a.clone());
         s.leave_level();
-        let scheme = s.generalize(&f);
+        let scheme = s.generalize(&f, 0);
         assert_eq!(scheme.vars.len(), 1);
-        let (inst, _) = s.instantiate(&scheme);
+        let (inst, _, _) = s.instantiate(&scheme, 0, 0, 0);
         if let Type::Fn(ps, _, _) = &inst {
             s.unify(&ps[0], &Type::Int).unwrap();
         }
@@ -518,21 +738,23 @@ mod tests {
             }
             _ => panic!(),
         }
-        // the scheme itself is untouched
-        let (inst2, _) = s.instantiate(&scheme);
+        let (inst2, _, _) = s.instantiate(&scheme, 0, 0, 0);
         assert!(matches!(s.resolve(&inst2), Type::Fn(_, _, _)));
         assert!(s.unify(&Type::Int, &Type::Str).is_err());
     }
 
     #[test]
-    fn closure_sets_union() {
+    fn constraints_become_dictionaries() {
         let mut s = TypeStore::new();
-        let c1 = s.clos_singleton(1);
-        let c2 = s.clos_singleton(2);
-        let f1 = Type::Fn(vec![Type::Int], Box::new(Type::Int), c1);
-        let f2 = Type::Fn(vec![Type::Int], Box::new(Type::Int), c2);
-        s.unify(&f1, &f2).unwrap();
-        assert_eq!(s.clos_set(c1).len(), 2);
-        assert_eq!(s.clos_set(c2).len(), 2);
+        s.enter_level();
+        let a = s.fresh();
+        let c = s.constrain(Class::Ord, a.clone(), 7, 7, 1);
+        let f = s.fresh_fn(vec![a.clone(), a.clone()], Type::Bool);
+        s.leave_level();
+        let scheme = s.generalize(&f, 7);
+        assert_eq!(scheme.dicts, vec![c]);
+        let (_, _, dicts) = s.instantiate(&scheme, 8, 8, 2);
+        assert_eq!(dicts.len(), 1);
+        assert_eq!(s.constraints[dicts[0]].owner, 8);
     }
 }

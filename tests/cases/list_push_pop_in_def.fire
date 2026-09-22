@@ -7,9 +7,7 @@ y = ys.pop()
 print(y, ys)
 def build(n)
     var out = []
-    var i = 0
-    while i < n
+    for i in 0..n
         out.push(i)
-        i += 1
     out
 print(build(3))

@@ -1,121 +1,201 @@
 # How the compiler works
 
-Pipeline: parse (`grammar/fire.pest` → `src/ast.rs`) → `infer/` (types,
-effects, closure sets) → `lower/` (Bend IR) → `ir.rs` (printer). The
-generated program starts with `import Base` and the runtime prelude
-(`src/prelude.bend`), followed by one Bend def per Fire def, and `main`.
+Pipeline: parse (`grammar/fire.pest` → `src/ast.rs`) → check (`src/check/`,
+producing Core, `src/core.rs`) → lower (`src/lower/`, producing Bend IR,
+`src/ir.rs`) → print, with the part of the runtime prelude
+(`src/prelude.bend`) the program reaches (`src/prune.rs`). The output
+starts with `import Base`, then the prelude, then one Bend def per Fire
+def, the laws, and `main`. `docs/design.md` says why the image has the
+shape it has; this file says how the code produces it.
 
 ## What Bend enforces
 
 Bend 2 is a typed, affine, total language, and the lowering has to respect
-rules a tree-walking interpreter never sees. From experiments with Bend
-2.0.x:
+rules a tree-walking interpreter never sees. Each is backed by a program
+under `docs/design/` or found by experiment with Bend 2.0.25:
 
 1. A `match` only inspects a parameter or a variable bound by a pattern,
-   never a computed value, and no `let` may precede a match. Nested matches
-   must follow parameter order.
-2. Definitions must precede their uses. There is no mutual recursion, not
-   even under `@unsafe`.
-3. Variables are affine. `+x` makes a Data value reusable, but `+` on a
-   parameter is part of the function's type, so a function passed as a
-   template argument must have plain parameters and rebind (`+y = x`)
-   inside.
-4. Template (`~f`) arguments must be closed terms; closures are callable
-   once and cannot live in Data.
-5. In a `do` block, lets are affine and annotated, and destructuring is a
-   match (so it needs a parameter).
-6. `List<&1, T>` and `List<&2, T>` are different types; the compiler uses
-   `List<&2, T>` everywhere and its own prelude for list operations.
+   and only at the head of a def body (no `let` before it). A match on a
+   computed value goes through an eliminator def.
+2. Definitions precede their uses; there is no mutual recursion.
+3. Termination: a self-call must pass its arguments unchanged, left to
+   right, until one is a piece of its parameter. `@unsafe` opts a def out.
+4. Variables are affine. `+x` makes a Data value reusable; a variable
+   handed to a `+` binder (a lambda parameter, a `let`) is itself used
+   twice, and a variable used in two thunks of a `Bool.pick` is too.
+5. Template (`~f`) arguments must be closed terms; a def with `+`
+   parameters is not accepted where a template expects plain ones, so
+   prelude operations are passed eta-expanded (`~(x => F.i32.show(x))`).
+6. In a `do` block every let is annotated (`x : T = v`); a reusable one is
+   a bind through `pure` (`+x : T <- IO.pure(T, v)`); a bare statement must
+   be a unit action.
+7. Literals: no negative or infinite float literals (`F32.neg(0.5)`,
+   `(1.0 / 0.0 : F32)`), and a predecessor pattern is `1n+p` or `1n++p`.
+8. `List<&1, T>` and `List<&2, T>` are different types; the compiler uses
+   `List<&2, T>` throughout.
 
-## Inference (`src/infer/`)
+## Checking (`src/check/`)
 
-Hindley-Milner with deferred constraints. Every binding, parameter and
-expression gets one type (`types.rs`); constraints that need a type that
-is not known yet (`x or default`, `xs[i] = v`, a method on a parameter)
-are queued and resolved when it is. Defs are typed once from their body:
-generalized where the body leaves a parameter free, otherwise re-inferred
-as a *template copy* per argument type at each call. Recursive calls whose
-argument types are not yet known are resolved when the enclosing def is
-finished.
+**Names.** Top-level and block-level defs are hoisted (declared before
+their block runs, inferred on first use). Declared types and their
+constructors are global. A class's members and methods are prescanned so
+that methods may refer to each other in any order.
 
-Effects (pure / fallible / IO) are inferred per def and composed through
-calls. An exhaustive match cannot abort; an abort the analysis proves
-unreachable compiles to `F.crash`.
+**Inference** is Hindley-Milner with levels (`types.rs`) and qualified
+types. An operation whose meaning depends on a type not known yet raises a
+*constraint* (`Class`: equality, ordering, show, one arithmetic operator,
+`or`, length, iteration, indexing, index assignment, a field, a method, a
+conversion, the zero of a sum). A constraint is solved when its subject's
+type is known: concretely (a builtin operation, with sub-constraints for
+the parts: showing a list needs showing its elements), by a class method
+(recording the method's instantiation: type arguments and dictionaries),
+or by a field path (through adopted parents). At generalization, an
+unsolved constraint on a quantified variable becomes a *dictionary* of the
+def's scheme; two for the same operation on the same subject merge. At the
+end, a variable nothing fixed gets the first default (int, list, str,
+float) that satisfies every constraint on it.
 
-Closure sets: a function-typed value carries the set of lambdas and defs
-that can flow into it. One member means the value *is* that lambda's
-environment record; several mean a sum type with an `apply` def. A set
-whose environment holds a member of the same set has a recursive type,
-which Bend cannot express, so it is rejected with a message.
+**Desugaring** happens here, so Core has no sugar: pipelines and `$`,
+keyword arguments and defaults, f-strings (with numbers aligned right),
+`x or d`, mutating methods (a call rebinds its receiver path; the method
+returns the rebuilt object, and its value when it has one), `self` and
+members as locals, adoption, destructuring, and returns: the values a body
+returns are joined, and `nothing` on some paths lifts the others into
+`T | nothing`.
 
-The result is a typed AST (`tast.rs`) with the sugar removed: pipelines,
-`$`, implicit self, keyword arguments, mutating methods.
+**Effects** (IO, abort) are a fixpoint over calls, closure sets and
+constraints solved to methods, each constraint attributed to the def whose
+body performs it. A dictionary of a fallible class (indexing, a method, a
+conversion) makes the def fallible, since its implementation may abort.
+
+**Descent** (`descent.rs`) finds, for every def that calls itself, a
+termination argument:
+
+* *structural*: a sequence of parameters such that every self-call passes
+  a prefix unchanged and the next one smaller (a variable bound by a match
+  on it, at any depth);
+* *fuel*: an int parameter every self-call decreases by a literal (`n - k`,
+  or `n / k` with k ≥ 2), under facts from guards (`if n <= 1 do return`)
+  that keep it at least the decrement;
+* otherwise an error naming the rule, unless the def is `unsafe def`.
+
+A self-call inside a loop body is an error (the body is a def of its own),
+as is a cycle of calls between defs. `while` outside an unsafe def is an
+error, and so is a `for` over an open range alone.
+
+**Laws** are checked in a frame of their own inside the program's scope:
+the variables are declared with their annotated types, the hypothesis and
+the claim are checked as expressions. A law is *closed* (no variables),
+*finite* (every variable of `bool` or of a type with only nullary
+constructors, no hypothesis) or *open*. After effects are known, a law
+that mentions an IO def or unsafe code is rejected, and so is one that
+reads a top-level value.
+
+## Core (`src/core.rs`)
+
+Every def with its kind (plain, lambda, constructor, method, main, law),
+the unit whose type parameters it shares (itself for a top-level def),
+parameters, captures, scheme, effect, descent and a body of statements;
+every expression typed; method calls, builtins and operators resolved to
+calls, dictionaries (`Dict`), fields or builtins; data types (declared,
+records, classes, and the builtins `T | nothing`, results, pairs, ranges).
 
 ## Lowering (`src/lower/`)
 
-* **Every branch is a def.** An `if`, `match` or loop in statement position
-  splits its block: the statements after it become a continuation def whose
-  parameters are the live variables, and each branch ends by calling it. A
-  `var` reassigned in a branch flows out as an argument.
-* **Loops are drivers.** A loop becomes a control type
-  (`Next{state} | Break{state} | Return{v}`), a body def that runs one
-  iteration and answers a control value, and one `@unsafe` self-recursive
-  driver def.
-* **Lambdas are lifted.** Every lambda becomes a top-level def taking an
-  environment record of its captures first. Pipeline stages and
-  higher-order prelude functions are templates that thread the environment
-  through (`map_env(~Env, ~A, ~B, ~stage, env, xs)`).
-* **Classes are records plus defs.** `def Counter(...)` becomes `type
-  F.Counter is Data` with one constructor, a constructor def, and one def
-  per method taking `self` first. A mutating method returns the new record
-  (`F.Ret{obj, value}` when it also answers a value) and the caller rebinds
-  the receiver path.
-* **Effects are do-blocks.** An IO function's body is a `do IO<T>` block, a
-  fallible one's is `do Result<...>`. Because do-lets are affine, a value
-  used twice inside a do-block is passed to a continuation def with `+`
-  parameters.
-* **Everything is monomorphized.** Generic defs are instantiated per
-  concrete type, constrained ones copied per argument type, and derived
-  `show`, `eq` and `lt` defs are generated per record type so `print`,
-  `==` and `sorted` work on any value.
-* **Recursion is merged.** A recursive function whose body was split into
-  helper defs is merged with them into one `@unsafe` dispatcher def over a
-  frame sum type (`F.K.<owner>`), since Bend has no mutual recursion.
-* **Names are prefixed** (`f.` defs, `F.` types, `__` temporaries) so they
-  never collide with Bend's Base or with user names, and defs are emitted
-  in dependency order.
+`mod.rs` holds the driver, names, types, def images, closures, derived defs
+and dictionaries; `body.rs` statements, branches, matches and loops;
+`expr.rs` expressions and builtins; `laws.rs` laws.
 
-Every loop and every non-structural recursion carries Bend's `@unsafe`
-marker, so `bend` reports "with N unsafe annotations". Termination proofs
-are not a goal.
+**Images.** Each def gets an image: its Bend name, its type parameters
+(erased `-A` when nothing needs them at compile time, template `~A`
+otherwise), its dictionary parameters (`~lt_0: A -> A -> Bool`), how each
+function-typed parameter is passed (code as a template `~f` plus an
+environment value, when the body only calls it or passes it on; a closure
+value otherwise), an environment record parameter for a def with
+captures, a leading `fuel: Nat` for a fuel def, the parameter order (the
+structural ones first), and its mode (pure, `Result`, `IO`). Lambdas and
+nested defs forward their unit's template parameters.
 
-## Runtime
+**Names.** User names are verbatim; a clash with Base gets `_`.
+Generated members live under an `F` segment of their owner:
+`Tree.F.show`, `Tree.F.case`, `Stack.F.get_items`, `Stack.F.new`,
+`insert.F.if3`, `main.F.loop5`. Lambdas are `outer.fn2`.
 
-`fire file.fire` writes the Bend source to a temporary directory, builds a
-native binary with `bend file.bend -o file` (clang), runs it and streams
-its output. `BEND_LANE=js` builds `file.js` and runs it with `node`. When
-Bend's native code generator crashes on a program its checker accepted (an
-internal `TypeError`), the runner falls back to the JavaScript lane.
+**Types.** `int` is `U32` (signed arithmetic in the prelude), `float` is
+`F32`, lists, maps, `T | nothing` and results are Base's. A declared type
+or class is a Bend `Data` type over its *effective* parameters (the
+variables its fields actually mention). A record shape is `F.Rec.<fields>`.
+A function type is its closure representation: the environment record of
+the one lambda that can flow there, or a sum `F.FnN` over several with a
+`.call` def that dispatches.
 
-The prelude (`src/prelude.bend`) holds everything the generated code calls
-that Base does not provide: list, string, map and float helpers, `show`
-formatting, the pure crash, sorting. Only the items a program reaches are
-emitted (`src/prune.rs` walks the references from the generated defs
-through the prelude's `def` and `type` blocks), so a small program carries
-a few dozen lines of it rather than all ~1500, and Bend checks that much
-less. The prelude must stay in dependency order and free of mutual
-recursion; after editing it run
+**Branches.** An expression `if` with cheap operands is an eager
+`Bool.pick`. A statement branch without a self-call becomes a helper def
+matching its condition and answering the branch's live-out variables
+(packed into `F.OutN`). A branch under a self-call, or inside a term, is
+`Bool.pick` over thunks. A branch with `return`, `break` or `continue`
+takes the rest of the block into the branches that fall through.
 
-```bash
-python3 tools/prelude_sort.py src/prelude.bend
-```
+**Matches.** A match on a parameter (or a piece of one) in a structural def
+is a real Bend match; any other goes through a helper def that takes the
+subject as a parameter, or, inside a term, through eliminators
+(`F.list.case`, `F.maybe.case`, `Tree.F.case`) with a thunk per
+constructor. Rows of patterns compile column by column: constructors
+(including list shapes, `T | nothing` and results) split on the
+constructor, literals become a chain of equality picks with every row that
+accepts the literal, guards are tested at the leaf with the remaining rows
+as the fallback. An empty set of rows aborts in a fallible def; in a pure
+def the checker proved it unreachable, and any value of the type fills it.
 
-which reorders the defs, marks pattern binders used more than once with
-`+`, and reports any cycle.
+**Loops.** The body of a `for` becomes a def
+`E -> S -> A -> F.Ctl<S, R>`: the environment (what it reads), the state
+(what it assigns), the element; it answers `F.Next{s}`, `F.Break{s}` or
+`F.Return{r}` with `r` the def's own result, whatever the nesting. A
+driver folds it: `F.for_list` over a list, `F.for_range` counting a `Nat`
+down over a range, the `_res` and `_io` variants in effectful defs, and
+`F.loop` (`@unsafe`) for `while` in unsafe defs. Zipped iterables are
+zipped into pairs first; an open range becomes `enumerate_from`.
+
+**Fuel.** A fuel def matches `fuel` first: `0n` answers a value of the
+result type (built in place; a generic part comes from a parameter of that
+type), `1n+fuel_` runs the body, whose self-calls pass `fuel_`. Outside
+callers pass `F.i32.fuel(n)`, which is `n + 1`.
+
+**Dictionaries.** At a call, each dictionary of the callee is a closed
+term: the caller's own dictionary parameter when the subject stayed
+generic, a derived operation (`Tree.F.show` applied to its parameters'
+operations, `F.list.eq`, a prelude primitive), a class method, or a field
+accessor path. Strings inside containers show quoted (`['a']`,
+`Full('gift')`); `T | nothing` shows as its value.
+
+**Laws** are printed as Bend laws (`for` parameters, hypotheses as
+equality parameters, the claim as an equation), with `def name(): {==}` for
+a closed law and a case split for a finite one. A runnable image carries
+only these; `fire --check`'s image also carries the open ones.
+
+**Affinity.** After lowering, every def is marked: parameters, lets, binds,
+pattern fields and lambda parameters used more than once get `+`,
+counting a use in each thunk and each argument handed to a `+` binder.
+
+## The command line (`src/main.rs`)
+
+| command | what it does |
+|---|---|
+| `fire p.fire` | compile, build with `bend`, run |
+| `fire p.fire -o out.bend` / `-o bin` / `-o out.js` | write the source, or build |
+| `fire p.fire --types` | every def's type, effects, termination argument and needs |
+| `fire p.fire --check` | run `bend --check-only` on the image with every law (and `p.proof.bend` appended when it exists); report proven, open and false laws and unsafe code |
+| `fire p.fire --test` | compile the property-test image (`src/testgen.rs`): the program's types, defs and bindings, one predicate def per law, loops over generated instances; run it |
+| `fire p.fire --total` | reject a program with any `unsafe def` (combines with the others) |
+
+A law Bend rejects is reported as the law, with the two sides Bend
+computed.
 
 ## Testing
 
 `tests/programs.rs` compiles every program under `examples/` and
-`tests/cases/` and, with `bend` on `PATH`, builds and runs it and compares
-the output with the `.out` file next to it. `tests/cases/` holds one small
-program per language rule or fixed bug; add one whenever semantics change.
+`tests/cases/` and, when `bend` is on `PATH`, builds and runs it against its
+`.out` golden; it also checks that unsupported programs are rejected with
+the right message and that laws are classified and property-tested.
+`tests/design.rs` checks the images under `docs/design/`. Unit tests cover
+the type store, the IR printer and prelude pruning.

@@ -8,7 +8,7 @@ else  # small
     print("small")
 for i, word in 0.., ["a", "b"]       # loops zip; an open range counts
     print("{i}: {word}")
-while false  # never
+for _ in 0..0  # never
     print("no")
 match f(1)  # two?
     2 => print("two")

@@ -1,4 +1,4 @@
-# Turn-based dungeon simulation: a state machine driven by a while loop,
+# Turn-based dungeon simulation: a state machine driven by a bounded loop,
 # match on a state string, break, and a class holding a dictionary.
 def Hero(public name: str, public var hp: int, public var gold: int = 0)
     public var potions = 1
@@ -51,13 +51,13 @@ def Dungeon(public rooms: list)
 
 var hero = Hero("ada", 12)
 var dungeon = Dungeon(['treasure', 'monster', 'rest', 'monster', 'treasure'])
-while true
+# a hundred turns at most: every loop in Fire has a bound
+for _ in 0..100
     hero = dungeon.tick(hero)
     if dungeon.state == 'exit' do break
     if hero.hp <= 0
         print("{hero.name} fell in room {dungeon.room}")
         break
-    if dungeon.turn > 100 do break
 
 print(dungeon.state, dungeon.turn, dungeon.room)
 print(hero.status())

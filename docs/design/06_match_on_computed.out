@@ -1,0 +1,5 @@
+scan: 3 then 4
+scan: 1 then 4
+scan: 4 then 5
+scan: 1 then 5
+scan: nothing after 5

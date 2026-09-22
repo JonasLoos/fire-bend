@@ -6,15 +6,20 @@ for i in 0..10
     total += fib(i)
 print(total)
 
-var n = 27
-var steps = 0
-while n != 1
-    if n % 2 == 0
-        n = n / 2
-    else
-        n = 3 * n + 1
-    steps += 1
-print("collatz steps: {steps}")
+# Nobody has proven that the Collatz walk reaches 1 from every start, so no
+# checker can: an `unsafe def` says so, and only an unsafe def may `while`.
+unsafe def collatz_steps(start)
+    var n = start
+    var steps = 0
+    while n != 1
+        if n % 2 == 0
+            n = n / 2
+        else
+            n = 3 * n + 1
+        steps += 1
+    steps
+
+print("collatz steps: {collatz_steps(27)}")
 
 words = "the quick brown fox".split(" ")
 for w in words
