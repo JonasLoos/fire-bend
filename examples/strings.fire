@@ -13,7 +13,8 @@ def is_palindrome_loop(s)
     t = clean(s)
     var i = 0
     var j = len(t) - 1
-    while i < j
+    for _ in 0..len(t)
+        if i >= j do break
         if t[i] != t[j] do return false
         i += 1
         j -= 1
@@ -76,7 +77,8 @@ def common_prefix(words)
     var n = len(first)
     for w in words
         var k = 0
-        while k < n and k < len(w) and w[k] == first[k]
+        for _ in 0..n
+            if k >= len(w) or w[k] != first[k] do break
             k += 1
         n = min(n, k)
     first[..n]

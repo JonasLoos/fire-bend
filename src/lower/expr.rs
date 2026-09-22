@@ -628,8 +628,8 @@ impl<'a> Lower<'a> {
                 }
             }
             Some(Solution::Param(_)) | None => {
-                // a forwarded dictionary: the generic def's own mode covers it
-                Mode::Pure
+                // a forwarded dictionary answers a result for a fallible class
+                if c.class.fallible() { Mode::Result } else { Mode::Pure }
             }
             Some(Solution::Field(..)) => Mode::Pure,
         }
@@ -785,6 +785,12 @@ impl<'a> Lower<'a> {
     /// as a dictionary).
     pub fn concrete_dict(&mut self, ctx: &FnCtx, id: ConstraintId, subs: &[ConstraintId], line: usize) -> Term {
         let c = &self.store.constraints[id].clone();
+        if let Class::Zero = &c.class {
+            // a value, not an operation
+            let mut tmp_ctx = ctx.clone();
+            let subject = self.store.resolve(&c.subject);
+            return self.zero_of(&mut tmp_ctx, &subject, &[], line);
+        }
         let arity = match &c.class {
             Class::Show | Class::Len | Class::Iter(_) | Class::Convert(..) | Class::Arith(ArithOp::Neg) | Class::Field(..) => 1,
             Class::Method(_, args, _) => 1 + args.len(),
@@ -1174,7 +1180,7 @@ impl<'a> Lower<'a> {
             ("sum", Type::List(_)) => {
                 let et = elem_ty(self, ctx);
                 let add = subs.first().cloned().unwrap_or(prim_op("F.i32", "add"));
-                let zero = self.zero_of(ctx, mret, line);
+                let zero = self.zero_of(ctx, mret, subs.get(1..).unwrap_or(&[]), line);
                 Term::call("F.list.sum", vec![Term::TmplTy(et), tmpl_arg(add), recv, zero])
             }
             ("min" | "max", Type::List(_)) => {
@@ -1358,8 +1364,12 @@ impl<'a> Lower<'a> {
         self.derived_op(ctx, kind, &e, &[], line)
     }
 
-    /// The zero of a summable type.
-    fn zero_of(&mut self, ctx: &mut FnCtx, t: &Type, line: usize) -> Term {
+    /// The zero of a summable type (for a generic one, the `Zero`
+    /// dictionary the checker raised, passed in `given`).
+    fn zero_of(&mut self, ctx: &mut FnCtx, t: &Type, given: &[Term], line: usize) -> Term {
+        if let Some(z) = given.first() {
+            return z.clone();
+        }
         match self.store.shallow(t) {
             Type::Int => Term::U32(0),
             Type::Float => Term::F32(0.0),

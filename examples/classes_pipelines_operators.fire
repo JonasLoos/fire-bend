@@ -1,4 +1,4 @@
-# inheritance, namespaces, comprehensions, streams, custom operators
+# inheritance, comprehensions, pipelines, custom operators
 def Animal(public name: str, public sound: str = '...')
     public speak = () => "{name} the Animal says {sound}"
 
@@ -12,11 +12,10 @@ print(Dog("Buddy", "Golden").speak())
 d = Dog()
 print(d.name, d.sound, d.breed)
 
-def Math
-    public def fib(n)
-        if n <= 1 do n else fib(n - 1) + fib(n - 2)
+def fib(n)
+    if n <= 1 do n else fib(n - 1) + fib(n - 2)
 
-print(Math.fib(10))
+print(fib(10))
 
 squares = for x in 1..6 do x * x
 print(squares)
@@ -29,9 +28,9 @@ def is_prime(n)
         if n % d == 0 do return false
     true
 
-primes = 2.. ?> is_prime
+primes = 2..50 ?> is_prime
 print(primes.take(8))
-print(1.. *> $ * $ |> $.take(4))
+print(1..10 *> $ * $ |> $.take(4))
 
 def Vec2(public x: float = 0.0, public y: float = 0.0)
     public `+` = other => Vec2(x + other.x, y + other.y)

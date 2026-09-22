@@ -131,21 +131,31 @@ impl Checker {
         if def.unsafe_ {
             return Descent::Unsafe;
         }
-        // structural: a parameter every call shrinks, earlier ones unchanged
-        for (i, p) in params.iter().enumerate() {
-            if reassigned.contains(p) {
-                continue;
-            }
-            let ok = calls.iter().all(|c| {
-                if c.args.len() != params.len() {
-                    return false;
+        // structural, lexicographic: pick a parameter every remaining call
+        // passes unchanged or shrinks (and some call shrinks); the calls that
+        // shrink it are settled; repeat on the rest
+        if calls.iter().all(|c| c.args.len() == params.len()) {
+            let unchanged = |c: &SelfCall, j: usize| matches!(&c.args[j].kind, ExprKind::Var(v) if v == &params[j]);
+            let smaller = |c: &SelfCall, j: usize| matches!(&c.args[j].kind, ExprKind::Var(v) if pieces.get(v) == Some(&j));
+            let mut open: Vec<usize> = (0..calls.len()).collect();
+            let mut order: Vec<usize> = Vec::new();
+            while !open.is_empty() {
+                let next = (0..params.len()).find(|&j| {
+                    !order.contains(&j)
+                        && !reassigned.contains(&params[j])
+                        && open.iter().all(|&k| unchanged(&calls[k], j) || smaller(&calls[k], j))
+                        && open.iter().any(|&k| smaller(&calls[k], j))
+                });
+                match next {
+                    Some(j) => {
+                        open.retain(|&k| !smaller(&calls[k], j));
+                        order.push(j);
+                    }
+                    None => break,
                 }
-                let unchanged = (0..i).all(|j| matches!(&c.args[j].kind, ExprKind::Var(v) if v == &params[j]));
-                let smaller = matches!(&c.args[i].kind, ExprKind::Var(v) if pieces.get(v) == Some(&i));
-                unchanged && smaller
-            });
-            if ok {
-                return Descent::Structural(i);
+            }
+            if open.is_empty() {
+                return Descent::Structural(order);
             }
         }
         // fuel: an int parameter decreased by literals under a guard
@@ -185,6 +195,12 @@ impl Checker {
     fn decrement_of(&self, arg: &Expr, p: &str) -> Option<i64> {
         if let ExprKind::Dict { id, args } = &arg.kind {
             let c = &self.store.constraints[*id];
+            // `int(p / 2)`: the conversion of an int is the int itself
+            if let (Class::Convert("int", _), [inner]) = (&c.class, args.as_slice()) {
+                if matches!(self.shallow(&inner.ty), Type::Int) {
+                    return self.decrement_of(inner, p);
+                }
+            }
             if args.len() == 2 {
                 if let (ExprKind::Var(v), ExprKind::Lit(Lit::Int(k))) = (&args[0].kind, &args[1].kind) {
                     if v == p {

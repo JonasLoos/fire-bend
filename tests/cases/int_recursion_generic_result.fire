@@ -1,0 +1,21 @@
+# recursion on an int under a guard counts a fuel down; the result may be
+# generic (the memo table here), filled from a parameter where it is never
+# reached
+def fib_memo(n, memo)
+    if n <= 1 do return {value: n, memo: memo}
+    key = "{n}"
+    cached = memo[key] or 0
+    if cached > 0 do return {value: cached, memo: memo}
+    r1 = fib_memo(n - 1, memo)
+    r2 = fib_memo(n - 2, r1.memo)
+    v = r1.value + r2.value
+    table = r2.memo
+    table[key] = v
+    {value: v, memo: table}
+
+def countdown(n)
+    if n <= 0 do return []
+    [n] + countdown(n - 1)
+
+r = fib_memo(20, {})
+print(r.value, len(r.memo.keys()), countdown(4), countdown(-2))

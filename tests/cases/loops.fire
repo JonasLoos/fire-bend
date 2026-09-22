@@ -1,6 +1,9 @@
-var n = 0
-while n < 3 do n += 1
-print(n)
+# `while` is for unsafe defs only: nothing bounds it
+unsafe def count_up(limit)
+    var n = 0
+    while n < limit do n += 1
+    n
+print(count_up(3))
 
 for i in 0..5
   if i == 2 do continue

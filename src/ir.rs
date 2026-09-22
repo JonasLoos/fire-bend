@@ -502,10 +502,10 @@ impl Term {
                 };
                 for (i, a) in args.iter().enumerate() {
                     a.count_vars(counts);
-                    if let (Term::Var(v), Some(p)) = (a, params.get(i)) {
-                        if p.starts_with('+') {
-                            *counts.entry(v.clone()).or_insert(0) += 1;
-                        }
+                    // a reusable binder duplicates its argument term: every
+                    // variable in it is used again
+                    if params.get(i).is_some_and(|p| p.starts_with('+')) {
+                        a.count_vars(counts);
                     }
                 }
             }

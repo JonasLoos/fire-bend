@@ -1,23 +1,23 @@
 # Number theory and matrices: sieve over a list of booleans, gcd/lcm, base
 # conversion both ways, matrix transpose/multiply/power with nested
 # comprehensions, fibonacci with a memo dictionary threaded through the
-# recursion, and integer square roots.
+# recursion, and integer square roots. The defs whose termination is a
+# theorem beyond the checker are marked `unsafe def`.
 
 def sieve(limit)
     var flags = $lists.repeat(true, limit + 1)
     flags[0] = false
     flags[1] = false
-    var i = 2
-    while i * i <= limit
+    for i in 2..(limit + 1)
+        if i * i > limit do break
         if flags[i]
-            var j = i * i
-            while j <= limit
-                flags[j] = false
-                j += i
-        i += 1
+            for j in (i * i)..(limit + 1)
+                if j % i == 0 do flags[j] = false
     for n, is_prime in 0.., flags if is_prime do n
 
-def gcd(a, b)
+# Euclid's remainders shrink, but not by a literal step the checker can
+# follow: `unsafe def` takes responsibility for termination
+unsafe def gcd(a, b)
     if b == 0 do a else gcd(b, a % b)
 
 def lcm(a, b)
@@ -28,7 +28,9 @@ def to_base(n, base)
     if n == 0 do return "0"
     var v = n
     var out = ""
-    while v > 0
+    # an int has at most 32 digits in any base
+    for _ in 0..32
+        if v <= 0 do break
         out = digits[v % base] + out
         v = int(v / base)
     out
@@ -57,7 +59,7 @@ def identity(n)
     eye
 
 def mat_pow(m, p)
-    if p == 0 do return identity(len(m))
+    if p <= 0 do return identity(len(m))
     if p % 2 == 0
         half = mat_pow(m, int(p / 2))
         return matmul(half, half)
@@ -75,7 +77,8 @@ def fib_memo(n, memo)
     table[key] = v
     {value: v, memo: table}
 
-def isqrt(n)
+# Newton's iteration converges, which is a theorem the checker does not know
+unsafe def isqrt(n)
     if n < 2 do return n
     var x = n
     var y = int((x + 1) / 2)
@@ -87,7 +90,7 @@ def isqrt(n)
 def digit_sum(n)
     if n < 10 do n else n % 10 + digit_sum(int(n / 10))
 
-def collatz_len(n)
+unsafe def collatz_len(n)
     var v = n
     var steps = 0
     while v != 1

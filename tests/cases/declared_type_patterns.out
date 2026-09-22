@@ -1,0 +1,4 @@
+(2 + -(3 + 0)) -1
+Add(Num(2), Neg(Add(Num(3), Zero)))
+gift none 7
+true false [Zero, Num(2)]

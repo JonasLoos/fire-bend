@@ -1,0 +1,5 @@
+[3.14159, 6.0, 2.25]
+[Circle(1.0), Rect(2.0, 3.0), Square(1.5)]
+[1, 2, 5, 7, 8, 9] 6 true false
+['apple', 'fig', 'pear'] 3
+O X

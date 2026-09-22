@@ -627,10 +627,7 @@ impl Checker {
         self.expr(ExprKind::Lambda(id), fty)
     }
 
-    fn join_returns_of(&mut self, frame: &Frame, ret: Type) -> Type {
-        for t in &frame.returns {
-            let _ = self.store.unify(&ret, t);
-        }
+    fn join_returns_of(&mut self, _frame: &Frame, ret: Type) -> Type {
         ret
     }
 
@@ -899,7 +896,7 @@ impl Checker {
                 if let Some(m) = self.method_through_parents(tid, member) {
                     return self.call_class_method(recv, tid, m, member, args, named, expected);
                 }
-                if !matches!(self.types[tid].kind, DataKind::Record) {
+                if !matches!(self.types[tid].kind, DataKind::Record { .. }) {
                     self.error(line, format!("{} has no method .{}()", self.types[tid].name, member));
                 }
             }

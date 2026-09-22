@@ -420,11 +420,13 @@ impl Checker {
 
     /// A record shape for a set of field names (sorted), with one type
     /// variable per field.
-    pub(crate) fn record_shape(&mut self, mut names: Vec<String>, line: usize) -> TypeId {
+    pub(crate) fn record_shape(&mut self, written: Vec<String>, line: usize) -> TypeId {
+        let mut names = written.clone();
         names.sort();
         if let Some(id) = self.record_shapes.get(&names) {
             return *id;
         }
+        let show_order: Vec<usize> = written.iter().filter_map(|w| names.iter().position(|n| n == w)).collect();
         let params: Vec<TVar> = names.iter().map(|_| self.store.fresh_var()).collect();
         let fields = names.iter().zip(params.iter()).map(|(n, v)| FieldDef { name: n.clone(), ty: Type::Var(*v), public: true }).collect();
         let id = self.types.len();
@@ -432,7 +434,7 @@ impl Checker {
             name: format!("{{{}}}", names.join(", ")),
             params,
             ctors: vec![Ctor { name: "Record".into(), fields }],
-            kind: DataKind::Record,
+            kind: DataKind::Record { show_order },
             line,
         });
         self.record_shapes.insert(names, id);
@@ -533,18 +535,18 @@ impl Checker {
         for d in pending {
             self.ensure_def(d, 0);
         }
+        // laws see every def and type of the program (inside main's scope)
+        for s in &program.statements {
+            if let ast::Statement::Law { name, vars, hyp, claim } = &s.node {
+                self.check_law(name, vars, hyp.as_ref(), claim, s.line);
+            }
+        }
         let mut body = body;
         self.frames.pop();
         self.solve_pending();
         self.defs[main].body = std::mem::take(&mut body);
         self.defs[main].state = State::Done;
         self.defs[main].scheme = Some(Scheme { vars: vec![], dicts: vec![], ty: self.store.fresh_fn(vec![], Type::Unit) });
-        // laws see every def
-        for s in &program.statements {
-            if let ast::Statement::Law { name, vars, hyp, claim } = &s.node {
-                self.check_law(name, vars, hyp.as_ref(), claim, s.line);
-            }
-        }
         self.finish_constraints();
         self.check_cycles();
         self.infer_effects();
@@ -839,39 +841,81 @@ impl Checker {
     }
 
     /// The last expression statement of a body is its value; a body that
-    /// ends otherwise answers `nothing`. Returns are unified by the caller.
+    /// ends otherwise answers `nothing`. Then every return of the body is
+    /// joined into the frame's result type.
     pub(crate) fn finish_body_value(&mut self, body: &mut Block, line: usize) {
         let ret = self.frame_ref().ret.clone();
-        if let Some(t) = self.block_value(body) {
-            let last_line = body.stmts.last().map(|s| s.line).unwrap_or(line);
-            // `return nothing` elsewhere and a value here make a maybe
-            self.unify(&ret, &t, last_line);
+        if self.block_value(body).is_none() {
+            let ends = match body.stmts.last() {
+                Some(Stmt { kind: StmtKind::Return(_), .. }) => true,
+                Some(Stmt { kind: StmtKind::If { .. } | StmtKind::Match { .. }, .. }) => self.block_always_returns(body),
+                _ => false,
+            };
+            if !ends {
+                let last_line = body.stmts.last().map(|s| s.line).unwrap_or(line);
+                body.stmts.push(Stmt { kind: StmtKind::Expr(Expr { kind: ExprKind::Lit(Lit::Nothing), ty: Type::Unit, line: last_line }), line: last_line });
+            }
+        }
+        // a trailing expression statement is the return value
+        if matches!(body.stmts.last(), Some(Stmt { kind: StmtKind::Expr(_), .. })) {
             if let Some(Stmt { kind: StmtKind::Expr(e), line: l }) = body.stmts.pop() {
                 body.stmts.push(Stmt { kind: StmtKind::Return(e), line: l });
             }
-            return;
         }
-        let value_ty = match body.stmts.last() {
-            Some(Stmt { kind: StmtKind::Expr(e), .. }) => e.ty.clone(),
-            Some(Stmt { kind: StmtKind::Return(_), .. }) => return,
-            Some(Stmt { kind: StmtKind::If { .. } | StmtKind::Match { .. }, .. }) => {
-                // a body ending in a branch statement whose branches all return
-                if self.block_always_returns(body) {
-                    return;
-                }
-                Type::Unit
-            }
-            _ => Type::Unit,
+        self.join_return_values(body, &ret, line);
+    }
+
+    /// Join the values a body returns into its result type. `nothing` on
+    /// some paths and a value on others make a `T | nothing`: the values
+    /// are lifted and `nothing` becomes the absent value.
+    fn join_return_values(&mut self, body: &mut Block, ret: &Type, line: usize) {
+        let mut rets: Vec<(Type, bool, usize)> = Vec::new();
+        classes::rewrite_returns(body, &mut |e: Expr| {
+            rets.push((e.ty.clone(), matches!(e.kind, ExprKind::Lit(Lit::Nothing)), e.line));
+            e
+        });
+        let is_maybe = |c: &Checker, t: &Type| matches!(c.shallow(t), Type::Data(MAYBE, _));
+        let nothing = rets.iter().any(|r| r.1);
+        let maybe = rets.iter().any(|r| !r.1 && is_maybe(self, &r.0));
+        let plain = rets.iter().any(|r| !r.1 && !is_maybe(self, &r.0) && !matches!(self.shallow(&r.0), Type::Unit | Type::Var(_)));
+        let inner = match self.shallow(ret) {
+            Type::Data(MAYBE, args) => Some(args[0].clone()),
+            _ if (nothing || maybe) && plain => Some(self.fresh()),
+            _ => None,
         };
-        let last_line = body.stmts.last().map(|s| s.line).unwrap_or(line);
-        self.unify(&ret, &value_ty, last_line);
-        let last_is_expr = matches!(body.stmts.last(), Some(Stmt { kind: StmtKind::Expr(_), .. }));
-        if !last_is_expr && !self.block_always_returns(body) {
-            body.stmts.push(Stmt { kind: StmtKind::Expr(Expr { kind: ExprKind::Lit(Lit::Nothing), ty: Type::Unit, line: last_line }), line: last_line });
-        }
-        // a trailing expression statement is the return value
-        if let Some(Stmt { kind: StmtKind::Expr(e), line: l }) = body.stmts.pop() {
-            body.stmts.push(Stmt { kind: StmtKind::Return(e), line: l });
+        match inner {
+            Some(inner) => {
+                let mt = Type::maybe(inner.clone());
+                for (t, is_nothing, l) in &rets {
+                    if *is_nothing {
+                        continue;
+                    }
+                    match self.shallow(t) {
+                        Type::Data(MAYBE, a) => self.unify(&inner, &a[0], *l),
+                        _ => self.unify(&inner, t, *l),
+                    };
+                }
+                let mut lifted: Vec<Expr> = Vec::new();
+                classes::rewrite_returns(body, &mut |e: Expr| {
+                    lifted.push(e);
+                    Expr { kind: ExprKind::Lit(Lit::Nothing), ty: Type::Unit, line: 0 }
+                });
+                let lifted: Vec<Expr> = lifted.into_iter().map(|e| {
+                    if matches!(e.kind, ExprKind::Lit(Lit::Nothing)) {
+                        self.expr(ExprKind::Con(MAYBE, 0, vec![]), mt.clone())
+                    } else {
+                        self.some(e)
+                    }
+                }).collect();
+                let mut it = lifted.into_iter();
+                classes::rewrite_returns(body, &mut |_e: Expr| it.next().unwrap());
+                self.unify(ret, &mt, line);
+            }
+            None => {
+                for (t, _, l) in &rets {
+                    self.unify(ret, t, *l);
+                }
+            }
         }
     }
 
@@ -886,10 +930,9 @@ impl Checker {
         }
     }
 
-    fn join_returns(&mut self, frame: &Frame, ret: Type) -> Type {
-        for t in &frame.returns {
-            let _ = self.store.unify(&ret, t);
-        }
+    /// The result type of a finished body (its returns were joined by
+    /// `finish_body_value`).
+    fn join_returns(&mut self, _frame: &Frame, ret: Type) -> Type {
         ret
     }
 
@@ -923,15 +966,19 @@ impl Checker {
                 continue;
             }
             let c = self.store.constraints[id].clone();
-            if let Type::Var(_) = self.shallow(&c.subject) {
-                let default = match c.class {
-                    Class::Arith(_) | Class::Ord | Class::Eq | Class::Show | Class::Convert(..) => Some(Type::Int),
-                    Class::Len | Class::Iter(_) | Class::Index(..) | Class::IndexSet(..) => Some(Type::list(self.fresh())),
-                    _ => None,
-                };
-                if let Some(t) = default {
+            if let Type::Var(v) = self.shallow(&c.subject) {
+                // every open constraint on this variable
+                let on_var: Vec<Class> = (0..self.store.constraints.len())
+                    .filter(|k| self.store.constraints[*k].solution.is_none() && !dict_ids.contains(k))
+                    .filter(|k| matches!(self.shallow(&self.store.constraints[*k].subject), Type::Var(w) if w == v))
+                    .map(|k| self.store.constraints[k].class.clone())
+                    .collect();
+                // the first candidate that satisfies all of them
+                let candidates = [Type::Int, Type::list(self.fresh()), Type::Str, Type::Float];
+                let pick = candidates.iter().find(|t| on_var.iter().all(|cl| self.class_fits(cl, t))).cloned();
+                if let Some(t) = pick {
                     let _ = self.store.unify(&c.subject, &t);
-                    self.solve_one(id);
+                    self.solve_pending();
                 }
             }
         }
@@ -944,6 +991,44 @@ impl Checker {
             let what = solve::describe_class(&c.class);
             let subject = self.show_type(&c.subject);
             self.error(c.line, format!("cannot resolve {} on a value of type {}", what, subject));
+        }
+    }
+
+    /// Whether a class could be solved on a candidate type (for choosing
+    /// the default of a type nothing fixed).
+    fn class_fits(&mut self, class: &Class, t: &Type) -> bool {
+        let is = |x: &Type| matches!(x, Type::Int | Type::Float);
+        match class {
+            Class::Eq | Class::Ord | Class::Show => true,
+            Class::Arith(ArithOp::Add) => is(t) || matches!(t, Type::Str | Type::List(_)),
+            Class::Arith(_) => is(t),
+            Class::Zero => is(t) || matches!(t, Type::Str | Type::List(_)),
+            Class::Convert(..) => matches!(t, Type::Int | Type::Float | Type::Str | Type::Bool),
+            Class::Len | Class::Iter(_) => matches!(t, Type::List(_) | Type::Str),
+            Class::Index(_, elem, _) => match t {
+                Type::List(_) => true,
+                Type::Str => self.compatible(elem, &Type::Str),
+                _ => false,
+            },
+            Class::IndexSet(..) => matches!(t, Type::List(_)),
+            Class::Method(name, args, ret) => match solve::method_sig(&mut self.store, t, name, args.len()) {
+                Some((_, r, _)) => self.compatible(&r, ret),
+                None => false,
+            },
+            Class::OrElse(..) => matches!(t, Type::Bool),
+            Class::Field(..) | Class::SetField(..) => false,
+        }
+    }
+
+    /// Whether two types could unify (a variable fits anything), without
+    /// binding anything.
+    fn compatible(&self, a: &Type, b: &Type) -> bool {
+        match (self.shallow(a), self.shallow(b)) {
+            (Type::Var(_), _) | (_, Type::Var(_)) => true,
+            (Type::List(x), Type::List(y)) | (Type::Map(x), Type::Map(y)) => self.compatible(&x, &y),
+            (Type::Data(i, xs), Type::Data(j, ys)) => i == j && xs.iter().zip(ys.iter()).all(|(x, y)| self.compatible(x, y)),
+            (Type::Fn(ps, r, _), Type::Fn(qs, s, _)) => ps.len() == qs.len() && ps.iter().zip(qs.iter()).all(|(x, y)| self.compatible(x, y)) && self.compatible(&r, &s),
+            (x, y) => std::mem::discriminant(&x) == std::mem::discriminant(&y),
         }
     }
 

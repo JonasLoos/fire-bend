@@ -1,6 +1,6 @@
-# Namespace-style `def Utils` with `public def` members, custom operators on a
-# Money class and a Vec class, structural `==` on objects, `sorted` by key on
-# lists of objects, and `print` of objects.
+# Custom operators on a Money class and a Vec class, helper defs over lists
+# of objects, structural `==` on objects, `sorted` by key on lists of
+# objects, and `print` of objects.
 def Money(public cents: int = 0)
     public `+` = other => Money(cents + other.cents)
     public `-` = other => Money(cents - other.cents)
@@ -17,31 +17,34 @@ def Vec(public x: int = 0, public y: int = 0)
 def LineItem(public sku: str, public price: Money, public qty: int)
     public total = () => price * qty
 
-def Utils
-    public def sum_money(items)
-        var acc = Money(0)
-        for it in items do acc = acc + it.total()
-        acc
-    public def cheapest(items)
-        sorted(items, it => it.price.cents)[0]
-    public def by_sku(items)
-        sorted(items, it => it.sku)
-    public def centroid(points)
-        var acc = Vec(0, 0)
-        for p in points do acc = acc + p
-        Vec(acc.x / len(points), acc.y / len(points))
-    public def discount(m, pct)
-        m - Money(m.cents * pct / 100)
+def sum_money(items)
+    var acc = Money(0)
+    for it in items do acc = acc + it.total()
+    acc
+
+def cheapest(items)
+    sorted(items, it => it.price.cents)[0]
+
+def by_sku(items)
+    sorted(items, it => it.sku)
+
+def centroid(points)
+    var acc = Vec(0, 0)
+    for p in points do acc = acc + p
+    Vec(acc.x / len(points), acc.y / len(points))
+
+def discount(m, pct)
+    m - Money(m.cents * pct / 100)
 
 cart = [
     LineItem("pear", Money(150), 4),
     LineItem("fig", Money(325), 2),
     LineItem("apple", Money(99), 10),
 ]
-total = Utils.sum_money(cart)
+total = sum_money(cart)
 print(total.show(), total.cents)
-print(Utils.cheapest(cart).sku, Utils.by_sku(cart) *> $.sku)
-print(Utils.discount(total, 10).show())
+print(cheapest(cart).sku, by_sku(cart) *> $.sku)
+print(discount(total, 10).show())
 print(cart *> $.total().cents)
 print(sorted(cart, it => -it.total().cents) *> $.sku)
 
@@ -53,9 +56,9 @@ print(Vec(1, 2) == Vec(1, 2), Vec(1, 2) == Vec(2, 1))
 print(Vec(1, 2) + Vec(3, 4) == Vec(4, 6))
 print((Money(5) * 3 - Money(1)).cents, (Money(1) - Money(5)).negative())
 
-# vectors: operators, dot product, centroid via the namespace
+# vectors: operators, dot product, centroid
 pts = [Vec(0, 0), Vec(4, 0), Vec(4, 8), Vec(0, 8)]
-c = Utils.centroid(pts)
+c = centroid(pts)
 print(c, c.dot(Vec(1, 1)))
 print(pts *> $ - c)
 print(pts *> $.dot(Vec(1, 2)) |> sum)

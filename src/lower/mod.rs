@@ -101,6 +101,7 @@ pub struct Image {
 
 pub struct Lower<'a> {
     pub core: &'a Program,
+    pub laws: Laws,
     pub store: TypeStore,
     pub types: Vec<TypeDef>,
     pub defs: Vec<IrDef>,
@@ -125,13 +126,25 @@ pub struct Lower<'a> {
     pub derived: HashSet<String>,
     /// Records of live-out values by arity.
     pub outs: HashSet<usize>,
+    /// Image names of the constructors of declared types.
+    pub ctor_names: Vec<Vec<String>>,
     /// The mode a higher-order builtin method's term came out in (set by
     /// `builtin_method`, read by `concrete_op`).
     pub hof_mode: Option<Mode>,
 }
 
-pub fn lower_program(core: &Program) -> Result<ir::Program, Vec<Diag>> {
+/// Which laws an image carries: a runnable program carries the ones the
+/// compiler proves (a false one fails the build); `fire --check` carries
+/// every law, the open ones as claims for Bend to report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Laws {
+    Proven,
+    All,
+}
+
+pub fn lower_program(core: &Program, laws: Laws) -> Result<ir::Program, Vec<Diag>> {
     let mut lw = Lower {
+        laws,
         core,
         store: core.store.clone(),
         types: Vec::new(),
@@ -149,6 +162,7 @@ pub fn lower_program(core: &Program) -> Result<ir::Program, Vec<Diag>> {
         taken: HashSet::new(),
         derived: HashSet::new(),
         outs: HashSet::new(),
+        ctor_names: Vec::new(),
         hof_mode: None,
     };
     lw.run();
@@ -200,20 +214,23 @@ impl<'a> Lower<'a> {
                     RANGE => "F.Range".to_string(),
                     _ => t.name.clone(),
                 },
-                DataKind::Record => format!("F.Rec.{}", t.ctors[0].fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join("_")),
+                DataKind::Record { .. } => format!("F.Rec.{}", t.ctors[0].fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join("_")),
                 _ => t.name.clone(),
             };
             let name = if id < BUILTIN_TYPES { name } else { self.unique(&name) };
             self.type_names.push(name);
         }
-        for t in self.core.types.iter().skip(BUILTIN_TYPES) {
+        // constructors of declared types keep their names, with a `_` suffix
+        // where Base (or another type) already has the name
+        self.ctor_names = vec![Vec::new(); self.core.types.len()];
+        for (id, t) in self.core.types.iter().enumerate().skip(BUILTIN_TYPES) {
             if let DataKind::Declared = t.kind {
+                let mut names = Vec::new();
                 for c in &t.ctors {
-                    if self.taken.contains(&c.name) {
-                        self.error(t.line, format!("the constructor name {} is taken by Bend's Base; choose another", c.name));
-                    }
-                    self.taken.insert(c.name.clone());
+                    let n = self.unique(&c.name);
+                    names.push(n);
                 }
+                self.ctor_names[id] = names;
             }
         }
         // defs: verbatim for top-level, dotted for nested ones and lambdas
@@ -223,7 +240,7 @@ impl<'a> Lower<'a> {
             if d.unit == d.id && !matches!(d.kind, DefKind::Lambda | DefKind::Law) {
                 let wanted = match &d.kind {
                     DefKind::Main => "main".to_string(),
-                    DefKind::Ctor(tid) => format!("{}.new", self.type_names[*tid]),
+                    DefKind::Ctor(tid) => format!("{}.F.new", self.type_names[*tid]),
                     DefKind::Method { rec, .. } => format!("{}.{}", self.type_names[*rec], method_name(&d.name)),
                     _ => d.name.clone(),
                 };
@@ -379,7 +396,7 @@ impl<'a> Lower<'a> {
         let t = &self.core.types[id];
         match t.kind {
             DataKind::Builtin => t.ctors[ci].name.clone(),
-            DataKind::Declared => t.ctors[ci].name.clone(),
+            DataKind::Declared => self.ctor_names[id][ci].clone(),
             _ => self.type_names[id].clone(),
         }
     }
@@ -826,9 +843,9 @@ impl<'a> Lower<'a> {
             Some((tn, ty))
         };
         let (order, fuel) = match def.descent {
-            Descent::Structural(i) => {
-                let mut o = vec![i];
-                o.extend((0..def.params.len()).filter(|j| *j != i));
+            Descent::Structural(ref lex) => {
+                let mut o = lex.clone();
+                o.extend((0..def.params.len()).filter(|j| !lex.contains(j)));
                 (o, false)
             }
             Descent::Fuel(_) => ((0..def.params.len()).collect(), true),
@@ -854,6 +871,7 @@ impl<'a> Lower<'a> {
                 Ty::func(vec![s, r], ret)
             }
             Class::Len => Ty::func(vec![s], Ty::U32),
+            Class::Zero => s,
             Class::Iter(e) => {
                 let e = self.ty(e, names, line);
                 Ty::func(vec![s], Ty::list(e))
@@ -1025,7 +1043,7 @@ impl<'a> Lower<'a> {
         let name = match t.kind {
             DataKind::Builtin if tid == PAIR => return if idx == 0 { "F.pair.key".into() } else { "F.pair.value".into() },
             DataKind::Builtin if tid == RANGE => return if idx == 0 { "F.range.start".into() } else { "F.range.end".into() },
-            _ => format!("{}.get_{}", tname, fname),
+            _ => format!("{}.F.get_{}", tname, fname),
         };
         if self.derived.insert(name.clone()) {
             let params: Vec<String> = (0..self.eff_params[tid].len()).map(tparam_name).collect();
@@ -1052,7 +1070,7 @@ impl<'a> Lower<'a> {
         let t = self.core.types[tid].clone();
         let tname = self.type_names[tid].clone();
         let fname = field_name(&t.ctors[0].fields[idx].name);
-        let name = format!("{}.set_{}", tname, fname);
+        let name = format!("{}.F.set_{}", tname, fname);
         if self.derived.insert(name.clone()) {
             let params: Vec<String> = (0..self.eff_params[tid].len()).map(tparam_name).collect();
             let selft = Ty::Named(tname.clone(), params.iter().map(|p| Ty::Param(p.clone())).collect());
@@ -1082,7 +1100,7 @@ impl<'a> Lower<'a> {
         let name = match tid {
             MAYBE => "F.maybe.case".to_string(),
             RESULT => "F.result.case".to_string(),
-            _ => format!("{}.case", tname),
+            _ => format!("{}.F.case", tname),
         };
         if tid == MAYBE || tid == RESULT {
             return name;
@@ -1119,7 +1137,7 @@ impl<'a> Lower<'a> {
             RESULT => return format!("F.result.{}", kind),
             PAIR => return format!("F.pair.{}", kind),
             RANGE => return format!("F.range.{}", kind),
-            _ => format!("{}.{}", tname, kind),
+            _ => format!("{}.F.{}", tname, kind),
         };
         if !self.derived.insert(name.clone()) {
             return name;
@@ -1142,11 +1160,11 @@ impl<'a> Lower<'a> {
                 for (ci, c) in t.ctors.iter().enumerate() {
                     let fields: Vec<(String, bool)> = c.fields.iter().map(|f| (field_name(&f.name), false)).collect();
                     let shown: Vec<usize> = match &t.kind {
-                        DataKind::Class { .. } => t.show_order(),
+                        DataKind::Class { .. } | DataKind::Record { .. } => t.show_order(),
                         _ => (0..c.fields.len()).collect(),
                     };
                     let label = match t.kind {
-                        DataKind::Record => String::new(),
+                        DataKind::Record { .. } => String::new(),
                         DataKind::Class { .. } => t.name.clone(),
                         _ => c.name.clone(),
                     };
@@ -1161,7 +1179,7 @@ impl<'a> Lower<'a> {
                         let piece = if is_parent {
                             // inherited members inline: their show without the braces
                             Term::call("F.str.strip_wrapper", vec![Term::Str(format!("{}{{", self.core.types[match self.store.shallow(&ft) { Type::Data(p, _) => p, _ => tid }].name)), shown_field])
-                        } else if matches!(t.kind, DataKind::Record | DataKind::Class { .. }) {
+                        } else if matches!(t.kind, DataKind::Record { .. } | DataKind::Class { .. }) {
                             Term::cat(Term::Str(format!("{}: ", f.name)), shown_field)
                         } else {
                             shown_field
@@ -1280,7 +1298,10 @@ impl<'a> Lower<'a> {
                 match n.and_then(|n| ops.iter().find(|(p, _)| *p == n).map(|(_, op)| op.clone())) {
                     Some(op) => Term::var(&op),
                     None => match base {
-                        "default" => Term::unit(),
+                        "default" => {
+                            self.error(line, "this def recurses on an int, and Bend needs a value of its result type for the case the recursion never reaches; the result has a generic part no parameter provides: recurse on a list instead, or mark the def `unsafe def`");
+                            Term::unit()
+                        }
                         _ => prim_op("F.unit", base),
                     },
                 }
@@ -1413,6 +1434,7 @@ fn dict_param_name(c: &Class, k: usize) -> String {
         Class::Arith(op) => op.name().to_string(),
         Class::OrElse(..) => "or_else".to_string(),
         Class::Len => "len".to_string(),
+        Class::Zero => "zero".to_string(),
         Class::Iter(_) => "items".to_string(),
         Class::Index(..) => "index".to_string(),
         Class::IndexSet(..) => "index_set".to_string(),
@@ -1551,6 +1573,12 @@ fn mark_body(b: &mut Body, counts: &HashMap<String, usize>) {
                         if counts.get(f).cloned().unwrap_or(0) > 1 {
                             *r = true;
                         }
+                    }
+                }
+                // `1n++p`: a reusable predecessor
+                if let ir::Pat::Succ(p) = pat {
+                    if !p.starts_with('+') && counts.get(p.as_str()).cloned().unwrap_or(0) > 1 {
+                        *p = format!("+{}", p);
                     }
                 }
                 mark_body(body, counts);

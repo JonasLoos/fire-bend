@@ -11,6 +11,9 @@ use super::*;
 impl<'a> Lower<'a> {
     pub fn emit_laws(&mut self) {
         for law in self.core.laws.clone() {
+            if self.laws == Laws::Proven && law.proof == Proof::Open {
+                continue;
+            }
             let text = self.law_text(&law);
             self.defs.push(IrDef {
                 name: format!("law:{}", law.name),

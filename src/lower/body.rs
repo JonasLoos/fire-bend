@@ -142,6 +142,48 @@ impl FnCtx {
 }
 
 impl<'a> Lower<'a> {
+    /// Some value of a Fire type, built in place: the first constructor
+    /// without fields (else the first), its fields filled the same way; a
+    /// type variable takes the value `vals` gives it.
+    pub fn default_value(&mut self, ctx: &FnCtx, t: &Type, vals: &[(TVar, Term)], line: usize) -> Term {
+        match self.store.shallow(t) {
+            Type::Var(v) => match vals.iter().find(|(w, _)| *w == v) {
+                Some((_, x)) => x.clone(),
+                None => {
+                    self.error(line, "this def recurses on an int, and Bend needs a value of its result type for the case the recursion never reaches; the result has a generic part no parameter provides: recurse on a list instead, or mark the def `unsafe def`");
+                    Term::unit()
+                }
+            },
+            Type::Int => Term::U32(0),
+            Type::Float => Term::F32(0.0),
+            Type::Str => Term::Str(String::new()),
+            Type::Bool => Term::boolean(false),
+            Type::Unit => Term::unit(),
+            Type::List(_) => Term::List(vec![]),
+            Type::Map(v) => {
+                let vt = self.ty_in(ctx, &v, line);
+                Term::call("Map.new", vec![Term::TyArg(Ty::Param("&2".into())), Term::TyArg(vt)])
+            }
+            Type::Fn(..) => {
+                self.error(line, "this def recurses on an int and answers a function: Bend needs a value of the result type for the case the recursion never reaches; mark the def `unsafe def`");
+                Term::unit()
+            }
+            Type::Data(tid, args) => {
+                if tid == MAYBE {
+                    return Term::ctor("None", vec![]);
+                }
+                let dt = self.core.types[tid].clone();
+                let ci = dt.ctors.iter().position(|c| c.fields.is_empty()).unwrap_or(0);
+                let fields: Vec<Type> = dt.ctors[ci].fields.iter().map(|f| f.ty.clone()).collect();
+                let vals2: Vec<Term> = fields.iter().map(|ft| {
+                    let ft = self.subst_field(tid, ft, &args);
+                    self.default_value(ctx, &ft, vals, line)
+                }).collect();
+                Term::Ctor(self.ctor_name(tid, ci), vals2)
+            }
+        }
+    }
+
     // -- def bodies ----------------------------------------------------------------------------
 
     pub fn lower_def_body(&mut self, ctx: &mut FnCtx, def: &Def, img: &Image) -> Body {
@@ -191,21 +233,27 @@ impl<'a> Lower<'a> {
             }
             self_ctor = self.ctor_name(*rec, 0);
         }
-        match def.descent {
-            Descent::Structural(i) => {
-                let n = local_name(&def.params[i].name);
-                ctx.pieces.insert(n);
+        if let Descent::Structural(order) = &def.descent {
+            for &i in order {
+                ctx.pieces.insert(local_name(&def.params[i].name));
             }
-            _ => {}
         }
         let stmts = def.body.stmts.clone();
         let inner = if let Descent::Fuel(_) = def.descent {
             // count a fuel down; at zero the branch is dead by the guard
             ctx.pieces.clear();
             let dflt = {
-                let names = ctx.tparams.clone();
-                let ops: Vec<(String, String)> = vec![];
-                let t = self.derived_term("default", &def.ret, &names, &ops, line);
+                // a type variable in the result is filled from a parameter of
+                // exactly that type (any value does: the branch is dead)
+                let mut vals: Vec<(TVar, Term)> = vec![];
+                for (i, p) in def.params.iter().enumerate() {
+                    if let (Type::Var(v), FnParamKind::Value) = (self.store.shallow(&p.ty), &img.fnp[i]) {
+                        if !vals.iter().any(|(w, _)| *w == v) {
+                            vals.push((v, Term::var(&local_name(&p.name))));
+                        }
+                    }
+                }
+                let t = self.default_value(ctx, &def.ret, &vals, line);
                 let rty = ctx.ret.clone();
                 self.lift_mode(t, Mode::Pure, ctx.mode, &rty)
             };
@@ -735,7 +783,7 @@ impl<'a> Lower<'a> {
     /// body, answering `ret` in the def's mode. Returns its name.
     pub fn emit_helper(&mut self, ctx: &FnCtx, hint: &str, params: Vec<(String, Ty)>, ret: Ty, body: Body) -> String {
         self.counter += 1;
-        let name = format!("{}.{}{}", ctx.name, hint, self.counter);
+        let name = format!("{}.F.{}{}", ctx.name, hint, self.counter);
         let mut tmpl_types = Vec::new();
         let mut erased = Vec::new();
         for (_, n) in &ctx.tparams {
@@ -1468,7 +1516,12 @@ impl<'a> Lower<'a> {
             });
             f
         };
-        let ret_ty = if returns { self.leaf_ty(ctx, &Leaf::Result) } else { Ty::Unit };
+        // a `return` inside carries the def's own result out of every loop
+        let def_ret = match &ctx.loop_ {
+            Some(l) => l.ret_ty.clone(),
+            None => ctx.ret.clone(),
+        };
+        let ret_ty = if returns { def_ret } else { Ty::Unit };
         let state_tys: Vec<Ty> = state.iter().map(|(_, t)| t.clone()).collect();
         let state_ty = self.pack_ty(&state_tys);
         let ctl_ty = Ty::Named("F.Ctl".into(), vec![state_ty.clone(), ret_ty.clone()]);

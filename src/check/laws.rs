@@ -11,6 +11,11 @@ impl Checker {
             self.error(line, format!("law {} is declared twice", name));
             return;
         }
+        // a law and a def share Bend's namespace (the proof is a def of the law's name)
+        if self.lookup(name).is_some() || self.defs.iter().enumerate().any(|(i, d)| d.name == name && d.unit == i && !matches!(d.kind, DefKind::Lambda | DefKind::Law | DefKind::Main)) {
+            self.error(line, format!("law {} has the name of a def; name the law differently", name));
+            return;
+        }
         // a frame of its own: a synthetic def that is never emitted
         let id = self.new_def(name, DefKind::Law, None, line);
         self.defs[id].state = State::InProgress;
@@ -56,7 +61,10 @@ impl Checker {
             self.error(line, "a law cannot call a mutating method");
             self.pending.clear();
         }
-        self.frames.pop();
+        let frame = self.frames.pop().unwrap();
+        for (n, _) in &frame.captures {
+            self.error(line, format!("a law speaks about defs and types; '{}' is a value of the program (quantify it with `for`, or make it a def)", n));
+        }
         self.defs[id].state = State::Done;
         self.solve_pending();
         // how it is proven

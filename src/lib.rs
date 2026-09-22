@@ -12,6 +12,7 @@ pub mod core;
 pub mod ir;
 pub mod lower;
 pub mod prune;
+pub mod testgen;
 pub mod types;
 
 /// A diagnostic: a source line (0 when unknown) and a message.
@@ -234,14 +235,65 @@ pub fn parse_program(source: &str) -> Result<ast::Program, Box<dyn std::error::E
     parse_to_ast(pairs)
 }
 
-/// Compile a Fire program to Bend source.
+fn parse_diag(source: &str) -> Result<ast::Program, Vec<Diag>> {
+    parse_program(source).map_err(|e| vec![Diag { line: 0, message: format!("{}", e) }])
+}
+
+/// Compile a Fire program to Bend source: a runnable image, carrying the
+/// laws the compiler proves (a false one fails Bend's check).
 pub fn compile(source: &str) -> Result<String, Vec<Diag>> {
-    let program = parse_program(source).map_err(|e| vec![Diag { line: 0, message: format!("{}", e) }])?;
+    let program = parse_diag(source)?;
     let core = check::check_program(&program)?;
     if std::env::var("FIRE_DUMP_CORE").is_ok() {
         eprintln!("{:#?}", core.defs);
     }
-    let ir = lower::lower_program(&core)?;
+    let ir = lower::lower_program(&core, lower::Laws::Proven)?;
+    Ok(ir.render())
+}
+
+/// What `fire --check` reports besides Bend's verdict.
+#[derive(Debug, Clone, Default)]
+pub struct Report {
+    /// Every law: name, line, and how it is proven.
+    pub laws: Vec<(String, usize, core::Proof)>,
+    /// Defs declared `unsafe def`, with their lines.
+    pub unsafe_defs: Vec<(String, usize)>,
+    /// Defs that are not unsafe themselves but call unsafe code.
+    pub relying: Vec<(String, usize)>,
+}
+
+/// The image `fire --check` hands to Bend (every law, the open ones as
+/// claims), and the report of laws and unsafe code.
+pub fn compile_for_check(source: &str) -> Result<(String, Report), Vec<Diag>> {
+    let program = parse_diag(source)?;
+    let core = check::check_program(&program)?;
+    let ir = lower::lower_program(&core, lower::Laws::All)?;
+    let mut report = Report::default();
+    for l in &core.laws {
+        report.laws.push((l.name.clone(), l.line, l.proof.clone()));
+    }
+    for d in &core.defs {
+        if matches!(d.kind, core::DefKind::Lambda | core::DefKind::Law) {
+            continue;
+        }
+        let name = if matches!(d.kind, core::DefKind::Main) { "the program's top level".to_string() } else { d.name.clone() };
+        if d.unsafe_ {
+            report.unsafe_defs.push((name, d.line));
+        } else if d.relies_on_unsafe {
+            report.relying.push((name, d.line));
+        }
+    }
+    Ok((ir.render(), report))
+}
+
+/// The property-test image of a program (`fire --test`): its definitions
+/// and bindings, and every law checked on generated instances.
+pub fn compile_tests(source: &str) -> Result<String, Vec<Diag>> {
+    let program = parse_diag(source)?;
+    let core = check::check_program(&program)?;
+    let tests = testgen::test_program(&program, &core)?;
+    let core2 = check::check_program(&tests)?;
+    let ir = lower::lower_program(&core2, lower::Laws::Proven)?;
     Ok(ir.render())
 }
 
@@ -263,7 +315,10 @@ pub fn describe_types(source: &str) -> Result<String, Vec<Diag>> {
         }
         let descent = match &d.descent {
             core::Descent::None => String::new(),
-            core::Descent::Structural(i) => format!(" descends on {}", d.params.get(*i).map(|p| p.name.as_str()).unwrap_or("?")),
+            core::Descent::Structural(order) => {
+                let names: Vec<&str> = order.iter().map(|i| d.params.get(*i).map(|p| p.name.as_str()).unwrap_or("?")).collect();
+                format!(" descends on {}", names.join(", then "))
+            }
             core::Descent::Fuel(i) => format!(" counts down {}", d.params.get(*i).map(|p| p.name.as_str()).unwrap_or("?")),
             core::Descent::Unsafe => String::new(),
         };
@@ -291,7 +346,7 @@ pub fn describe_types(source: &str) -> Result<String, Vec<Diag>> {
         }).collect();
         let kind = match t.kind {
             core::DataKind::Class { .. } => "class",
-            core::DataKind::Record => "record",
+            core::DataKind::Record { .. } => "record",
             _ => "type",
         };
         out.push_str(&format!("{} {} = {}\n", kind, t.name, ctors.join(" | ")));

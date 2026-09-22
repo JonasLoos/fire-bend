@@ -1,9 +1,11 @@
 # Sorting and searching written by hand: quicksort via comprehensions and
-# concatenation, merge sort on halves, insertion/bubble/selection sorts that
-# rebuild a list through index assignment, binary search, and a polymorphic
-# use of the same defs on strings.
+# concatenation, a total bottom-up merge sort, insertion/bubble/selection
+# sorts that rebuild a list through index assignment, binary search, and a
+# polymorphic use of the same defs on strings. Every loop is a bounded `for`.
 
-def quicksort(xs)
+# quicksort recurses on filtered lists, which Bend cannot see are smaller:
+# `unsafe def` vouches for termination and opts this def out of the check
+unsafe def quicksort(xs)
     if len(xs) <= 1 do return xs
     pivot = xs[0]
     rest = xs[1..]
@@ -11,43 +13,46 @@ def quicksort(xs)
     larger = for x in rest if x >= pivot do x
     quicksort(smaller) + [pivot] + quicksort(larger)
 
+# merging descends on `a` or else on `b`: total
 def merge(a, b)
-    var i = 0
-    var j = 0
-    var out = []
-    while i < len(a) and j < len(b)
-        if a[i] <= b[j]
-            out.push(a[i])
-            i += 1
-        else
-            out.push(b[j])
-            j += 1
-    out + a[i..] + b[j..]
+    match a
+        [] => b
+        [x, ...xs] =>
+            match b
+                [] => a
+                [y, ...ys] => if x <= y do [x] + merge(xs, b) else [y] + merge(a, ys)
 
+def merge_pairs(runs)
+    match runs
+        [a, b, ...rest] => [merge(a, b)] + merge_pairs(rest)
+        other => other
+
+# bottom-up merge sort: merge neighbouring runs until one is left; each pass
+# halves the runs, so len(xs) passes always suffice
 def merge_sort(xs)
-    if len(xs) <= 1 do return xs
-    mid = int(len(xs) / 2)
-    merge(merge_sort(xs[..mid]), merge_sort(xs[mid..]))
+    var runs = for x in xs do [x]
+    for _ in 0..len(xs)
+        if len(runs) <= 1 do break
+        runs = merge_pairs(runs)
+    runs.first() or []
 
 def insertion_sort(xs)
     var out = xs
-    var i = 1
-    while i < len(out)
+    for i in 1..len(out)
         key = out[i]
         var j = i - 1
-        while j >= 0 and out[j] > key
+        for _ in 0..i
+            if out[j] <= key do break
             out[j + 1] = out[j]
             j -= 1
         out[j + 1] = key
-        i += 1
     out
 
 def bubble_sort(xs)
     var out = xs
     var n = len(out)
-    var swapped = true
-    while swapped
-        swapped = false
+    for _ in 0..len(out)
+        var swapped = false
         for i in 0..(n - 1)
             if out[i] > out[i + 1]
                 tmp = out[i]
@@ -55,6 +60,7 @@ def bubble_sort(xs)
                 out[i + 1] = tmp
                 swapped = true
         n -= 1
+        if not swapped do break
     out
 
 def selection_sort(xs)
@@ -69,10 +75,12 @@ def selection_sort(xs)
             out[best] = tmp
     out
 
+# the interval halves every step, so len(xs) steps are always enough
 def binary_search(xs, target)
     var lo = 0
     var hi = len(xs) - 1
-    while lo <= hi
+    for _ in 0..len(xs)
+        if lo > hi do break
         mid = int((lo + hi) / 2)
         if xs[mid] == target do return mid
         if xs[mid] < target

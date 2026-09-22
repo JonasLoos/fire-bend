@@ -89,8 +89,9 @@ pub enum DataKind {
         /// Field indices in the order `print` shows them.
         show_order: Vec<usize>,
     },
-    /// The shape of a record literal, nominal by its field names.
-    Record,
+    /// The shape of a record literal, nominal by its (sorted) field names;
+    /// it shows its fields in the order the first literal wrote them.
+    Record { show_order: Vec<usize> },
 }
 
 #[derive(Debug, Clone)]
@@ -125,7 +126,7 @@ impl DataType {
     }
     pub fn show_order(&self) -> Vec<usize> {
         match &self.kind {
-            DataKind::Class { show_order, .. } if !show_order.is_empty() => show_order.clone(),
+            DataKind::Class { show_order, .. } | DataKind::Record { show_order } if !show_order.is_empty() => show_order.clone(),
             _ => (0..self.ctors.first().map(|c| c.fields.len()).unwrap_or(0)).collect(),
         }
     }
@@ -159,9 +160,11 @@ pub enum DefKind {
 pub enum Descent {
     /// No self-call.
     None,
-    /// Every self-call is smaller on this parameter (a piece bound by a
-    /// match on it), with earlier parameters passed unchanged: Bend's rule.
-    Structural(usize),
+    /// Lexicographic structural descent over these parameters: every
+    /// self-call passes a prefix of them unchanged and the next one smaller
+    /// (a piece bound by a match on it). Bend's rule, reading the
+    /// parameters left to right.
+    Structural(Vec<usize>),
     /// Recursion on an int parameter decreased by literals under a guard;
     /// the image counts a Nat fuel down.
     Fuel(usize),

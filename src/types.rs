@@ -129,6 +129,8 @@ pub enum Class {
     OrElse(Type, Type),
     /// `len(x)`: list, str, dict, range.
     Len,
+    /// The zero a sum starts from: int, float, str, list.
+    Zero,
     /// `for x in subject` yields `elem`: list, range, str, dict entries.
     Iter(Type),
     /// `subject[idx] : elem`: list or str (int index), dict (str index,
@@ -691,7 +693,7 @@ mod tests {
         s.leave_level();
         let scheme = s.generalize(&f, 0);
         assert_eq!(scheme.vars.len(), 1);
-        let (inst, _, _) = s.instantiate(&scheme, 0, 0);
+        let (inst, _, _) = s.instantiate(&scheme, 0, 0, 0);
         if let Type::Fn(ps, _, _) = &inst {
             s.unify(&ps[0], &Type::Int).unwrap();
         }
@@ -702,7 +704,7 @@ mod tests {
             }
             _ => panic!(),
         }
-        let (inst2, _, _) = s.instantiate(&scheme, 0, 0);
+        let (inst2, _, _) = s.instantiate(&scheme, 0, 0, 0);
         assert!(matches!(s.resolve(&inst2), Type::Fn(_, _, _)));
         assert!(s.unify(&Type::Int, &Type::Str).is_err());
     }
@@ -717,7 +719,7 @@ mod tests {
         s.leave_level();
         let scheme = s.generalize(&f, 7);
         assert_eq!(scheme.dicts, vec![c]);
-        let (_, _, dicts) = s.instantiate(&scheme, 8, 2);
+        let (_, _, dicts) = s.instantiate(&scheme, 8, 8, 2);
         assert_eq!(dicts.len(), 1);
         assert_eq!(s.constraints[dicts[0]].owner, 8);
     }

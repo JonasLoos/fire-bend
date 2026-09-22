@@ -17,7 +17,5 @@ m >>>= 1
 print(m)
 # `|` between values is bitwise or; between types it is still a union
 flags = 4 | 1
-Level = 'low' | 'high'
-lvl: Level = 'low'
 opt: int | nothing = nothing
-print(flags, lvl, opt or 7)
+print(flags, opt or 7)

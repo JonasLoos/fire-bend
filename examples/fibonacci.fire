@@ -1,19 +1,30 @@
-# Using a def as a namespace for static-like utility methods.
-# Sibling members are plain lexical names: `fib(...)` and `self.fib(...)`
-# are the same call — `self.` is optional style.
-def MathUtils
-    public fib = (n: int) =>
-        if n <= 1
-            1
-        else
-            fib(n - 1) + fib(n - 2)
+# Recursion on ints: every def here is total, and Bend's checker agrees.
+# A self-call on `n - 1` (or `n - 2`) is accepted under a guard that keeps
+# `n` from going below zero (`if n <= 1`), so recursion always ends.
 
-    public fact = (n: int) =>
-        if n == 0
-            1
-        else
-            n * self.fact(n - 1)
+def fib(n: int)
+    if n <= 1
+        1
+    else
+        fib(n - 1) + fib(n - 2)
 
+def fact(n: int)
+    if n <= 0
+        1
+    else
+        n * fact(n - 1)
 
-print(MathUtils.fib(6))   # 13
-print(MathUtils.fact(5))  # 120
+# the same numbers by a loop: a `for` over a range always ends
+def fib_loop(n: int)
+    var a = 1
+    var b = 1
+    for _ in 0..n
+        next = a + b
+        a = b
+        b = next
+    a
+
+print(fib(6))   # 13
+print(fact(5))  # 120
+print(fib_loop(6), fib_loop(30))
+print(for i in 0..10 do fib(i))

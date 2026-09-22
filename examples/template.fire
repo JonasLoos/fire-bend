@@ -11,7 +11,9 @@ def Template(public source: str)
         var buf = ""
         var i = 0
         n = len(source)
-        while i < n
+        # every turn moves `i` forward, so n turns are enough
+        for _ in 0..n
+            if i >= n do break
             if i + 1 < n and source[i] == '{' and source[i + 1] == '{'
                 close = source[i..].index_of('}}')
                 match close

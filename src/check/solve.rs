@@ -208,6 +208,7 @@ pub fn describe_class(c: &Class) -> String {
         Class::Arith(op) => format!("the operator {}", op.symbol()),
         Class::OrElse(..) => "or".into(),
         Class::Len => "len".into(),
+        Class::Zero => "a zero to sum from".into(),
         Class::Iter(_) => "iteration".into(),
         Class::Index(..) => "indexing".into(),
         Class::IndexSet(..) => "index assignment".into(),
@@ -314,6 +315,10 @@ impl Checker {
                     Ok(Solution::Concrete(vec![]))
                 }
                 _ => Err("or"),
+            },
+            Class::Zero => match &subject {
+                Type::Int | Type::Float | Type::Str | Type::List(_) => Ok(Solution::Concrete(vec![])),
+                _ => Err("sum"),
             },
             Class::Len => match &subject {
                 Type::List(_) | Type::Str | Type::Map(_) | Type::Data(RANGE, _) => Ok(Solution::Concrete(vec![])),
@@ -486,7 +491,7 @@ impl Checker {
                             let mut subs = Vec::new();
                             if let Some(e) = elem {
                                 let needs: Vec<Class> = match name.as_str() {
-                                    "sum" => vec![Class::Arith(ArithOp::Add)],
+                                    "sum" => vec![Class::Arith(ArithOp::Add), Class::Zero],
                                     "min" | "max" => vec![Class::Ord],
                                     "contains" | "index_of" => vec![Class::Eq],
                                     "sort" | "sorted" if args.is_empty() => vec![Class::Ord],

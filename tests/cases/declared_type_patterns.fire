@@ -1,0 +1,36 @@
+# a declared type: positional constructor patterns, nullary
+# constructors as values, a generic field, an exhaustive match
+type Expr
+    Num(value: int)
+    Add(left: Expr, right: Expr)
+    Neg(inner: Expr)
+    Zero
+
+def eval(e: Expr)
+    match e
+        Num(v) => v
+        Add(a, b) => eval(a) + eval(b)
+        Neg(x) => -eval(x)
+        Zero => 0
+
+def show_expr(e: Expr)
+    match e
+        Num(v) => "{v}"
+        Add(a, b) => "({show_expr(a)} + {show_expr(b)})"
+        Neg(x) => "-{show_expr(x)}"
+        Zero => "0"
+
+type Box
+    Full(item)
+    Empty
+
+def unbox(b, fallback)
+    match b
+        Full(x) => x
+        Empty => fallback
+
+e = Add(Num(2), Neg(Add(Num(3), Zero)))
+print(show_expr(e), eval(e))
+print(e)
+print(unbox(Full("gift"), "none"), unbox(Empty, "none"), unbox(Full(7), 0))
+print(Num(1) == Num(1), Add(Zero, Zero) == Zero, [Zero, Num(2)])
