@@ -93,7 +93,7 @@ impl Checker {
     /// relies on unsafe code (the checker would hang on it).
     pub(crate) fn check_law_subjects(&mut self) {
         let laws = self.laws.clone();
-        for law in &laws {
+        for (li, law) in laws.iter().enumerate() {
             let mut callees: Vec<DefId> = Vec::new();
             let mut visit = |e: &Expr| {
                 match &e.kind {
@@ -127,6 +127,32 @@ impl Checker {
                     if caller == d {
                         stack.push(callee);
                     }
+                }
+            }
+            // Bend's checker does not compute with floats: a law that does
+            // is a claim, sampled by `fire --test`, not a proof
+            if law.proof != Proof::Open {
+                let mut floats = false;
+                let mut note = |e: &Expr| {
+                    if matches!(self.store.shallow(&e.ty), Type::Float) || matches!(e.kind, ExprKind::Lit(Lit::Float(_))) {
+                        floats = true;
+                    }
+                };
+                for h in &law.hyps {
+                    walk_expr(h, &mut note);
+                }
+                match &law.claim {
+                    Claim::Equation(a, b, _) => {
+                        walk_expr(a, &mut note);
+                        walk_expr(b, &mut note);
+                    }
+                    Claim::Holds(x) => walk_expr(x, &mut note),
+                }
+                for &d in &seen {
+                    walk_block(&self.defs[d].body, &mut note);
+                }
+                if floats {
+                    self.laws[li].proof = Proof::Open;
                 }
             }
             for d in seen {

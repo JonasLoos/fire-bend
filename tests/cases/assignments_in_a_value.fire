@@ -1,0 +1,61 @@
+# assignments inside an `if`/`match` used as a value, or at the end of a
+# def, reach the enclosing scope (and a loop carries them on)
+var n = 0
+for x in [1, 2, 3]
+    r = match x
+        1 =>
+            n = n + 10
+            "a"
+        other => "b"
+    print(r, n)
+
+var m = 0
+for x in [1, 2, 3]
+    r =
+        m = m + x
+        5
+    print(r, m)
+
+def tally(xs: [int])
+    var pos = 0
+    var neg = 0
+    var log = []
+    for x in xs
+        kind = match x
+            0 => "zero"
+            v if v > 0 =>
+                pos += 1
+                if v > 10
+                    log.push("big {v}")
+                    "big"
+                else
+                    "pos"
+            other =>
+                neg += 1
+                "neg"
+        log.push(kind)
+    {pos, neg, log}
+
+print(tally([3, -1, 0, 20, -5]))
+
+def Counter()
+    public var hits = 0
+    public see = x =>
+        label = match x > 0
+            true =>
+                hits += 1
+                "hit"
+            false => "miss"
+        label
+    public add = x =>
+        match x
+            0 => {err: "zero"}
+            v =>
+                hits += v
+                {ok: hits}
+
+var c = Counter()
+a = c.see(1)
+b = c.see(-1)
+print(a, b, c.see(2), c.hits)
+print(c.add(5), c.add(0), c.add(1), c.hits)

@@ -146,6 +146,7 @@ fn laws_are_classified_and_property_tested() {
     assert_eq!(proof("cycle_of_three"), Proof::Finite);
     assert_eq!(proof("twice_small"), Proof::Closed);
     assert_eq!(proof("twice_length"), Proof::Open);
+    assert_eq!(proof("cents_text"), Proof::Open);
     // the check image carries every law; the runnable one only the proven ones
     assert!(image.contains("law twice_length:"));
     assert!(!fire_bend::compile(&source).unwrap().contains("law twice_length:"));
@@ -162,7 +163,7 @@ fn laws_are_classified_and_property_tested() {
     let run = Command::new("bend").arg(&src).env("BEND_NO_TELEMETRY", "1").output().unwrap();
     let out = String::from_utf8_lossy(&run.stdout);
     assert!(run.status.success(), "{}", out);
-    for law in ["cycle_of_three", "twice_small", "twice_length"] {
+    for law in ["cycle_of_three", "twice_small", "twice_length", "cents_text"] {
         assert!(out.contains(&format!("law {}: holds", law)), "{}", out);
     }
 }

@@ -1,0 +1,33 @@
+# a match used as a value, in a loop that prints, with a fallible arm: the
+# match answers an IO action
+type Shape
+    Circle(r: int)
+    Square(s: int)
+
+def at(xs: [int], i: int)
+    xs[i] * 10
+
+xs = [1, 2, 3]
+m = {}
+m["a"] = 1
+for x in [0, 1]
+    if x == 99 do break
+    a = match (if x == 0 do Circle(1) else Square(2))
+        Circle(r) =>
+            v = at(xs, r)
+            "circle {v}"
+        Square(s) => "square {s}"
+    b = match xs.drop(x)
+        [] => "empty"
+        [h, ...t] =>
+            v = at(xs, h)
+            "head {v}"
+    c = match m[if x == 0 do "a" else "b"]
+        nothing => "none"
+        v =>
+            w = at(xs, v)
+            "some {w}"
+    d = match (if x == 0 do {ok: 2} else {err: "no"})
+        {ok} => "ok {at(xs, ok)}"
+        {err} => "err {err}"
+    print(a, b, c, d)

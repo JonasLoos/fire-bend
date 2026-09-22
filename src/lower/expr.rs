@@ -338,7 +338,7 @@ impl<'a> Lower<'a> {
         if img.fuel
             && let Descent::Fuel(i) = def.descent {
                 if d == ctx.self_def {
-                    call_args.push(Term::var("fuel_"));
+                    call_args.push(Term::var("__fuel_"));
                 } else {
                     let p = self.expr(ctx, &args[i], pre);
                     call_args.push(Term::call("F.i32.fuel", vec![p]));
@@ -1173,7 +1173,11 @@ impl<'a> Lower<'a> {
             ("any" | "all" | "count" | "find", Type::List(_)) => {
                 let et = elem_ty(self, ctx);
                 let f = fnvals.remove(0);
-                let driver = format!("F.list.{}_env", name);
+                let driver = match f.mode {
+                    Mode::Pure => format!("F.list.{}_env", name),
+                    Mode::Result => format!("F.list.{}_res_env", name),
+                    Mode::Io => format!("F.list.{}_io_env", name),
+                };
                 let t = Term::Call(driver, vec![Term::TmplTy(f.env_ty.clone()), Term::TmplTy(et), tmpl_arg(f.code), f.env, recv]);
                 self.note_hof_mode(t, f.mode.join(base))
             }

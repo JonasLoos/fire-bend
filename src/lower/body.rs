@@ -263,7 +263,7 @@ impl<'a> Lower<'a> {
             };
             let zero = self.finish_body(ctx, vec![], Ans::Monadic(dflt));
             let body = self.lower_block_body(ctx, &stmts, Leaf::Result);
-            Body::Match { scrutinee: "fuel".into(), arms: vec![(ir::Pat::Zero, zero), (ir::Pat::Succ("fuel_".into()), body)] }
+            Body::Match { scrutinee: "__fuel".into(), arms: vec![(ir::Pat::Zero, zero), (ir::Pat::Succ("__fuel_".into()), body)] }
         } else {
             self.lower_block_body(ctx, &stmts, Leaf::Result)
         };
@@ -810,6 +810,7 @@ impl<'a> Lower<'a> {
             tmpl_types,
             tmpl_funcs,
             erased,
+            erased_types: vec![],
             params: params.into_iter().map(|(n, t)| IrParam { name: n, reusable: false, ty: t }).collect(),
             ret: ctx.wrap(ret),
             body,

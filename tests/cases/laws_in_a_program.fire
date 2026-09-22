@@ -25,4 +25,11 @@ law twice_length
     for xs: [int]
     len(twice(xs)) == 2 * len(xs)
 
+def cents(c: int)
+    "{(float(c) / 100.0):.2f}"
+
+# Bend's checker does not compute with floats: a claim, not a proof
+law cents_text
+    cents(1299) == "12.99"
+
 print(next_light(Red), twice([7]))

@@ -1,0 +1,9 @@
+a 10
+b 10
+b 10
+5 1
+5 3
+5 6
+{pos: 2, neg: 2, log: ['pos', 'neg', 'zero', 'big 20', 'big', 'neg']}
+hit miss hit 2
+{ok: 7} {err: 'zero'} {ok: 8} 8

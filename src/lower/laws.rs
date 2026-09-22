@@ -21,6 +21,7 @@ impl<'a> Lower<'a> {
                 tmpl_types: vec![],
                 tmpl_funcs: vec![],
                 erased: vec![],
+                erased_types: vec![],
                 params: vec![],
                 ret: Ty::Unit,
                 body: Body::term(Term::Var(text)),

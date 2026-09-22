@@ -628,6 +628,7 @@ impl<'a> Lower<'a> {
             tmpl_types: vec![],
             tmpl_funcs: vec![],
             erased: vec![],
+            erased_types: vec![],
             params,
             ret: mode.wrap(rty),
             body: Body::Match { scrutinee: "f".into(), arms },
@@ -956,7 +957,7 @@ impl<'a> Lower<'a> {
         }
         let mut params = Vec::new();
         if img.fuel {
-            params.push(IrParam { name: "fuel".into(), reusable: false, ty: Ty::Nat });
+            params.push(IrParam { name: "__fuel".into(), reusable: false, ty: Ty::Nat });
         }
         if let Some((_, ety)) = &img.env {
             params.push(IrParam { name: "env".into(), reusable: false, ty: ety.clone() });
@@ -970,7 +971,7 @@ impl<'a> Lower<'a> {
                 _ => params.push(IrParam { name: local_name(&p.name), reusable: false, ty: img.params[i].clone() }),
             }
         }
-        IrDef { name: img.name.clone(), is_unsafe: false, tmpl_types, tmpl_funcs, erased, params, ret: img.mode.wrap(img.ret.clone()), body: Body::term(Term::unit()) }
+        IrDef { name: img.name.clone(), is_unsafe: false, tmpl_types, tmpl_funcs, erased, erased_types: vec![], params, ret: img.mode.wrap(img.ret.clone()), body: Body::term(Term::unit()) }
     }
 
     /// The type of a template code parameter: environment, then the
@@ -1021,6 +1022,7 @@ impl<'a> Lower<'a> {
                     tmpl_types: vec![],
                     tmpl_funcs: vec![],
                     erased: params.clone(),
+                    erased_types: vec![],
                     params: vec![IrParam { name: "r".into(), reusable: false, ty: Ty::Named(name.clone(), params.iter().map(|p| Ty::Param(p.clone())).collect()) }],
                     ret: Ty::Param(format!("T{}", i)),
                     body: Body::Match {
@@ -1055,6 +1057,7 @@ impl<'a> Lower<'a> {
                 tmpl_types: vec![],
                 tmpl_funcs: vec![],
                 erased: params,
+                erased_types: vec![],
                 params: vec![IrParam { name: "self_".into(), reusable: false, ty: selft }],
                 ret: fty,
                 body: Body::Match { scrutinee: "self_".into(), arms: vec![(ir::Pat::Ctor(self.ctor_name(tid, 0), fields.clone()), Body::term(Term::var(&fields[idx].0)))] },
@@ -1082,6 +1085,7 @@ impl<'a> Lower<'a> {
                 tmpl_types: vec![],
                 tmpl_funcs: vec![],
                 erased: params,
+                erased_types: vec![],
                 params: vec![IrParam { name: "self_".into(), reusable: false, ty: selft.clone() }, IrParam { name: "v".into(), reusable: false, ty: fty }],
                 ret: selft,
                 body: Body::Match { scrutinee: "self_".into(), arms: vec![(ir::Pat::Ctor(self.ctor_name(tid, 0), fields), Body::term(rebuilt))] },
@@ -1118,9 +1122,8 @@ impl<'a> Lower<'a> {
                 let args: Vec<Term> = if fields.is_empty() { vec![Term::unit()] } else { fields.iter().map(|(f, _)| Term::var(f)).collect() };
                 arms.push((ir::Pat::Ctor(self.ctor_name(tid, ci), fields), Body::term(Term::CallVar(kname, args))));
             }
-            let mut erased = params;
-            erased.push("R".into());
-            self.defs.push(IrDef { name: name.clone(), is_unsafe: false, tmpl_types: vec![], tmpl_funcs: vec![], erased, params: ps, ret: Ty::Param("R".into()), body: Body::Match { scrutinee: "x".into(), arms } });
+            // the answer may be an `IO(..)`, a type that is not data
+            self.defs.push(IrDef { name: name.clone(), is_unsafe: false, tmpl_types: vec![], tmpl_funcs: vec![], erased: params, erased_types: vec!["R".into()], params: ps, ret: Ty::Param("R".into()), body: Body::Match { scrutinee: "x".into(), arms } });
         }
         name
     }
@@ -1257,7 +1260,7 @@ impl<'a> Lower<'a> {
                 (vec![], selft.clone(), Body::term(Term::Ctor(self.ctor_name(tid, ci), args)))
             }
         };
-        self.defs.push(IrDef { name: name.clone(), is_unsafe: false, tmpl_types: params.clone(), tmpl_funcs, erased: vec![], params: ir_params, ret, body });
+        self.defs.push(IrDef { name: name.clone(), is_unsafe: false, tmpl_types: params.clone(), tmpl_funcs, erased: vec![], erased_types: vec![], params: ir_params, ret, body });
         name
     }
 
@@ -1552,6 +1555,7 @@ pub fn render_term(t: &Term) -> String {
         tmpl_types: vec![],
         tmpl_funcs: vec![],
         erased: vec![],
+        erased_types: vec![],
         params: vec![],
         ret: Ty::Unit,
         body: Body::term(t.clone()),

@@ -1,0 +1,6 @@
+# a def counting down a parameter the compiler also calls fuel
+def f(fuel, n)
+    if fuel <= 0 do return 0
+    if n > 3 do f(fuel - 1, n - 1) + f(fuel - 1, n - 2) else n
+
+print(f(10, 6), f(1, 6))

@@ -653,7 +653,70 @@ impl Checker {
                 Type::Unit
             }
         };
-        self.expr(ExprKind::Block(block), ty)
+        self.thread_assignments(block, ty)
+    }
+
+    /// A block used as a value that assigns variables of the enclosing
+    /// scope: every path answers its value paired with those variables,
+    /// and the variables are assigned from the pair in statements before
+    /// the enclosing one. Branches of a value are separate terms, and loops
+    /// carry only what statements assign, so the assignments would be lost.
+    fn thread_assignments(&mut self, mut block: Block, ty: Type) -> Expr {
+        let line = self.line;
+        let mut names: Vec<String> = Vec::new();
+        let mut declared: Vec<String> = Vec::new();
+        let mut note = |b: &Block| {
+            effects::for_each_stmt(b, &mut |s: &Stmt| match &s.kind {
+                StmtKind::Assign { name, .. } if !names.contains(name) => names.push(name.clone()),
+                StmtKind::Let { name, .. } => declared.push(name.clone()),
+                _ => {}
+            });
+        };
+        note(&block);
+        walk_block(&block, &mut |e: &Expr| {
+            if let ExprKind::Block(b) = &e.kind {
+                note(b);
+            }
+        });
+        // variables of the enclosing scope (a local of this frame, or a
+        // member of the object), not ones the block declares itself
+        let outs: Vec<(String, Type)> = names.into_iter().filter(|n| !declared.contains(n)).filter_map(|n| {
+            let own = self.frame_ref().scopes.iter().any(|s| s.names.contains_key(&n));
+            match self.lookup(&n)? {
+                Binding::Local { ty, .. } if own => Some((n, ty)),
+                Binding::Member { root, root_ty, .. } if root == n => Some((n, root_ty)),
+                _ => None,
+            }
+        }).collect();
+        if outs.is_empty() {
+            return self.expr(ExprKind::Block(block), ty);
+        }
+        let outs_ty = pack_types(&outs.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>());
+        let packed_ty = Type::pair(ty.clone(), outs_ty.clone());
+        let Some(Stmt { kind: StmtKind::Expr(v), line: vl }) = block.stmts.pop() else { unreachable!() };
+        let v = pack_tails(v, &outs, &packed_ty);
+        block.stmts.push(Stmt { kind: StmtKind::Expr(v), line: vl });
+        let tmp = self.temp("vb");
+        let value = self.expr(ExprKind::Block(block), packed_ty.clone());
+        self.pending.push(Stmt { kind: StmtKind::Let { name: tmp.clone(), value }, line });
+        let pair = self.var(&tmp, packed_ty);
+        let rest = self.expr(ExprKind::Field(Box::new(pair.clone()), PAIR, 1), outs_ty);
+        let mut cur = rest;
+        for (i, (n, t)) in outs.iter().enumerate() {
+            let value = if i + 1 == outs.len() {
+                cur.clone()
+            } else {
+                let first = self.expr(ExprKind::Field(Box::new(cur.clone()), PAIR, 0), t.clone());
+                let rt = match &cur.ty {
+                    Type::Data(PAIR, a) => a[1].clone(),
+                    _ => unreachable!(),
+                };
+                cur = self.expr(ExprKind::Field(Box::new(cur.clone()), PAIR, 1), rt);
+                first
+            };
+            self.pending.push(Stmt { kind: StmtKind::Assign { name: n.clone(), value }, line });
+        }
+        self.expr(ExprKind::Field(Box::new(pair), PAIR, 0), ty)
     }
 
     // -- calls ------------------------------------------------------------------
@@ -1924,5 +1987,60 @@ fn expr_answers_result(e: &ast::Expression) -> bool {
             expr_answers_result(then_branch) || elif_branches.iter().any(|(_, b)| expr_answers_result(b)) || else_branch.as_ref().is_some_and(|b| expr_answers_result(b))
         }
         _ => false,
+    }
+}
+
+/// The types of several values packed as nested pairs.
+fn pack_types(tys: &[Type]) -> Type {
+    match tys {
+        [t] => t.clone(),
+        [t, rest @ ..] => Type::pair(t.clone(), pack_types(rest)),
+        [] => Type::Unit,
+    }
+}
+
+/// The variables, read where the path ends, packed as nested pairs.
+fn pack_vars(outs: &[(String, Type)], line: usize) -> Expr {
+    let v = |(n, t): &(String, Type)| Expr { kind: ExprKind::Var(n.clone()), ty: t.clone(), line };
+    match outs {
+        [o] => v(o),
+        [o, rest @ ..] => {
+            let r = pack_vars(rest, line);
+            let ty = Type::pair(o.1.clone(), r.ty.clone());
+            Expr { kind: ExprKind::Con(PAIR, 0, vec![v(o), r]), ty, line }
+        }
+        [] => unreachable!(),
+    }
+}
+
+/// Pair the value of every path of `e` with the variables as they are at
+/// the end of that path.
+fn pack_tails(e: Expr, outs: &[(String, Type)], packed: &Type) -> Expr {
+    let line = e.line;
+    match e.kind {
+        ExprKind::Block(mut b) => {
+            match b.stmts.pop() {
+                Some(Stmt { kind: StmtKind::Expr(t), line: tl }) => b.stmts.push(Stmt { kind: StmtKind::Expr(pack_tails(t, outs, packed)), line: tl }),
+                other => {
+                    // a block without a value answers nothing
+                    b.stmts.extend(other);
+                    let n = Expr { kind: ExprKind::Lit(Lit::Nothing), ty: Type::Unit, line };
+                    b.stmts.push(Stmt { kind: StmtKind::Expr(pack_tails(n, outs, packed)), line });
+                }
+            }
+            Expr { kind: ExprKind::Block(b), ty: packed.clone(), line }
+        }
+        ExprKind::If(c, t, f) => {
+            let (t, f) = (pack_tails(*t, outs, packed), pack_tails(*f, outs, packed));
+            Expr { kind: ExprKind::If(c, Box::new(t), Box::new(f)), ty: packed.clone(), line }
+        }
+        ExprKind::Match(s, arms) => {
+            let arms = arms.into_iter().map(|a| Arm { body: pack_tails(a.body, outs, packed), ..a }).collect();
+            Expr { kind: ExprKind::Match(s, arms), ty: packed.clone(), line }
+        }
+        kind => {
+            let v = Expr { kind, ty: e.ty, line };
+            Expr { kind: ExprKind::Con(PAIR, 0, vec![v, pack_vars(outs, line)]), ty: packed.clone(), line }
+        }
     }
 }

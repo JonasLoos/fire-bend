@@ -852,7 +852,22 @@ impl Checker {
     /// joined into the frame's result type.
     pub(crate) fn finish_body_value(&mut self, body: &mut Block, line: usize) {
         let ret = self.frame_ref().ret.clone();
-        if self.block_value(body).is_none() {
+        // a trailing `if`/`match` whose branches assign stays a statement: as
+        // a value its branches would be terms, and the assignments (a member
+        // of a method's object, say) would not leave them
+        let assigns = match body.stmts.last() {
+            Some(s @ Stmt { kind: StmtKind::If { .. } | StmtKind::Match { .. }, .. }) => {
+                let mut found = false;
+                effects::for_each_stmt(&Block { stmts: vec![s.clone()] }, &mut |s: &Stmt| {
+                    if matches!(s.kind, StmtKind::Assign { .. }) {
+                        found = true;
+                    }
+                });
+                found
+            }
+            _ => false,
+        };
+        if assigns || self.block_value(body).is_none() {
             // a trailing `if`/`match` kept as a statement: its branch values
             // are the def's answers
             tail_returns(body);

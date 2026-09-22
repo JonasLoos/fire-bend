@@ -907,6 +907,9 @@ pub struct Def {
     pub tmpl_funcs: Vec<(String, Ty)>,
     /// `-A: Data` erased type parameters.
     pub erased: Vec<String>,
+    /// `-A: Type` erased parameters, after those: types that need not be
+    /// data (an eliminator's answer may be an `IO(..)`).
+    pub erased_types: Vec<String>,
     pub params: Vec<Param>,
     pub ret: Ty,
     pub body: Body,
@@ -954,6 +957,10 @@ impl Def {
         for e in &self.erased {
             sep(out);
             write!(out, "-{}: Data", e).unwrap();
+        }
+        for e in &self.erased_types {
+            sep(out);
+            write!(out, "-{}: Type", e).unwrap();
         }
         for p in &self.params {
             sep(out);
@@ -1168,6 +1175,7 @@ mod tests {
             tmpl_types: vec![],
             tmpl_funcs: vec![],
             erased: vec![],
+            erased_types: vec![],
             params: vec![Param { name: "x".into(), reusable: false, ty: Ty::U32 }],
             ret: Ty::U32,
             body: Body::Block {
@@ -1188,6 +1196,7 @@ mod tests {
             tmpl_types: vec![],
             tmpl_funcs: vec![],
             erased: vec![],
+            erased_types: vec![],
             params: vec![],
             ret: Ty::U32,
             body: Body::term(Term::List(calls.iter().map(|c| Term::call(c, vec![])).collect())),

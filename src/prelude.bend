@@ -226,21 +226,21 @@ def F.loop_io(~S: Data, ~R: Data, ~E: Data, ~body: E -> S -> IO(F.Ctl<S, R>), +e
 
 # -- Case eliminators ---------------------------------------------------------
 # A match on a computed value: one continuation per constructor.
-def F.list.case(-A: Data, -R: Data, xs: List<&2, A>, kn: Unit -> R, kc: A -> List<&2, A> -> R) -> R:
+def F.list.case(-A: Data, -R: Type, xs: List<&2, A>, kn: Unit -> R, kc: A -> List<&2, A> -> R) -> R:
   match xs:
     case Nil{}:
       kn(Unit{})
     case Con{h, t}:
       kc(h, t)
 
-def F.maybe.case(-A: Data, -R: Data, m: Maybe<&2, A>, kn: Unit -> R, ks: A -> R) -> R:
+def F.maybe.case(-A: Data, -R: Type, m: Maybe<&2, A>, kn: Unit -> R, ks: A -> R) -> R:
   match m:
     case None{}:
       kn(Unit{})
     case Some{v}:
       ks(v)
 
-def F.result.case(-E: Data, -A: Data, -R: Data, r: Result<&2, &2, E, A>, kf: E -> R, kd: A -> R) -> R:
+def F.result.case(-E: Data, -A: Data, -R: Type, r: Result<&2, &2, E, A>, kf: E -> R, kd: A -> R) -> R:
   match r:
     case Fail{e}:
       kf(e)
@@ -1325,6 +1325,82 @@ def F.list.count_env(~E: Data, ~A: Data, ~f: E -> A -> Bool, +e: E, xs: List<&2,
       0
     case h <> t:
       (Bool.to_u32(f(e, h)) + F.list.count_env(~E, ~A, ~f, e, t) : U32)
+
+# any/all/count/find over a callback that may fail or do IO: the callback
+# runs on each element in order; any/all/find stop at the first decisive one
+def F.list.any_res_env(~E: Data, ~A: Data, ~f: E -> A -> Result<&2, &2, String, Bool>, +e: E, xs: List<&2, A>) -> Result<&2, &2, String, Bool>:
+  match xs:
+    case Nil{}:
+      Done{False{}}
+    case h <> t:
+      do Result<&2, &2, String, Bool>:
+        hit : Bool <- f(e, h)
+        (Bool.pick(Unit -> Result<&2, &2, String, Bool>, hit, _ => Done{True{}}, _ => F.list.any_res_env(~E, ~A, ~f, e, t)))(Unit{})
+
+def F.list.any_io_env(~E: Data, ~A: Data, ~f: E -> A -> IO(Bool), +e: E, xs: List<&2, A>) -> IO(Bool):
+  match xs:
+    case Nil{}:
+      IO.pure(Bool, False{})
+    case h <> t:
+      do IO<Bool>:
+        hit : Bool <- f(e, h)
+        (Bool.pick(Unit -> IO(Bool), hit, _ => IO.pure(Bool, True{}), _ => F.list.any_io_env(~E, ~A, ~f, e, t)))(Unit{})
+
+def F.list.all_res_env(~E: Data, ~A: Data, ~f: E -> A -> Result<&2, &2, String, Bool>, +e: E, xs: List<&2, A>) -> Result<&2, &2, String, Bool>:
+  match xs:
+    case Nil{}:
+      Done{True{}}
+    case h <> t:
+      do Result<&2, &2, String, Bool>:
+        hit : Bool <- f(e, h)
+        (Bool.pick(Unit -> Result<&2, &2, String, Bool>, hit, _ => F.list.all_res_env(~E, ~A, ~f, e, t), _ => Done{False{}}))(Unit{})
+
+def F.list.all_io_env(~E: Data, ~A: Data, ~f: E -> A -> IO(Bool), +e: E, xs: List<&2, A>) -> IO(Bool):
+  match xs:
+    case Nil{}:
+      IO.pure(Bool, True{})
+    case h <> t:
+      do IO<Bool>:
+        hit : Bool <- f(e, h)
+        (Bool.pick(Unit -> IO(Bool), hit, _ => F.list.all_io_env(~E, ~A, ~f, e, t), _ => IO.pure(Bool, False{})))(Unit{})
+
+def F.list.find_res_env(~E: Data, ~A: Data, ~f: E -> A -> Result<&2, &2, String, Bool>, +e: E, xs: List<&2, A>) -> Result<&2, &2, String, Maybe<&2, A>>:
+  match xs:
+    case Nil{}:
+      Done{None{}}
+    case +h <> t:
+      do Result<&2, &2, String, Maybe<&2, A>>:
+        hit : Bool <- f(e, h)
+        (Bool.pick(Unit -> Result<&2, &2, String, Maybe<&2, A>>, hit, _ => Done{Some{h}}, _ => F.list.find_res_env(~E, ~A, ~f, e, t)))(Unit{})
+
+def F.list.find_io_env(~E: Data, ~A: Data, ~f: E -> A -> IO(Bool), +e: E, xs: List<&2, A>) -> IO(Maybe<&2, A>):
+  match xs:
+    case Nil{}:
+      IO.pure(Maybe<&2, A>, None{})
+    case +h <> t:
+      do IO<Maybe<&2, A>>:
+        hit : Bool <- f(e, h)
+        (Bool.pick(Unit -> IO(Maybe<&2, A>), hit, _ => IO.pure(Maybe<&2, A>, Some{h}), _ => F.list.find_io_env(~E, ~A, ~f, e, t)))(Unit{})
+
+def F.list.count_res_env(~E: Data, ~A: Data, ~f: E -> A -> Result<&2, &2, String, Bool>, +e: E, xs: List<&2, A>) -> Result<&2, &2, String, U32>:
+  match xs:
+    case Nil{}:
+      Done{0}
+    case h <> t:
+      do Result<&2, &2, String, U32>:
+        hit : Bool <- f(e, h)
+        rest : U32 <- F.list.count_res_env(~E, ~A, ~f, e, t)
+        return (Bool.to_u32(hit) + rest : U32)
+
+def F.list.count_io_env(~E: Data, ~A: Data, ~f: E -> A -> IO(Bool), +e: E, xs: List<&2, A>) -> IO(U32):
+  match xs:
+    case Nil{}:
+      IO.pure(U32, 0)
+    case h <> t:
+      do IO<U32>:
+        hit : Bool <- f(e, h)
+        rest : U32 <- F.list.count_io_env(~E, ~A, ~f, e, t)
+        return (Bool.to_u32(hit) + rest : U32)
 
 # -- Maybe --------------------------------------------------------------------
 def F.maybe.show(~A: Data, ~f: A -> String, m: Maybe<&2, A>) -> String:
