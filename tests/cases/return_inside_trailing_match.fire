@@ -1,0 +1,36 @@
+# a trailing `match` or `if` with an early `return`: the return and the
+# branch values are both answers of the def
+def first_pos(xs: [int])
+    match xs
+        [] => -1
+        [a, ...rest] =>
+            if a > 0 do return a * 10
+            a
+
+def sign(n: int)
+    if n > 100
+        return "big"
+    elif n > 0
+        if n == 7 do return "seven"
+        "pos"
+    else
+        "nonpos"
+
+def find(xs: [int], k: int)
+    match xs
+        [] => nothing
+        [a, ...rest] =>
+            for x in xs
+                if x == k do return "found {x}"
+            nothing
+
+def val(xs: [int])
+    y = match xs
+        [] => 0
+        [a, ...rest] => a + 1
+    y * 2
+
+print(first_pos([]), first_pos([3]), first_pos([-2]))
+print(sign(500), sign(7), sign(3), sign(-1))
+print(find([1, 2], 2), find([1, 2], 5), find([], 1))
+print(val([4]))

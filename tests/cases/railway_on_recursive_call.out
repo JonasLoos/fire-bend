@@ -1,0 +1,4 @@
+{ok: -4}
+{err: 'div by zero'}
+{ok: 3}
+3

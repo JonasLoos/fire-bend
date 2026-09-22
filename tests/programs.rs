@@ -110,6 +110,11 @@ fn unsupported_programs_are_rejected_with_a_message() {
         ("def say(x)\n    print(x)\n    x\nlaw bad\n    say(1) == 1\n", "performs IO"),
         ("unsafe def spin(n)\n    spin(n + 1)\nlaw bad\n    spin(1) == 1\n", "relies on unsafe code"),
         ("limit = 3\nlaw uses_value\n    limit == 3\n", "a law speaks about defs and types"),
+        // a lambda cannot change what it captured; the change would be lost
+        ("def C()\n    public var n = 0\n    public bump = k =>\n        n += k\n        {ok: n}\nvar c = C()\nr = {ok: 1} |> x => c.bump(x)\n", "a lambda or nested def captures it by value"),
+        ("def C()\n    public var n = 0\n    public bump = k => n += k\nvar c = C()\nxs = [1] *> c.bump($)\n", "a lambda or nested def captures it by value"),
+        // a `return` cannot leave a match whose value is bound
+        ("def g(xs: [int])\n    y = match xs\n        [] => 0\n        [a, ...rest] =>\n            if a > 5 do return 1\n            a\n    y\n", "`return` cannot leave"),
     ];
     for (src, fragment) in cases {
         match fire_bend::compile(src) {

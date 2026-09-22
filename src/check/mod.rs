@@ -682,11 +682,16 @@ impl Checker {
         // a mutating method's type was not visible to its recursive calls
         let _ = self.store.unify(&mono, &fty);
         let scheme = if is_top { self.store.generalize(&fty, id) } else { Scheme { vars: vec![], dicts: vec![], ty: self.resolve(&fty) } };
-        let scheme = self.merge_dicts(scheme);
         // a dictionary of a fallible class answers a result whatever the
-        // instantiation: the def may abort
-        if scheme.dicts.iter().any(|c| self.store.constraints[*c].class.fallible()) {
+        // instantiation: the def may abort, and so may a lambda inside it
+        // that performs the operation
+        let fallible: Vec<DefId> = scheme.dicts.iter().filter(|c| self.store.constraints[**c].class.fallible()).map(|c| self.store.constraints[*c].user).collect();
+        let scheme = self.merge_dicts(scheme);
+        if !fallible.is_empty() {
             self.defs[id].own_effect = self.defs[id].own_effect.join(Effect::ABORT);
+        }
+        for user in fallible {
+            self.defs[user].own_effect = self.defs[user].own_effect.join(Effect::ABORT);
         }
         let d = &mut self.defs[id];
         d.params = params;
@@ -765,6 +770,12 @@ impl Checker {
     /// into an expression). Answers the value's type, or None when the
     /// block ends otherwise (a return, a loop, a statement without value).
     pub(crate) fn block_value(&mut self, body: &mut Block) -> Option<Type> {
+        // a trailing `if` or `match` with an early `return` stays a statement:
+        // as an expression its returns would no longer leave the def
+        if matches!(body.stmts.last(), Some(Stmt { kind: StmtKind::If { .. } | StmtKind::Match { .. }, .. }))
+            && contains_return(std::slice::from_ref(body.stmts.last().unwrap())) {
+            return None;
+        }
         match body.stmts.last() {
             Some(Stmt { kind: StmtKind::Expr(e), .. }) => Some(e.ty.clone()),
             Some(Stmt { kind: StmtKind::If { else_, .. }, .. }) if !else_.stmts.is_empty() => {
@@ -842,6 +853,9 @@ impl Checker {
     pub(crate) fn finish_body_value(&mut self, body: &mut Block, line: usize) {
         let ret = self.frame_ref().ret.clone();
         if self.block_value(body).is_none() {
+            // a trailing `if`/`match` kept as a statement: its branch values
+            // are the def's answers
+            tail_returns(body);
             let ends = match body.stmts.last() {
                 Some(Stmt { kind: StmtKind::Return(_), .. }) => true,
                 Some(Stmt { kind: StmtKind::If { .. } | StmtKind::Match { .. }, .. }) => self.block_always_returns(body),
@@ -1092,5 +1106,40 @@ pub(crate) fn stmt_declares_public(s: &ast::Stmt) -> bool {
         ast::Statement::Declaration { is_public, .. } => *is_public,
         ast::Statement::Def { is_public, .. } => *is_public,
         _ => false,
+    }
+}
+
+/// Does any statement (or a block nested in one) `return`?
+pub(crate) fn contains_return(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match &s.kind {
+        StmtKind::Return(_) => true,
+        StmtKind::If { then, else_, .. } => contains_return(&then.stmts) || contains_return(&else_.stmts),
+        StmtKind::Match { arms, .. } => arms.iter().any(|a| matches!(&a.body.kind, ExprKind::Block(b) if contains_return(&b.stmts))),
+        StmtKind::For { body, .. } | StmtKind::While { body, .. } => contains_return(&body.stmts),
+        _ => false,
+    })
+}
+
+/// Turn the value a block ends on into a `return`, through a trailing
+/// `if`/`else` or `match`.
+fn tail_returns(b: &mut Block) {
+    let Some(last) = b.stmts.last_mut() else { return };
+    match &mut last.kind {
+        StmtKind::Expr(_) => {
+            let Some(Stmt { kind: StmtKind::Expr(e), line }) = b.stmts.pop() else { unreachable!() };
+            b.stmts.push(Stmt { kind: StmtKind::Return(e), line });
+        }
+        StmtKind::If { then, else_, .. } if !else_.stmts.is_empty() => {
+            tail_returns(then);
+            tail_returns(else_);
+        }
+        StmtKind::Match { arms, .. } => {
+            for a in arms {
+                if let ExprKind::Block(blk) = &mut a.body.kind {
+                    tail_returns(blk);
+                }
+            }
+        }
+        _ => {}
     }
 }

@@ -1,0 +1,31 @@
+# `|>` and `!>` over a recursive call answering a result take the railway
+type E
+    N(v: int)
+    Neg(a: E)
+    Add(l: E, r: E)
+    Div(l: E, r: E)
+
+def ev(e: E)
+    match e
+        N(n) => {ok: n}
+        Neg(a) => (ev(a) |> -$)
+        Add(l, r) =>
+            match ev(l)
+                {err} => {err}
+                {ok: x} => (ev(r) |> $ + x)
+        Div(l, r) =>
+            d = ev(r) !> 1
+            if d == 0 do return {err: "div by zero"}
+            ev(l) |> $ / d
+
+def depth(e: E)
+    match e
+        N(n) => 1
+        Neg(a) => (depth(a) |> $ + 1)
+        Add(l, r) => 1 + depth(l)
+        Div(l, r) => 1 + depth(r)
+
+print(ev(Add(N(1), Neg(N(5)))))
+print(ev(Div(N(9), Add(N(1), Neg(N(1))))))
+print(ev(Div(N(9), N(3))))
+print(depth(Neg(Neg(N(0)))))

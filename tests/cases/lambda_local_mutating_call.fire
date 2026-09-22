@@ -1,0 +1,18 @@
+def C(start = 0)
+    public var n = start
+    public bump = k =>
+        n += k
+        {ok: n}
+
+# a lambda may change objects of its own; the change stays inside it
+g = x =>
+    var d = C(x)
+    d.bump(10)
+    d.n
+xs = [1, 2, 3] *> x =>
+    var d = C(x)
+    d.bump(x)
+    d.n
+var c = C()
+c.bump(2)
+print(c.n, g(1), [1, 2] *> g($), xs)

@@ -595,6 +595,9 @@ impl Checker {
         self.unify(&mono, &fty, line);
         self.defs[id].params = own.clone();
         self.defs[id].defaults = defaults;
+        // calls hoisted out of the body stay in the body, not in front of
+        // the statement that makes the lambda
+        let outer = std::mem::take(&mut self.pending);
         let mut body_block = match body {
             ast::Expression::Block(stmts) => {
                 self.hoist_defs(stmts);
@@ -602,9 +605,12 @@ impl Checker {
             }
             other => {
                 let x = self.check_expr(other, Some(&ret));
-                Block { stmts: vec![Stmt { kind: StmtKind::Expr(x), line }] }
+                let mut stmts = std::mem::take(&mut self.pending);
+                stmts.push(Stmt { kind: StmtKind::Expr(x), line });
+                Block { stmts }
             }
         };
+        self.pending = outer;
         let mut stmts = param_stmts;
         stmts.append(&mut body_block.stmts);
         body_block.stmts = stmts;
@@ -636,6 +642,9 @@ impl Checker {
         let mut block = self.check_block_stmts(stmts);
         self.pop_scope();
         let _ = expected;
+        if contains_return(&block.stmts) {
+            self.error(line, "`return` cannot leave an `if`, `match` or block whose value is used: make it a statement that returns on every path");
+        }
         let ty = match self.block_value(&mut block) {
             Some(t) => t,
             None => {
@@ -1195,8 +1204,11 @@ impl Checker {
             });
             let pname = "__pipe1".to_string();
             self.declare(&pname, Binding::Local { ty: input.clone(), mutable: false });
+            let outer = std::mem::take(&mut self.pending);
             let x = self.check_expr(right, None);
-            let mut body = Block { stmts: vec![Stmt { kind: StmtKind::Expr(x), line }] };
+            let mut stmts = std::mem::replace(&mut self.pending, outer);
+            stmts.push(Stmt { kind: StmtKind::Expr(x), line });
+            let mut body = Block { stmts };
             self.finish_body_value(&mut body, line);
             let frame = self.frames.pop().unwrap();
             let captures = frame.captures.clone();
@@ -1218,6 +1230,9 @@ impl Checker {
         use ast::PipelineOperator as P;
         let line = self.line;
         let l = self.check_expr(left, None);
+        if matches!(op, P::Pipe | P::Handle) {
+            self.recursive_result(left, &l);
+        }
         let lt = self.shallow(&l.ty);
         match op {
             P::Pipe => {
@@ -1340,6 +1355,26 @@ impl Checker {
                     }
                 }
             }
+        }
+    }
+
+    /// A recursive call's type is not known while its def is checked. When
+    /// the def answers `{ok: ..}` or `{err: ..}` on some path, the call is a
+    /// result, so a pipeline over it takes the railway.
+    fn recursive_result(&mut self, left: &ast::Expression, l: &Expr) {
+        let ast::Expression::Call { function, .. } = left else { return };
+        let ast::Expression::Identifier(name) = &**function else { return };
+        if !matches!(self.shallow(&l.ty), Type::Var(_)) {
+            return;
+        }
+        let Some(Binding::Func(d)) = self.lookup(name) else { return };
+        if !matches!(self.defs[d].state, State::InProgress) {
+            return;
+        }
+        let answers_result = self.defs[d].source.as_ref().is_some_and(|s| stmts_answer_result(&s.body));
+        if answers_result {
+            let (e, a) = (self.fresh(), self.fresh());
+            self.unify(&Type::result(e, a), &l.ty, self.line);
         }
     }
 
@@ -1842,6 +1877,52 @@ fn stmt_mentions_dollar(s: &ast::Stmt) -> bool {
         S::Match { subject, arms } => mentions_dollar(subject) || arms.iter().any(|a| mentions_dollar(&a.body)),
         S::For { iterables, body, .. } => iterables.iter().any(mentions_dollar) || body.iter().any(stmt_mentions_dollar),
         S::While { condition, body } => mentions_dollar(condition) || body.iter().any(stmt_mentions_dollar),
+        _ => false,
+    }
+}
+
+/// Whether a body answers an `{ok: ..}` / `{err: ..}` literal on some path:
+/// its last statement's value, or a `return`.
+fn stmts_answer_result(stmts: &[ast::Stmt]) -> bool {
+    use ast::Statement as S;
+    let returns = |ss: &[ast::Stmt]| stmts_return_result(ss);
+    if returns(stmts) {
+        return true;
+    }
+    match stmts.last().map(|s| &s.node) {
+        Some(S::Expression(e)) => expr_answers_result(e),
+        Some(S::If { body, elif_branches, else_body, .. }) => {
+            stmts_answer_result(body) || elif_branches.iter().any(|(_, b)| stmts_answer_result(b)) || else_body.as_ref().is_some_and(|b| stmts_answer_result(b))
+        }
+        Some(S::Match { arms, .. }) => arms.iter().any(|a| expr_answers_result(&a.body)),
+        _ => false,
+    }
+}
+
+/// A `return {ok: ..}` / `return {err: ..}` anywhere in the statements.
+fn stmts_return_result(stmts: &[ast::Stmt]) -> bool {
+    use ast::Statement as S;
+    stmts.iter().any(|s| match &s.node {
+        S::Return(Some(e)) => expr_answers_result(e),
+        S::If { body, elif_branches, else_body, .. } => {
+            stmts_return_result(body) || elif_branches.iter().any(|(_, b)| stmts_return_result(b)) || else_body.as_ref().is_some_and(|b| stmts_return_result(b))
+        }
+        S::Match { arms, .. } => arms.iter().any(|a| matches!(&a.body, ast::Expression::Block(b) if stmts_return_result(b))),
+        S::For { body, .. } | S::While { body, .. } => stmts_return_result(body),
+        _ => false,
+    })
+}
+
+fn expr_answers_result(e: &ast::Expression) -> bool {
+    match e {
+        ast::Expression::Object(entries) if entries.len() == 1 => match &entries[0] {
+            ast::ObjectEntry::KeyValue { key, .. } | ast::ObjectEntry::Shorthand(key) => key == "ok" || key == "err",
+            ast::ObjectEntry::Spread => false,
+        },
+        ast::Expression::Block(stmts) => stmts_answer_result(stmts),
+        ast::Expression::IfExpr { then_branch, elif_branches, else_branch, .. } => {
+            expr_answers_result(then_branch) || elif_branches.iter().any(|(_, b)| expr_answers_result(b)) || else_branch.as_ref().is_some_and(|b| expr_answers_result(b))
+        }
         _ => false,
     }
 }

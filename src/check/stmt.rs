@@ -532,8 +532,11 @@ impl Checker {
                 let name = name.clone();
                 match self.lookup(&name) {
                     Some(Binding::Local { ty, .. }) => {
-                        if !self.frame_ref().scopes.iter().any(|s| s.names.contains_key(&name)) {
-                            self.error(line, format!("cannot modify '{}': it belongs to an enclosing function (closures capture values)", name));
+                        // a capture is copied into the lambda's first scope
+                        let f = self.frame_ref();
+                        let captured = f.captures.iter().any(|(n, _)| *n == name) && !f.scopes[1..].iter().any(|s| s.names.contains_key(&name));
+                        if captured || !f.scopes.iter().any(|s| s.names.contains_key(&name)) {
+                            self.error(line, format!("cannot modify '{}' here: a lambda or nested def captures it by value", name));
                         }
                         self.unify(&ty, &new_value.ty, line);
                         vec![self.stmt(StmtKind::Assign { name, value: new_value })]

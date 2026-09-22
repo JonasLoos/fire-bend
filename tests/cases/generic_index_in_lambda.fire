@@ -1,0 +1,12 @@
+# an unannotated parameter indexed inside a lambda: the lambda may abort too
+def total(lines: [str], catalog)
+    lines.reduce((s, l) => s + (catalog[l] or 0), 0)
+
+def Order(public lines: [str])
+    public total = (catalog) => lines.reduce((s, l) => s + (catalog[l] or 0), 0)
+
+m = {}
+m["a"] = 3
+m["b"] = 4
+print(total(["a", "b", "z"], m))
+print(Order(["b"]).total(m))
