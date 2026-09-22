@@ -54,12 +54,14 @@ kw_true = { "true" ~ !id_chars }
 kw_false = { "false" ~ !id_chars }
 /// The `nothing` keyword (unit value).
 kw_nothing = { "nothing" ~ !id_chars }
-/// The `async` keyword.
-kw_async = { "async" ~ !id_chars }
-/// The `await` keyword.
-kw_await = { "await" ~ !id_chars }
+/// The `type` keyword: a data type declaration.
+kw_type = { "type" ~ !id_chars }
+/// The `law` keyword: a claim about the program.
+kw_law = { "law" ~ !id_chars }
+/// The `unsafe` keyword: a def outside the termination check.
+kw_unsafe = { "unsafe" ~ !id_chars }
 /// Any keyword.
-keyword = { kw_def | kw_return | kw_public | kw_var | kw_if | kw_else | kw_elif | kw_for | kw_in | kw_while | kw_break | kw_continue | kw_match | kw_nothing | kw_not | kw_and | kw_or | kw_do | kw_true | kw_false | kw_async | kw_await }
+keyword = { kw_def | kw_return | kw_public | kw_var | kw_if | kw_else | kw_elif | kw_for | kw_in | kw_while | kw_break | kw_continue | kw_match | kw_nothing | kw_not | kw_and | kw_or | kw_do | kw_true | kw_false | kw_type | kw_law | kw_unsafe }
 
 // --- Statements ---
 // A statement includes the actual statement logic plus optional trailing whitespace and comment.
@@ -70,6 +72,8 @@ statement = { statement_raw ~ w* ~ comment? }
 statement_raw = _{
     documentation |
     comment |
+    type_stmt |
+    law_stmt |
     variable_declaration |
     assignment_stmt |
     return_stmt |
@@ -123,7 +127,16 @@ match_stmt = { kw_match ~ w+ ~ expression_small ~ w* ~ block }
 guarded_arm = { typecheck ~ w+ ~ kw_if ~ w+ ~ expression_small ~ w* ~ lambda_op ~ w* ~ (lambda_expr | block) }
 /// Method definition statement. The body block is optional: a constructor
 /// whose `public` parameters already declare all members needs none.
-method_stmt = { (kw_public ~ w+)? ~ kw_def ~ w+ ~ identifier ~ w* ~ ("(" ~ w* ~ method_args? ~ w* ~ ")")? ~ w* ~ (typecheck_op ~ w* ~ logic_or ~ w*)? ~ block? }
+/// `unsafe def` skips the termination check.
+method_stmt = { (kw_public ~ w+)? ~ (kw_unsafe ~ w+)? ~ kw_def ~ w+ ~ identifier ~ w* ~ ("(" ~ w* ~ method_args? ~ w* ~ ")")? ~ w* ~ (typecheck_op ~ w* ~ logic_or ~ w*)? ~ block? }
+/// A data type declaration: `type Tree` followed by one constructor per
+/// line, `Leaf` or `Node(left: Tree, value, right: Tree)`.
+type_stmt = { kw_type ~ w+ ~ identifier ~ w* ~ block }
+/// A law: `law name`, then optionally `for x: int, t: Tree if cond` and the
+/// claim, an expression.
+law_stmt = { kw_law ~ w+ ~ identifier ~ trailing_comment? ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ (law_for ~ w* ~ comment? ~ block_nl)? ~ expression_big ~ DROP }
+/// The quantified variables of a law with their types, and a hypothesis.
+law_for = { kw_for ~ w+ ~ typecheck ~ (w* ~ "," ~ w* ~ typecheck)* ~ (w+ ~ kw_if ~ w+ ~ expression_small)? }
 /// Arguments for a method definition. `public` makes a parameter a member;
 /// `var` makes it mutable.
 method_args = { (kw_public ~ w+)? ~ (kw_var ~ w+)? ~ w* ~ expression_small ~ w* ~ ("," ~ w* ~ (kw_public ~ w+)? ~ (kw_var ~ w+)? ~ w* ~ expression_small ~ w*)* }
@@ -166,10 +179,11 @@ pipeline_expr_simple = { lambda_expr ~ (w* ~ pipeline_op ~ w* ~ pipeline_expr_si
 /// to a parameter list by the AST builder — speculatively parsing it as
 /// parameters and re-parsing on failure made nesting exponentially slow.
 lambda_expr = { loop_expr ~ (w* ~ lambda_op ~ w* ~ (lambda_expr | block))? }
-/// Combined loop (while/for) and conditional (if) expression (a comprehension).
-loop_expr = { loop_clause ~ (w+ ~ loop_clause)* ~ (w+ ~ if_expr | do_or_block) | if_expr | expression_small }
-/// A single `for x in xs` / `while cond` clause of a comprehension.
-loop_clause = _{ (kw_while | kw_for ~ w+ ~ for_targets ~ w+ ~ kw_in) ~ w+ ~ for_iterables }
+/// A comprehension (`for x in xs do body`, `for x in xs if cond do body`)
+/// or a conditional expression.
+loop_expr = { loop_clause ~ (w+ ~ if_expr | do_or_block) | if_expr | expression_small }
+/// The `for x in xs` clause of a comprehension.
+loop_clause = _{ kw_for ~ w+ ~ for_targets ~ w+ ~ kw_in ~ w+ ~ for_iterables }
 /// Inline if expression.
 if_expr = { kw_if ~ w+ ~ expression_small ~ ( w* ~ block | w+ ~ kw_do ~ w+ ~ pipeline_expr_simple ~ (w+ ~ kw_elif ~ w+ ~ expression_small ~ w+ ~ kw_do ~ w+ ~ pipeline_expr_simple)* ~ (w+ ~ kw_else ~ w+ ~ pipeline_expr_simple)?) }
 
@@ -221,11 +235,7 @@ multiplicative = { multiplicative_simple ~ multiplicative_block? }
 /// A single line or part of a multiplicative expression.
 multiplicative_simple = { unary ~ (w* ~ mul_op ~ w* ~ unary)* }
 /// Unary expression (+, -, ...).
-unary = { (unary_op ~ w* ~ await_expr) | await_expr }
-/// Await expression.
-await_expr = { kw_await ~ w+ ~ async_expr | async_expr }
-/// Async expression.
-async_expr = { kw_async ~ w+ ~ power | power }
+unary = { (unary_op ~ w* ~ power) | power }
 /// Power/exponentiation expression (**).
 power = { typecheck ~ (w* ~ power_op ~ w* ~ unary)? }
 /// Type check expression (`:`).
@@ -362,8 +372,8 @@ power_op = { "**" }
 unary_op = { "+" | "-" | "..." }
 /// Type check operator: `:`.
 typecheck_op = { ":" }
-/// Member access operators: `.` (normal), `?.` (safe navigation).
-member_access_op = { ("?." | ".") ~ !"." }
+/// Member access: `.`.
+member_access_op = { "." ~ !"." }
 // unused: ! @ ~ ; // && ||
 
 // --- Primitives ---
@@ -371,17 +381,14 @@ member_access_op = { ("?." | ".") ~ !"." }
 // `!keyword` ensures identifiers don't clash with keywords.
 /// An identifier (variable name, function name, etc.).
 identifier = @{ !(keyword ~ !id_chars) ~ (ASCII_ALPHA | "_") ~ id_chars* }
-/// An import: `$module` (built-in) or `$'./path.fire'` (user file).
-import = @{ "$" ~ (identifier | import_path) }
-/// A quoted file path in an import: `'./utils.fire'`.
-import_path = @{ "'" ~ (!("'" | NEWLINE) ~ ANY)+ ~ "'" }
+/// A builtin module: `$math`, `$io`, ...
+import = @{ "$" ~ identifier }
 /// Characters allowed within an identifier (alphanumeric and underscore).
 id_chars = _{ASCII_ALPHANUMERIC | "_"}
 /// A numeric literal (various forms).
 number = {
     hex_number |
     bin_number |
-    imaginary_number |
     scientific_number |
     decimal_number
 }
@@ -391,8 +398,6 @@ hex_number = @{ "0x" ~ ASCII_HEX_DIGIT+ }
 bin_number = @{ "0b" ~ ASCII_BIN_DIGIT+ }
 /// Scientific notation number literal (e.g., `1.2e3`).
 scientific_number = @{ decimal_number ~ ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+ }
-/// Imaginary number literal (e.g., `3.14j`).
-imaginary_number = @{ (scientific_number | decimal_number) ~ ("i" | "j") }
 /// Decimal number literal (e.g., `123`, `1.23`, `.5`).
 decimal_number = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+ | "." ~ !".")? | "." ~ ASCII_DIGIT+ }
 /// Single-quoted string literal.

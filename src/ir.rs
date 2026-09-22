@@ -67,6 +67,9 @@ impl Ty {
     pub fn maybe(t: Ty) -> Ty {
         Ty::Maybe(Box::new(t))
     }
+    pub fn map(t: Ty) -> Ty {
+        Ty::Map(Box::new(t))
+    }
     pub fn result(e: Ty, a: Ty) -> Ty {
         Ty::Result(Box::new(e), Box::new(a))
     }
@@ -221,6 +224,10 @@ pub enum Term {
     TmplRef(String),
     /// `~T` — a template type argument.
     TmplTy(Ty),
+    /// `~(t)` — a closed term as a template argument.
+    TmplTerm(Box<Term>),
+    /// `(f)(args)` — a term (a lambda) applied to arguments.
+    App(Box<Term>, Vec<Term>),
     /// A type passed as an erased argument.
     TyArg(Ty),
     /// `{t : T}`
@@ -255,10 +262,21 @@ impl Term {
             Term::Var(v) => out.push_str(v),
             Term::U32(n) => write!(out, "{}", n).unwrap(),
             Term::F32(x) => {
-                let s = format!("{:?}", x);
-                out.push_str(&s);
-                if !s.contains('.') && !s.contains('e') && !s.contains("inf") && !s.contains("NaN") {
-                    out.push_str(".0");
+                // Bend has no negative, infinite or NaN float literals
+                if x.is_nan() {
+                    out.push_str("(0.0 / 0.0 : F32)");
+                } else if x.is_infinite() {
+                    out.push_str(if *x > 0.0 { "(1.0 / 0.0 : F32)" } else { "F32.neg((1.0 / 0.0 : F32))" });
+                } else if x.is_sign_negative() && *x != 0.0 {
+                    out.push_str("F32.neg(");
+                    Term::F32(-x).write(out);
+                    out.push(')');
+                } else {
+                    let s = format!("{:?}", x.abs());
+                    out.push_str(&s);
+                    if !s.contains('.') && !s.contains('e') {
+                        out.push_str(".0");
+                    }
                 }
             }
             Term::Nat(n) => write!(out, "{}n", n).unwrap(),
@@ -365,6 +383,18 @@ impl Term {
                 out.push('~');
                 ty.write(out, false);
             }
+            Term::TmplTerm(t) => {
+                out.push_str("~(");
+                t.write(out);
+                out.push(')');
+            }
+            Term::App(f, args) => {
+                out.push('(');
+                f.write(out);
+                out.push_str(")(");
+                write_args(out, args);
+                out.push(')');
+            }
             Term::TyArg(ty) => ty.write(out, false),
             Term::Ann(t, ty) => {
                 out.push('{');
@@ -393,7 +423,13 @@ impl Term {
                     a.def_refs(out);
                 }
             }
-            Term::Lam(_, b) | Term::Ann(b, _) => b.def_refs(out),
+            Term::App(f, args) => {
+                f.def_refs(out);
+                for a in args {
+                    a.def_refs(out);
+                }
+            }
+            Term::Lam(_, b) | Term::Ann(b, _) | Term::TmplTerm(b) => b.def_refs(out),
             Term::Op(a, _, b, _)
             | Term::Cat(a, b)
             | Term::And(a, b)
@@ -402,6 +438,41 @@ impl Term {
             | Term::Tuple(a, b) => {
                 a.def_refs(out);
                 b.def_refs(out);
+            }
+            _ => {}
+        }
+    }
+
+    /// Mark lambda parameters used more than once in their body as
+    /// reusable (`+x`): Bend counts a variable once per use, and a variable
+    /// used in two thunks of a pick is used twice.
+    pub fn mark_reusable_lambdas(&mut self) {
+        match self {
+            Term::Lam(params, body) => {
+                body.mark_reusable_lambdas();
+                let mut counts = HashMap::new();
+                body.count_vars(&mut counts);
+                for p in params.iter_mut() {
+                    if p != "_" && !p.starts_with('+') && counts.get(p.as_str()).cloned().unwrap_or(0) > 1 {
+                        *p = format!("+{}", p);
+                    }
+                }
+            }
+            Term::Call(_, args) | Term::CallVar(_, args) | Term::Ctor(_, args) | Term::List(args) => {
+                for a in args {
+                    a.mark_reusable_lambdas();
+                }
+            }
+            Term::App(f, args) => {
+                f.mark_reusable_lambdas();
+                for a in args {
+                    a.mark_reusable_lambdas();
+                }
+            }
+            Term::Ann(b, _) | Term::TmplTerm(b) => b.mark_reusable_lambdas(),
+            Term::Op(a, _, b, _) | Term::Cat(a, b) | Term::And(a, b) | Term::Or(a, b) | Term::Cons(a, b) | Term::Tuple(a, b) => {
+                a.mark_reusable_lambdas();
+                b.mark_reusable_lambdas();
             }
             _ => {}
         }
@@ -422,11 +493,28 @@ impl Term {
                     a.count_vars(counts);
                 }
             }
+            Term::App(f, args) => {
+                f.count_vars(counts);
+                // a variable handed to a reusable binder must be reusable itself
+                let params: Vec<String> = match &**f {
+                    Term::Lam(ps, _) => ps.clone(),
+                    _ => vec![],
+                };
+                for (i, a) in args.iter().enumerate() {
+                    a.count_vars(counts);
+                    if let (Term::Var(v), Some(p)) = (a, params.get(i)) {
+                        if p.starts_with('+') {
+                            *counts.entry(v.clone()).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            Term::TmplTerm(b) => b.count_vars(counts),
             Term::Lam(params, b) => {
                 let mut inner = HashMap::new();
                 b.count_vars(&mut inner);
                 for p in params {
-                    inner.remove(p);
+                    inner.remove(p.trim_start_matches('+'));
                 }
                 for (k, v) in inner {
                     *counts.entry(k).or_insert(0) += v;
@@ -465,8 +553,8 @@ pub enum Stmt {
     /// Pure let: `x = v` / `+x = v` (outside do-blocks) or `x : T = v`
     /// (inside do-blocks, where `reusable` must be false).
     Let { name: String, reusable: bool, ty: Option<Ty>, value: Term },
-    /// `x : T <- m` inside a do-block.
-    Bind { name: String, ty: Ty, value: Term },
+    /// `x : T <- m` (or `+x : T <- m`) inside a do-block.
+    Bind { name: String, reusable: bool, ty: Ty, value: Term },
     /// `K{a, b} = v` — only legal when `v` is a parameter or field.
     Destructure { ctor: String, fields: Vec<String>, value: Term },
     /// `(a, b) = v` — only legal when `v` is a parameter or field.
@@ -531,6 +619,32 @@ impl Body {
                 }
                 match tail {
                     DoTail::Return(t) | DoTail::Step(t) => t.def_refs(out),
+                }
+            }
+        }
+    }
+
+    /// Mark the lambdas of every term in the body (see
+    /// `Term::mark_reusable_lambdas`).
+    pub fn mark_reusable_lambdas(&mut self) {
+        match self {
+            Body::Match { arms, .. } => {
+                for (_, b) in arms {
+                    b.mark_reusable_lambdas();
+                }
+            }
+            Body::Block { stmts, tail } => {
+                for st in stmts {
+                    st.mark_reusable_lambdas();
+                }
+                tail.mark_reusable_lambdas();
+            }
+            Body::Do { stmts, tail, .. } => {
+                for st in stmts {
+                    st.mark_reusable_lambdas();
+                }
+                match tail {
+                    DoTail::Return(t) | DoTail::Step(t) => t.mark_reusable_lambdas(),
                 }
             }
         }
@@ -633,7 +747,7 @@ impl Body {
                 }
                 out.push_str(":\n");
                 for s in stmts {
-                    s.write(out, indent + 1);
+                    s.write_in(out, indent + 1, Some(monad));
                 }
                 out.push_str(&pad);
                 out.push_str("  ");
@@ -651,6 +765,17 @@ impl Body {
 }
 
 impl Stmt {
+    pub fn mark_reusable_lambdas(&mut self) {
+        match self {
+            Stmt::Let { value, .. } | Stmt::Bind { value, .. } | Stmt::Destructure { value, .. } | Stmt::TupleLet { value, .. } | Stmt::Step(value) => value.mark_reusable_lambdas(),
+            Stmt::ParLet { calls, .. } => {
+                for c in calls {
+                    c.mark_reusable_lambdas();
+                }
+            }
+        }
+    }
+
     pub fn def_refs(&self, out: &mut BTreeSet<String>) {
         match self {
             Stmt::Let { value, .. }
@@ -682,9 +807,36 @@ impl Stmt {
     }
 
     fn write(&self, out: &mut String, indent: usize) {
+        self.write_in(out, indent, None)
+    }
+
+    /// Inside a do-block (`monad` given) a reusable let has no syntax of
+    /// its own: it binds the value through the monad's `pure`.
+    fn write_in(&self, out: &mut String, indent: usize, monad: Option<&Ty>) {
         let pad = "  ".repeat(indent);
         out.push_str(&pad);
         match self {
+            Stmt::Let { name, reusable: true, ty: Some(t), value } if monad.is_some() => {
+                write!(out, "+{} : ", name).unwrap();
+                t.write(out, false);
+                out.push_str(" <- ");
+                match monad {
+                    Some(Ty::Result(e, _)) => {
+                        out.push_str("Result.pure(&2, &2, ");
+                        e.write(out, false);
+                        out.push_str(", ");
+                        t.write(out, false);
+                        out.push_str(", ");
+                    }
+                    _ => {
+                        out.push_str("IO.pure(");
+                        t.write(out, false);
+                        out.push_str(", ");
+                    }
+                }
+                value.write(out);
+                out.push(')');
+            }
             Stmt::Let { name, reusable, ty, value } => {
                 if *reusable {
                     out.push('+');
@@ -697,7 +849,10 @@ impl Stmt {
                 out.push_str(" = ");
                 value.write(out);
             }
-            Stmt::Bind { name, ty, value } => {
+            Stmt::Bind { name, reusable, ty, value } => {
+                if *reusable {
+                    out.push('+');
+                }
                 out.push_str(name);
                 out.push_str(" : ");
                 ty.write(out, false);
@@ -766,6 +921,14 @@ impl Def {
     }
 
     fn write(&self, out: &mut String) {
+        // a law: its Bend text is carried verbatim in the body
+        if self.name.starts_with("law:") {
+            if let Body::Block { tail: Term::Var(text), .. } = &self.body {
+                out.push_str(text);
+                out.push('\n');
+            }
+            return;
+        }
         if self.is_unsafe {
             out.push_str("@unsafe\n");
         }
@@ -891,6 +1054,18 @@ impl Program {
         out.push('\n');
         out.push_str(&body);
         out
+    }
+}
+
+impl Program {
+    /// Render only the defs, in source order, without prelude or imports
+    /// (used to print a term through the def printer).
+    pub fn render_defs_only(&self) -> String {
+        let mut body = String::new();
+        for d in &self.defs {
+            d.write(&mut body);
+        }
+        body
     }
 }
 

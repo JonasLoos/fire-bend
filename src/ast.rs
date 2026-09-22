@@ -64,14 +64,37 @@ pub enum Statement {
         arms: Vec<MatchArm>,
     },
     /// `def name(params) <block>` — named function / constructor.
+    /// `unsafe def` skips the termination check.
     Def {
         is_public: bool,
+        is_unsafe: bool,
         name: String,
         params: Vec<Param>,
         return_type: Option<Expression>,
         body: Vec<Stmt>,
     },
+    /// `type Name` with one constructor per line.
+    TypeDecl {
+        name: String,
+        ctors: Vec<CtorDecl>,
+    },
+    /// `law name` with quantified variables, an optional hypothesis and a
+    /// claim.
+    Law {
+        name: String,
+        vars: Vec<(String, Expression)>,
+        hyp: Option<Expression>,
+        claim: Expression,
+    },
     Expression(Expression),
+}
+
+/// One constructor of a `type` declaration: a name and its fields, each
+/// with an optional type (an untyped field is a type parameter).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CtorDecl {
+    pub name: String,
+    pub fields: Vec<(String, Option<Expression>)>,
 }
 
 /// One arm of a `match` block: `pattern => body`.
@@ -112,6 +135,8 @@ pub enum Pattern {
     Rest(Option<String>),
     /// `{key, other: pattern}`
     Object(Vec<(String, Pattern)>),
+    /// `Node(l, v, r)` — a constructor with positional sub-patterns
+    Ctor(String, Vec<Pattern>),
     /// `"{h}:{m}"` — string destructuring
     FString(Vec<FStringPart>),
     /// `obj.member = ...` (assignment only)
@@ -173,8 +198,6 @@ pub enum Expression {
     // Literals
     Identifier(String),
     Import(String),
-    /// `$'./utils.fire'` — import a user file as a module object
-    ImportFile(String),
     Number(NumberLiteral),
     Str(String),
     FString(Vec<FStringPart>),
@@ -219,7 +242,6 @@ pub enum Expression {
     MemberAccess {
         object: Box<Expression>,
         member: String,
-        safe: bool, // for ?. operator
     },
     /// `expr.{...}` — only valid as an assignment target
     SpreadMember { object: Box<Expression> },
@@ -253,8 +275,6 @@ pub enum Expression {
         start: Option<Box<Expression>>,
         end: Option<Box<Expression>>,
     },
-    Await(Box<Expression>),
-    Async(Box<Expression>),
     Pipeline {
         left: Box<Expression>,
         op: PipelineOperator,
@@ -266,7 +286,6 @@ pub enum Expression {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompClause {
     For { pattern: Pattern, iterables: Vec<Expression> },
-    While { condition: Expression },
 }
 
 /// Parts of an f-string
@@ -293,7 +312,6 @@ pub enum NumberLiteral {
     Hex(String),
     Binary(String),
     Scientific(String),
-    Imaginary(String),
 }
 
 /// Binary operators
@@ -420,6 +438,8 @@ fn parse_statement(pair: Pair<'_>) -> Result<Stmt> {
             return err(&first, "`pattern if condition => ...` is only valid as a match arm");
         }
         Rule::method_stmt => parse_def_statement(first)?,
+        Rule::type_stmt => parse_type_statement(first)?,
+        Rule::law_stmt => parse_law_statement(first)?,
         Rule::pipeline_expr => Statement::Expression(parse_expression(first)?),
         other => return err(&first, format!("unhandled statement rule {:?}", other)),
     };
@@ -826,8 +846,94 @@ fn parse_guarded_arm(pair: Pair<'_>) -> Result<MatchArm> {
     }
 }
 
+/// `type Tree` with one constructor per line: `Leaf`, or
+/// `Node(left: Tree, value, right: Tree)`.
+fn parse_type_statement(pair: Pair<'_>) -> Result<Statement> {
+    let src = pair.clone();
+    let mut name = String::new();
+    let mut ctors = Vec::new();
+    for p in pair.into_inner() {
+        match p.as_rule() {
+            Rule::kw_type => {}
+            Rule::identifier if name.is_empty() => name = p.as_str().to_string(),
+            Rule::statement => {
+                let line = p.clone();
+                let stmt = parse_statement(p)?;
+                match stmt.node {
+                    Statement::Comment(_) | Statement::Documentation(_) => {}
+                    Statement::Expression(Expression::Identifier(c)) => ctors.push(CtorDecl { name: c, fields: vec![] }),
+                    Statement::Expression(Expression::Call { function, args, named_args }) => {
+                        let c = match *function {
+                            Expression::Identifier(c) => c,
+                            _ => return err(&line, "a constructor is a name, optionally with fields in parentheses"),
+                        };
+                        if !named_args.is_empty() {
+                            return err(&line, "constructor fields are `name` or `name: type`, not keyword arguments");
+                        }
+                        let mut fields = Vec::new();
+                        for a in args {
+                            match a {
+                                Expression::Identifier(f) => fields.push((f, None)),
+                                Expression::TypeCheck { expression, type_expr } => match *expression {
+                                    Expression::Identifier(f) => fields.push((f, Some(*type_expr))),
+                                    _ => return err(&line, "a constructor field is a name, optionally with a type"),
+                                },
+                                _ => return err(&line, "a constructor field is a name, optionally with a type"),
+                            }
+                        }
+                        ctors.push(CtorDecl { name: c, fields });
+                    }
+                    _ => return err(&line, "a type declaration lists constructors, one per line"),
+                }
+            }
+            other => return err(&p, format!("unexpected rule {:?} in type declaration", other)),
+        }
+    }
+    if ctors.is_empty() {
+        return err(&src, "a type needs at least one constructor");
+    }
+    Ok(Statement::TypeDecl { name, ctors })
+}
+
+/// `law name`, then optionally `for x: int, t: Tree if cond`, then the claim.
+fn parse_law_statement(pair: Pair<'_>) -> Result<Statement> {
+    let src = pair.clone();
+    let mut name = String::new();
+    let mut vars = Vec::new();
+    let mut hyp = None;
+    let mut claim = None;
+    for p in pair.into_inner() {
+        match p.as_rule() {
+            Rule::kw_law | Rule::comment => {}
+            Rule::identifier if name.is_empty() => name = p.as_str().to_string(),
+            Rule::law_for => {
+                for q in p.into_inner() {
+                    match q.as_rule() {
+                        Rule::kw_for | Rule::kw_if => {}
+                        Rule::typecheck => {
+                            let e = parse_expression(q.clone())?;
+                            match e {
+                                Expression::TypeCheck { expression, type_expr } => match *expression {
+                                    Expression::Identifier(v) => vars.push((v, *type_expr)),
+                                    _ => return err(&q, "a law variable is `name: type`"),
+                                },
+                                _ => return err(&q, "a law variable needs a type: `for x: int`"),
+                            }
+                        }
+                        _ => hyp = Some(parse_expression(q)?),
+                    }
+                }
+            }
+            _ => claim = Some(parse_expression(p)?),
+        }
+    }
+    let claim = claim.ok_or_else(|| SemanticError::new("a law needs a claim", Some(src.line_col())))?;
+    Ok(Statement::Law { name, vars, hyp, claim })
+}
+
 fn parse_def_statement(pair: Pair<'_>) -> Result<Statement> {
     let mut is_public = false;
+    let mut is_unsafe = false;
     let mut name = String::new();
     let mut params = Vec::new();
     let mut return_type = None;
@@ -837,6 +943,7 @@ fn parse_def_statement(pair: Pair<'_>) -> Result<Statement> {
     for p in pair.into_inner() {
         match p.as_rule() {
             Rule::kw_public => is_public = true,
+            Rule::kw_unsafe => is_unsafe = true,
             Rule::kw_def => {}
             Rule::identifier if name.is_empty() => name = p.as_str().to_string(),
             Rule::method_args => params = parse_def_params(p)?,
@@ -849,7 +956,7 @@ fn parse_def_statement(pair: Pair<'_>) -> Result<Statement> {
         }
     }
 
-    Ok(Statement::Def { is_public, name, params, return_type, body })
+    Ok(Statement::Def { is_public, is_unsafe, name, params, return_type, body })
 }
 
 fn parse_def_params(pair: Pair<'_>) -> Result<Vec<Param>> {
@@ -920,13 +1027,7 @@ fn parse_expression_inner(pair: Pair<'_>) -> Result<Expression> {
     match pair.as_rule() {
         // --- atoms ---
         Rule::identifier => Ok(Expression::Identifier(pair.as_str().to_string())),
-        Rule::import => {
-            let text = pair.as_str().trim_start_matches('$');
-            match text.strip_prefix('\'') {
-                Some(path) => Ok(Expression::ImportFile(path.trim_end_matches('\'').to_string())),
-                None => Ok(Expression::Import(text.to_string())),
-            }
-        }
+        Rule::import => Ok(Expression::Import(pair.as_str().trim_start_matches('$').to_string())),
         Rule::number => parse_number_literal(pair),
         Rule::string => {
             let s = pair.as_str();
@@ -1054,32 +1155,6 @@ fn parse_expression_inner(pair: Pair<'_>) -> Result<Expression> {
                 Some(op) => Expression::UnaryOp { op, operand: Box::new(operand) },
                 None => operand,
             })
-        }
-        Rule::await_expr => {
-            let src = pair.clone();
-            let mut awaited = false;
-            let mut result = None;
-            for p in pair.into_inner() {
-                match p.as_rule() {
-                    Rule::kw_await => awaited = true,
-                    _ => result = Some(parse_expression(p)?),
-                }
-            }
-            let expr = result.ok_or_else(|| SemanticError::new("empty await", Some(src.line_col())))?;
-            Ok(if awaited { Expression::Await(Box::new(expr)) } else { expr })
-        }
-        Rule::async_expr => {
-            let src = pair.clone();
-            let mut is_async = false;
-            let mut result = None;
-            for p in pair.into_inner() {
-                match p.as_rule() {
-                    Rule::kw_async => is_async = true,
-                    _ => result = Some(parse_expression(p)?),
-                }
-            }
-            let expr = result.ok_or_else(|| SemanticError::new("empty async", Some(src.line_col())))?;
-            Ok(if is_async { Expression::Async(Box::new(expr)) } else { expr })
         }
         Rule::power => {
             let src = pair.clone();
@@ -1410,15 +1485,6 @@ fn parse_loop_expression(pair: Pair<'_>) -> Result<Expression> {
 
     while let Some(p) = iter.peek().cloned() {
         match p.as_rule() {
-            Rule::kw_while => {
-                iter.next();
-                let cond = iter.next()
-                    .ok_or_else(|| SemanticError::new("while without condition", Some(p.line_col())))?;
-                clauses.push(CompClause::While { condition: parse_expression(cond)? });
-                if iter.peek().map(|n| n.as_rule()) == Some(Rule::assignment_expr) {
-                    return err(&p, "while takes a single condition");
-                }
-            }
             Rule::kw_for => {
                 iter.next();
                 let (pattern, iterables) = parse_for_header(&mut iter)?;
@@ -1582,7 +1648,6 @@ fn apply_postfix_parts<'a>(
     while let Some(part) = parts.next() {
         match part.as_rule() {
             Rule::member_access_op => {
-                let safe = part.as_str().starts_with('?');
                 let member_pair = parts.next()
                     .ok_or_else(|| SemanticError::new("member access without member", Some(part.line_col())))?;
                 match member_pair.as_rule() {
@@ -1590,7 +1655,6 @@ fn apply_postfix_parts<'a>(
                         expr = Expression::MemberAccess {
                             object: Box::new(expr),
                             member: member_pair.as_str().to_string(),
-                            safe,
                         };
                     }
                     Rule::object => {
@@ -1678,7 +1742,7 @@ fn apply_access_block(mut expr: Expression, block: Pair<'_>) -> Result<Expressio
         let mut inner = line.into_inner();
         let op = inner.next()
             .ok_or_else(|| SemanticError::new("empty access line", None))?;
-        let safe = op.as_str().starts_with('?');
+
         let chain = inner.next()
             .ok_or_else(|| SemanticError::new("access line without member", Some(op.line_col())))?;
 
@@ -1692,7 +1756,6 @@ fn apply_access_block(mut expr: Expression, block: Pair<'_>) -> Result<Expressio
         expr = Expression::MemberAccess {
             object: Box::new(expr),
             member: first.as_str().to_string(),
-            safe,
         };
         expr = apply_postfix_parts(expr, &mut chain_inner)?;
     }
@@ -1710,7 +1773,6 @@ fn parse_number_literal(pair: Pair<'_>) -> Result<Expression> {
         Rule::hex_number => NumberLiteral::Hex(text),
         Rule::bin_number => NumberLiteral::Binary(text),
         Rule::scientific_number => NumberLiteral::Scientific(text),
-        Rule::imaginary_number => NumberLiteral::Imaginary(text),
         other => return err(&inner, format!("unknown number form {:?}", other)),
     };
     Ok(Expression::Number(lit))
@@ -1907,11 +1969,21 @@ pub fn expression_to_pattern(expr: Expression, src: &Pair<'_>) -> Result<Pattern
             }
             Ok(Pattern::Object(pairs))
         }
-        Expression::MemberAccess { object, member, safe } => {
-            if safe {
-                return err(src, "`?.` cannot be used in an assignment target");
+        Expression::MemberAccess { object, member } => Ok(Pattern::Member { object: *object, member }),
+        // `Node(l, v, r)`: a constructor pattern
+        Expression::Call { function, args, named_args } => {
+            let name = match *function {
+                Expression::Identifier(n) => n,
+                _ => return err(src, "only a constructor can be called in a pattern"),
+            };
+            if !named_args.is_empty() {
+                return err(src, "constructor patterns take positional sub-patterns only");
             }
-            Ok(Pattern::Member { object: *object, member })
+            let mut subs = Vec::new();
+            for a in args {
+                subs.push(expression_to_pattern(a, src)?);
+            }
+            Ok(Pattern::Ctor(name, subs))
         }
         Expression::Index { object, index } => {
             Ok(Pattern::Index { object: *object, index: *index })
@@ -2019,9 +2091,38 @@ impl Statement {
                 }
                 out.trim_end().to_string()
             }
-            Statement::Def { is_public, name, params, return_type, body } => {
+            Statement::TypeDecl { name, ctors } => {
+                let mut out = format!("{}type {}\n", indent, name);
+                for c in ctors {
+                    out.push_str(&format!("{}    {}", indent, c.name));
+                    if !c.fields.is_empty() {
+                        let fs: Vec<String> = c.fields.iter().map(|(n, t)| match t {
+                            Some(t) => format!("{}: {}", n, t),
+                            None => n.clone(),
+                        }).collect();
+                        out.push_str(&format!("({})", fs.join(", ")));
+                    }
+                    out.push('\n');
+                }
+                out.trim_end().to_string()
+            }
+            Statement::Law { name, vars, hyp, claim } => {
+                let mut out = format!("{}law {}\n", indent, name);
+                if !vars.is_empty() {
+                    let vs: Vec<String> = vars.iter().map(|(n, t)| format!("{}: {}", n, t)).collect();
+                    out.push_str(&format!("{}    for {}", indent, vs.join(", ")));
+                    if let Some(h) = hyp {
+                        out.push_str(&format!(" if {}", h));
+                    }
+                    out.push('\n');
+                }
+                out.push_str(&format!("{}    {}", indent, claim));
+                out
+            }
+            Statement::Def { is_public, is_unsafe, name, params, return_type, body } => {
                 let mut out = indent.clone();
                 if *is_public { out.push_str("public "); }
+                if *is_unsafe { out.push_str("unsafe "); }
                 out.push_str(&format!("def {}(", name));
                 for (i, param) in params.iter().enumerate() {
                     if i > 0 { out.push_str(", "); }
@@ -2086,6 +2187,14 @@ impl fmt::Display for Pattern {
                     write!(f, "{}", part)?;
                 }
                 write!(f, "\"")
+            }
+            Pattern::Ctor(name, subs) => {
+                write!(f, "{}(", name)?;
+                for (i, item) in subs.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, ")")
             }
             Pattern::Member { object, member } => write!(f, "{}.{}", object, member),
             Pattern::Index { object, index } => write!(f, "{}[{}]", object, index),
@@ -2159,7 +2268,6 @@ impl fmt::Display for Expression {
         match self {
             Expression::Identifier(name) => write!(f, "{}", name),
             Expression::Import(module) => write!(f, "${}", module),
-            Expression::ImportFile(path) => write!(f, "$'{}'", path),
             Expression::Number(lit) => write!(f, "{}", lit),
             Expression::Str(content) => write!(f, "'{}'", content),
             Expression::FString(parts) => {
@@ -2219,8 +2327,8 @@ impl fmt::Display for Expression {
                 }
                 write!(f, ")")
             }
-            Expression::MemberAccess { object, member, safe } => {
-                write!(f, "{}{}{}", object, if *safe { "?." } else { "." }, member)
+            Expression::MemberAccess { object, member } => {
+                write!(f, "{}.{}", object, member)
             }
             Expression::SpreadMember { object } => write!(f, "{}.{{...}}", object),
             Expression::Index { object, index } => write!(f, "{}[{}]", object, index),
@@ -2242,9 +2350,6 @@ impl fmt::Display for Expression {
                                 .collect::<Vec<_>>().join(", ");
                             write!(f, "for {} in {} ", pattern, iters)?;
                         }
-                        CompClause::While { condition } => {
-                            write!(f, "while {} ", condition)?;
-                        }
                     }
                 }
                 write!(f, "do {}", body)
@@ -2260,8 +2365,6 @@ impl fmt::Display for Expression {
                     (None, None) => write!(f, ".."),
                 }
             }
-            Expression::Await(expr) => write!(f, "await {}", expr),
-            Expression::Async(expr) => write!(f, "async {}", expr),
             Expression::Pipeline { left, op, right } => {
                 write!(f, "{} {} {}", left, op, right)
             }
@@ -2285,7 +2388,7 @@ impl fmt::Display for NumberLiteral {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             NumberLiteral::Decimal(v) | NumberLiteral::Hex(v) | NumberLiteral::Binary(v)
-            | NumberLiteral::Scientific(v) | NumberLiteral::Imaginary(v) => v,
+            | NumberLiteral::Scientific(v) => v,
         };
         write!(f, "{}", s)
     }

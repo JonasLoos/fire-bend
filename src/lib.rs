@@ -7,15 +7,29 @@ use pest::Parser;
 use pest_derive::Parser;
 
 pub mod ast;
-pub mod infer;
+pub mod check;
+pub mod core;
 pub mod ir;
 pub mod lower;
 pub mod prune;
-pub mod sigs;
-pub mod tast;
 pub mod types;
 
-pub use infer::Diag;
+/// A diagnostic: a source line (0 when unknown) and a message.
+#[derive(Debug, Clone)]
+pub struct Diag {
+    pub line: usize,
+    pub message: String,
+}
+
+impl std::fmt::Display for Diag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.line > 0 {
+            write!(f, "line {}: {}", self.line, self.message)
+        } else {
+            write!(f, "{}", self.message)
+        }
+    }
+}
 
 #[derive(Parser)]
 #[grammar = "grammar/fire.pest"] // relative to src/
@@ -53,7 +67,7 @@ fn rule_description(rule: Rule) -> String {
         | logic_not | comparison | comparison_simple | type_or | type_or_simple
         | xor | xor_simple | type_and | type_and_simple | range | shift | shift_simple
         | additive | additive_simple
-        | multiplicative | multiplicative_simple | unary | await_expr | async_expr
+        | multiplicative | multiplicative_simple | unary
         | power | typecheck | call_or_access | call_or_access_simple => "an expression",
         pipeline_block | pipeline_block_line | logic_or_block | logic_or_block_line
         | logic_and_block | logic_and_block_line | comparison_block | comparison_block_line
@@ -79,7 +93,7 @@ fn rule_description(rule: Rule) -> String {
         type_or_op => "'|'",
         type_and_op => "'&'",
         identifier | id_chars => "a name",
-        number | hex_number | bin_number | scientific_number | imaginary_number
+        number | hex_number | bin_number | scientific_number
         | decimal_number => "a number",
         string | fstring | tstring => "a string",
         fstring_interp | fstring_formatted => "an interpolation '{...}'",
@@ -91,7 +105,7 @@ fn rule_description(rule: Rule) -> String {
         object | object_entries | object_entry => "an object entry",
         ellipsis => "'...'",
         previous_result => "'$'",
-        import | import_path => "a '$module' import",
+        import => "a '$module' import",
         comment | documentation => "a comment",
         variable_declaration | kw_var => "'var'",
         assignment_stmt => "an assignment",
@@ -114,8 +128,9 @@ fn rule_description(rule: Rule) -> String {
         kw_and => "'and'",
         kw_or => "'or'",
         kw_do => "'do'",
-        kw_async => "'async'",
-        kw_await => "'await'",
+        type_stmt | kw_type => "'type'",
+        law_stmt | law_for | kw_law => "'law'",
+        kw_unsafe => "'unsafe'",
         keyword => "a keyword",
         w => "whitespace",
         other => return format!("{:?}", other),
@@ -222,40 +237,67 @@ pub fn parse_program(source: &str) -> Result<ast::Program, Box<dyn std::error::E
 /// Compile a Fire program to Bend source.
 pub fn compile(source: &str) -> Result<String, Vec<Diag>> {
     let program = parse_program(source).map_err(|e| vec![Diag { line: 0, message: format!("{}", e) }])?;
-    let tp = infer::infer_program(&program)?;
-    let ir = lower::lower_program(&tp)?;
+    let core = check::check_program(&program)?;
+    if std::env::var("FIRE_DUMP_CORE").is_ok() {
+        eprintln!("{:#?}", core.defs);
+    }
+    let ir = lower::lower_program(&core)?;
     Ok(ir.render())
 }
 
-/// Parse and type a program, returning one line per def with its resolved
-/// type and effect, then one per record type (`fire --types`).
+/// Parse and check a program, returning one line per def with its resolved
+/// type, effect and descent, then one per data type (`fire --types`).
 pub fn describe_types(source: &str) -> Result<String, Vec<Diag>> {
     let program = parse_program(source).map_err(|e| vec![Diag { line: 0, message: format!("{}", e) }])?;
-    let tp = infer::infer_program(&program)?;
-    let names = |id: types::RecId| tp.records[id].name.clone();
+    let core = check::check_program(&program)?;
+    let names = |id: types::TypeId| core.types[id].name.clone();
     let mut out = String::new();
-    // a def re-inferred per argument type appears once per distinct type
-    let mut seen = std::collections::HashSet::new();
-    for d in &tp.defs {
-        let ty = types::TypeDisplay { store: &tp.store, ty: &d.scheme.ty, names: &names };
+    for d in &core.defs {
+        if matches!(d.kind, core::DefKind::Lambda | core::DefKind::Law) || d.name.starts_with("__") {
+            continue;
+        }
+        let ty = types::TypeDisplay { store: &core.store, ty: &d.scheme.ty, names: &names };
+        let mut tags: Vec<String> = vec![d.effect.to_string()];
+        if d.relies_on_unsafe {
+            tags.push("unsafe".into());
+        }
+        let descent = match &d.descent {
+            core::Descent::None => String::new(),
+            core::Descent::Structural(i) => format!(" descends on {}", d.params.get(*i).map(|p| p.name.as_str()).unwrap_or("?")),
+            core::Descent::Fuel(i) => format!(" counts down {}", d.params.get(*i).map(|p| p.name.as_str()).unwrap_or("?")),
+            core::Descent::Unsafe => String::new(),
+        };
+        let dicts = if d.scheme.dicts.is_empty() {
+            String::new()
+        } else {
+            let ds: Vec<String> = d.scheme.dicts.iter().map(|c| {
+                let cc = &core.store.constraints[*c];
+                let subject = types::TypeDisplay { store: &core.store, ty: &cc.subject, names: &names };
+                format!("{} on {}", check::describe_class(&cc.class), subject)
+            }).collect();
+            format!(" needs {}", ds.join(", "))
+        };
         let caps: Vec<&str> = d.captures.iter().map(|(n, _)| n.as_str()).collect();
         let captures = if caps.is_empty() { String::new() } else { format!(" captures {}", caps.join(", ")) };
-        let text = format!("{} : {} [{:?}]{}\n", d.name, ty, d.effect, captures);
-        if seen.insert(text.clone()) {
-            out.push_str(&text);
-        }
+        out.push_str(&format!("{} : {} [{}]{}{}{}\n", d.name, ty, tags.join(", "), descent, dicts, captures));
     }
-    for r in &tp.records {
-        let fields: Vec<String> = r
-            .fields
-            .iter()
-            .zip(r.field_vars.iter())
-            .map(|(f, t)| {
-                let ty = types::TypeDisplay { store: &tp.store, ty: t, names: &names };
+    for t in core.types.iter().skip(types::BUILTIN_TYPES) {
+        let ctors: Vec<String> = t.ctors.iter().map(|c| {
+            let fields: Vec<String> = c.fields.iter().map(|f| {
+                let ty = types::TypeDisplay { store: &core.store, ty: &f.ty, names: &names };
                 format!("{}{}: {}", if f.public { "" } else { "~" }, f.name, ty)
-            })
-            .collect();
-        out.push_str(&format!("record {} {{ {} }}\n", r.name, fields.join(", ")));
+            }).collect();
+            if fields.is_empty() { c.name.clone() } else { format!("{}({})", c.name, fields.join(", ")) }
+        }).collect();
+        let kind = match t.kind {
+            core::DataKind::Class { .. } => "class",
+            core::DataKind::Record => "record",
+            _ => "type",
+        };
+        out.push_str(&format!("{} {} = {}\n", kind, t.name, ctors.join(" | ")));
+    }
+    for l in &core.laws {
+        out.push_str(&format!("law {} [{:?}]\n", l.name, l.proof));
     }
     Ok(out)
 }
