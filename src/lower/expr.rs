@@ -167,7 +167,7 @@ impl<'a> Lower<'a> {
                         FPart::Expr(x, spec) => {
                             let s = self.expr(ctx, x, pre);
                             match spec {
-                                Some(sp) => self.format_spec(s, sp, &x.ty),
+                                Some(pad) => self.pad(s, pad),
                                 None => s,
                             }
                         }
@@ -1510,38 +1510,16 @@ impl<'a> Lower<'a> {
     }
 
     /// Apply a format spec to a rendered value.
-    fn format_spec(&mut self, s: Term, spec: &str, ty: &Type) -> Term {
-        // [[fill]align][width][.precision][f]; the checker writes a number's
-        // zero padding as the align `=` (zeros after the sign)
-        let mut chars: Vec<char> = spec.chars().collect();
-        let mut fill = ' ';
-        let mut align: Option<char> = None;
-        if chars.len() >= 2 && matches!(chars[1], '<' | '>' | '^' | '=') {
-            fill = chars[0];
-            align = Some(chars[1]);
-            chars.drain(0..2);
-        } else if !chars.is_empty() && matches!(chars[0], '<' | '>' | '^') {
-            align = Some(chars[0]);
-            chars.remove(0);
-        }
-        let rest: String = chars.iter().collect();
-        let (width_s, _prec) = match rest.split_once('.') {
-            Some((w, p)) => (w.to_string(), Some(p.trim_end_matches('f').to_string())),
-            None => (rest.trim_end_matches('f').to_string(), None),
+    /// A value shown as text, padded to a width.
+    fn pad(&mut self, s: Term, pad: &Pad) -> Term {
+        let width = Term::U32(pad.width);
+        let f = match pad.align {
+            Align::Zeros => return Term::call("F.fmt.pad_zero", vec![s, width]),
+            Align::Left => "F.fmt.pad_right",
+            Align::Right => "F.fmt.pad_left",
+            Align::Center => "F.fmt.pad_center",
         };
-        let width: u32 = width_s.parse().unwrap_or(0);
-        if width == 0 {
-            return s;
-        }
-        let numeric = matches!(self.store.shallow(ty), Type::Int | Type::Float);
-        let align = align.unwrap_or(if numeric { '>' } else { '<' });
-        let f = match align {
-            '<' => "F.fmt.pad_right",
-            '>' => "F.fmt.pad_left",
-            '=' => return Term::call("F.fmt.pad_zero", vec![s, Term::U32(width)]),
-            _ => "F.fmt.pad_center",
-        };
-        Term::call(f, vec![s, Term::U32(width), Term::Chr(fill)])
+        Term::call(f, vec![s, width, Term::Chr(pad.fill)])
     }
 }
 

@@ -1,0 +1,16 @@
+{ok: 5} {err: 'division by zero'}
+6
+-1
+failed: division by zero
+[10, 20, -1, 40]
+parsed 7
+4 nothing
+found 8
+0
+origin
+positive x axis
+x axis at -3
+y axis at 7
+point 1,2
+something else
+9

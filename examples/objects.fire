@@ -1,0 +1,67 @@
+# Objects: a def that declares `public` members is a class. Objects are
+# values, so a method that changes a member rebinds the variable it is
+# called on, and a copy is never affected.
+
+## A counter whose state is private: only its methods see `count`
+def Counter(start = 0)
+    var count = start
+    public increment = () => count += 1
+    public decrement = () => count -= 1
+    public reset = () => count = start
+    public get = () => count
+
+var c = Counter()
+c.increment()
+c.increment()
+c.decrement()
+print(c.get())          # 1
+
+var ten = Counter(10)
+ten.decrement()
+print(ten.get())        # 9
+ten.reset()
+print(ten.get())        # 10
+
+# public data members are printed and compared
+def Tally(public var total = 0)
+    public add = n => total += n
+
+var t = Tally()
+t.add(5)
+snapshot = t            # a copy
+t.add(1)
+print(t.total, snapshot.total, t, t == snapshot)
+
+# inheritance: adopt a parent's members, override some, call the parent
+def Animal(public name: str, public sound: str = "...")
+    public speak = () => "{name} the animal says {sound}"
+
+def Dog(name: str = "Doggy", public breed: str = "mutt")
+    parent = Animal(name, "Woof")
+    self.{...} = parent
+    public speak = () => "{name} the {breed} says {sound}"
+
+def Poodle(name: str = "Fifi")
+    parent = Dog(name, "poodle")
+    self.{...} = parent
+    public speak = () => parent.speak() + ", elegantly"
+
+print(Animal("Thing").speak())
+print(Dog("Buddy", "retriever").speak())
+print(Dog().speak())
+print(Poodle().speak())
+fifi = Poodle()
+print(fifi.name, fifi.sound, fifi.breed)
+
+# custom operators: a public member named after the operator, in backticks;
+# the left operand decides
+def Vec(public x: float = 0.0, public y: float = 0.0)
+    public `+` = (other: Vec) => Vec(x + other.x, y + other.y)
+    public `-` = (other: Vec) => Vec(x - other.x, y - other.y)
+    public `*` = (k: float) => Vec(x * k, y * k)
+    public length = () => $math.sqrt(x * x + y * y)
+
+a = Vec(3.0, 4.0)
+b = Vec(1.0, 2.0)
+print(a + b, a - b, a * 2.0)
+print(a.length(), (a + b).length())

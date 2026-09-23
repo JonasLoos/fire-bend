@@ -293,9 +293,52 @@ pub enum CompClause {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FStringPart {
     Text(String),
-    /// `{expr}` or `{expr:spec}` — the optional format spec (without the
-    /// leading `:`) controls width/alignment/precision when rendering
+    /// `{expr}` or `{expr:spec}`, with the spec's text after the `:`
     Expression(Expression, Option<String>),
+}
+
+/// A format spec, `[[fill]align][0][width][.precision][f|d]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FormatSpec {
+    pub fill: char,
+    /// `<`, `>` or `^`, when given
+    pub align: Option<char>,
+    /// a `0` before the width: pad a number with zeros after its sign
+    pub zeros: bool,
+    pub width: u32,
+    /// digits after the point, with `.n` or `f` (six by default)
+    pub precision: Option<u32>,
+}
+
+impl FormatSpec {
+    pub fn parse(spec: &str) -> Option<FormatSpec> {
+        let chars: Vec<char> = spec.chars().collect();
+        let is_align = |c: &char| matches!(c, '<' | '>' | '^');
+        let (fill, align, mut rest) = match chars.as_slice() {
+            [f, a, rest @ ..] if is_align(a) => (*f, Some(*a), rest),
+            [a, rest @ ..] if is_align(a) => (' ', Some(*a), rest),
+            rest => (' ', None, rest),
+        };
+        let zeros = rest.len() > 1 && rest[0] == '0' && rest[1].is_ascii_digit();
+        let digits = |rest: &mut &[char]| -> Option<u32> {
+            let n = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+            let (d, tail) = rest.split_at(n);
+            *rest = tail;
+            if n == 0 { None } else { d.iter().collect::<String>().parse().ok() }
+        };
+        let width = digits(&mut rest).unwrap_or(0);
+        let mut precision = None;
+        if let ['.', tail @ ..] = rest {
+            rest = tail;
+            precision = Some(digits(&mut rest)?);
+        }
+        match rest {
+            [] | ['d'] if precision.is_none() || rest.is_empty() => {}
+            ['f'] => precision = precision.or(Some(6)),
+            _ => return None,
+        }
+        Some(FormatSpec { fill, align, zeros, width, precision })
+    }
 }
 
 /// Object entry

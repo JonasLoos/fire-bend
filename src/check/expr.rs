@@ -343,32 +343,35 @@ impl Checker {
                 ast::FStringPart::Text(t) => out.push(FPart::Text(t.clone())),
                 ast::FStringPart::Expression(e, spec) => {
                     let x = self.check_expr(e, None);
+                    let Some(spec) = spec else {
+                        let shown = self.show(x);
+                        out.push(FPart::Expr(shown, None));
+                        continue;
+                    };
+                    let Some(spec) = ast::FormatSpec::parse(spec) else {
+                        self.error(self.line, format!("invalid format spec `{}`: expected `[[fill]align][0][width][.precision][f|d]`", spec));
+                        continue;
+                    };
                     let numeric = matches!(self.shallow(&x.ty), Type::Int | Type::Float);
-                    let shown = match spec {
-                        // numeric specs format the number itself
-                        Some(s) if s.contains('f') && matches!(self.shallow(&x.ty), Type::Float | Type::Int) => {
-                            let t = x.ty.clone();
-                            let x = if let Type::Int = self.shallow(&t) { self.convert("float", x) } else { x };
-                            let digits = s.rsplit('.').next().and_then(|d| d.trim_end_matches('f').parse::<i64>().ok()).unwrap_or(6);
-                            let d = self.lit(Lit::Int(digits));
+                    let shown = match spec.precision {
+                        Some(digits) if numeric => {
+                            let x = if let Type::Int = self.shallow(&x.ty) { self.convert("float", x) } else { x };
+                            let d = self.lit(Lit::Int(digits as i64));
                             self.expr(ExprKind::Builtin("float.fixed".into(), vec![x, d]), Type::Str)
                         }
                         _ => self.show(x),
                     };
-                    // numbers align right by default; a `0` before the width
-                    // pads with zeros after the sign (`{n:03}` is `-05`)
-                    let spec = spec.as_ref().map(|sp| {
-                        let has_align = sp.chars().take(2).any(|c| matches!(c, '<' | '>' | '^'));
-                        let zeros = sp.starts_with('0') && sp[1..].starts_with(|c: char| c.is_ascii_digit());
-                        if numeric && !has_align && zeros {
-                            format!("0={}", &sp[1..])
-                        } else if numeric && !has_align && !sp.is_empty() {
-                            format!(">{}", sp)
-                        } else {
-                            sp.clone()
-                        }
-                    });
-                    out.push(FPart::Expr(shown, spec));
+                    // numbers align right by default, text left
+                    let align = match spec.align {
+                        Some('<') => Align::Left,
+                        Some('>') => Align::Right,
+                        Some(_) => Align::Center,
+                        None if numeric && spec.zeros => Align::Zeros,
+                        None if numeric => Align::Right,
+                        None => Align::Left,
+                    };
+                    let pad = (spec.width > 0).then_some(Pad { width: spec.width, fill: spec.fill, align });
+                    out.push(FPart::Expr(shown, pad));
                 }
             }
         }

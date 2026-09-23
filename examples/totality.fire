@@ -1,0 +1,55 @@
+# Every def must be seen to end. Loops over finite data always do;
+# recursion is accepted on a piece of a parameter or on an int counted
+# down under a guard. Anything else says `unsafe def`, and `fire --types`,
+# `fire --check` and `fire --total` point it out.
+
+# counting down: `n <= 1` keeps `n - 1` and `n - 2` from going below zero
+def fib(n)
+    if n <= 1 do 1 else fib(n - 1) + fib(n - 2)
+
+def fact(n)
+    if n <= 0 do 1 else n * fact(n - 1)
+
+# the same numbers by a loop: a `for` over a range always ends
+def fib_loop(n)
+    var a = 1
+    var b = 1
+    for _ in 0..n
+        next = a + b
+        a = b
+        b = next
+    a
+
+print(fib(6), fact(5), fib_loop(6), fib_loop(30))
+print(for i in 0..10 do fib(i))
+
+# structural recursion: `rest` is a piece of `xs`
+def total(xs)
+    match xs
+        [] => 0
+        [x, ...rest] => x + total(rest)
+
+print(total([1, 2, 3, 4]))
+
+# a bounded search: a `for` over a range with `break` states the bound
+def first_square_above(limit)
+    var found = 0
+    for i in 0..(limit + 1)
+        if i * i > limit
+            found = i * i
+            break
+    found
+
+print(first_square_above(50))
+
+# nobody has proven that the Collatz walk reaches 1 from every start, so
+# no checker can: `unsafe def` says so, and only an unsafe def may `while`
+unsafe def collatz_steps(start)
+    var n = start
+    var steps = 0
+    while n != 1
+        n = if n % 2 == 0 do n / 2 else 3 * n + 1
+        steps += 1
+    steps
+
+print("collatz steps from 27: {collatz_steps(27)}")

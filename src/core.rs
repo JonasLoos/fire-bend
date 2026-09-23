@@ -300,7 +300,24 @@ pub enum ExprKind {
 #[derive(Debug, Clone)]
 pub enum FPart {
     Text(String),
-    Expr(Expr, Option<String>),
+    Expr(Expr, Option<Pad>),
+}
+
+/// Padding of an interpolated value to a width.
+#[derive(Debug, Clone)]
+pub struct Pad {
+    pub width: u32,
+    pub fill: char,
+    pub align: Align,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Right,
+    Center,
+    /// zeros after the sign
+    Zeros,
 }
 
 #[derive(Debug, Clone)]

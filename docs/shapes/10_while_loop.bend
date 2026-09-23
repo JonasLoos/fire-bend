@@ -1,5 +1,5 @@
-# A while-loop has no structure to recurse on, so its driver is @unsafe
-# and the def that contains it carries the Diverge effect. The condition
+# A while-loop has no structure to recurse on, so its driver is @unsafe,
+# and so is the def that contains it (an `unsafe def` in Fire). The condition
 # for the next iteration is computed at the call site, which keeps the
 # driver a single def.
 import Base
