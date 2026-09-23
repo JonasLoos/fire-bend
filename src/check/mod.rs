@@ -215,7 +215,10 @@ impl Checker {
         ck
     }
 
-    /// `Maybe`, `Result`, `Pair` and `Range`, at their fixed positions.
+    /// `Maybe`, `Result`, the record `{key, value}` and `Range`, at their
+    /// fixed positions. `{key, value}` is an ordinary record shape that the
+    /// runtime also knows (as `F.Pair`): dictionary entries are built from
+    /// it, and the compiler packs two values into one with it.
     fn builtin_types(&mut self) {
         let a = self.store.fresh_var();
         self.types.push(DataType {
@@ -243,7 +246,7 @@ impl Checker {
         let k = self.store.fresh_var();
         let v = self.store.fresh_var();
         self.types.push(DataType {
-            name: "Pair".into(),
+            name: "{key, value}".into(),
             params: vec![k, v],
             ctors: vec![Ctor {
                 name: "F.Pair".into(),
@@ -252,9 +255,10 @@ impl Checker {
                     FieldDef { name: "value".into(), ty: Type::Var(v), public: true },
                 ],
             }],
-            kind: DataKind::Builtin,
+            kind: DataKind::Record { show_order: vec![0, 1] },
             line: 0,
         });
+        self.record_shapes.insert(vec!["key".into(), "value".into()], PAIR);
         self.types.push(DataType {
             name: "Range".into(),
             params: vec![],
@@ -389,8 +393,9 @@ impl Checker {
                 let l = self.show_type(&e.left);
                 let r = self.show_type(&e.right);
                 let hint = match (self.store.shallow(&e.left), self.store.shallow(&e.right)) {
-                    (Type::Int, Type::Float) | (Type::Float, Type::Int) => ": ints and floats do not mix; convert with `float(x)` or `int(x)`",
-                    _ => "",
+                    (Type::Int, Type::Float) | (Type::Float, Type::Int) => ": ints and floats do not mix; convert with `float(x)` or `int(x)`".to_string(),
+                    (Type::List(_), Type::Data(PAIR, _)) | (Type::Data(PAIR, _), Type::List(_)) => format!(": {}", pattern::ENTRY_NOT_A_LIST),
+                    _ => String::new(),
                 };
                 self.error(line, format!("type mismatch: expected {}, found {}{}", l, r, hint));
                 false
@@ -1119,7 +1124,7 @@ impl Checker {
             Class::Zero => is(t) || matches!(t, Type::Str | Type::List(_)),
             Class::Convert(..) => matches!(t, Type::Int | Type::Float | Type::Str | Type::Bool),
             Class::Len | Class::Iter(_) => matches!(t, Type::List(_) | Type::Str),
-            Class::Index(_, elem, _) => match t {
+            Class::Index(_, elem) => match t {
                 Type::List(_) => true,
                 Type::Str => self.compatible(elem, &Type::Str),
                 _ => false,

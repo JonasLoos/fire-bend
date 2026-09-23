@@ -26,6 +26,7 @@ pub type ConstraintId = usize;
 /// Fixed positions of the builtin data types in every program's type table.
 pub const MAYBE: TypeId = 0;
 pub const RESULT: TypeId = 1;
+/// The record `{key, value}`.
 pub const PAIR: TypeId = 2;
 pub const RANGE: TypeId = 3;
 pub const BUILTIN_TYPES: usize = 4;
@@ -62,8 +63,15 @@ impl Type {
     pub fn result(e: Type, a: Type) -> Type {
         Type::Data(RESULT, vec![e, a])
     }
+    /// The record `{key, value}`. Dictionary entries are these; the
+    /// compiler also packs two values into one with it (`pop` answers the
+    /// list and the item).
     pub fn pair(a: Type, b: Type) -> Type {
         Type::Data(PAIR, vec![a, b])
+    }
+    /// A dictionary entry: `{key: str, value: v}`.
+    pub fn entry(v: Type) -> Type {
+        Type::pair(Type::Str, v)
     }
     pub fn range() -> Type {
         Type::Data(RANGE, vec![])
@@ -134,9 +142,8 @@ pub enum Class {
     /// `for x in subject` yields `elem`: list, range, str, dict entries.
     Iter(Type),
     /// `subject[idx] : elem`: list or str (int index), dict (str index,
-    /// elem is then `T | nothing`), a pair (a literal 0 or 1, which the
-    /// option records).
-    Index(Type, Type, Option<i64>),
+    /// elem is then `T | nothing`).
+    Index(Type, Type),
     /// `subject[idx] = value`, answering the updated subject.
     IndexSet(Type, Type),
     /// `subject.name : ty`
@@ -157,14 +164,13 @@ impl Class {
     /// methods, conversions): their dictionary form answers a result, and
     /// a def that takes such a dictionary may abort.
     /// The same operation (types aside): same class, same name, same
-    /// operator, same literal index.
+    /// operator.
     pub fn same_op(&self, other: &Class) -> bool {
         match (self, other) {
             (Class::Field(x, _), Class::Field(y, _)) | (Class::SetField(x, _), Class::SetField(y, _)) => x == y,
             (Class::Method(x, a, _), Class::Method(y, b, _)) => x == y && a.len() == b.len(),
             (Class::Convert(x, _), Class::Convert(y, _)) => x == y,
             (Class::Arith(x), Class::Arith(y)) => x == y,
-            (Class::Index(_, _, x), Class::Index(_, _, y)) => x == y,
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
         }
     }
@@ -542,7 +548,7 @@ impl TypeStore {
         match c {
             Class::Iter(e) => Class::Iter(self.substitute(e, subst)),
             Class::OrElse(r, t) => Class::OrElse(self.substitute(r, subst), self.substitute(t, subst)),
-            Class::Index(i, e, l) => Class::Index(self.substitute(i, subst), self.substitute(e, subst), *l),
+            Class::Index(i, e) => Class::Index(self.substitute(i, subst), self.substitute(e, subst)),
             Class::IndexSet(i, v) => Class::IndexSet(self.substitute(i, subst), self.substitute(v, subst)),
             Class::Field(n, t) => Class::Field(n.clone(), self.substitute(t, subst)),
             Class::SetField(n, t) => Class::SetField(n.clone(), self.substitute(t, subst)),
@@ -608,7 +614,7 @@ impl TypeStore {
     pub fn class_types(c: &Class) -> Vec<Type> {
         match c {
             Class::Iter(e) => vec![e.clone()],
-            Class::Index(i, e, _) | Class::IndexSet(i, e) | Class::OrElse(i, e) => vec![i.clone(), e.clone()],
+            Class::Index(i, e) | Class::IndexSet(i, e) | Class::OrElse(i, e) => vec![i.clone(), e.clone()],
             Class::Field(_, t) | Class::SetField(_, t) | Class::Convert(_, t) => vec![t.clone()],
             Class::Method(_, args, ret) => {
                 let mut v = args.clone();

@@ -177,7 +177,7 @@ a def the compiler cannot see terminate is an error, unless the def says
 
 `while` is the unbounded loop, so it is allowed only in an `unsafe def`; a
 bounded search is a `for` over a range with `break`. Open ranges survive
-only zipped with a finite iterable (`for i, x in 0.., xs`), where the
+only in lockstep with a finite iterable (`for i, x in 0.., xs`), where the
 finite one ends the loop. `fire --types` tags defs that are or call unsafe
 code, `fire --check` lists them, and `fire --total` rejects a program that
 has any.
@@ -286,7 +286,7 @@ A `for` over finite data is a fold with early exit, and it is total:
   control value together in one `match xs c:` (`03`);
 * `for i in a..b` calls `F.for_range`, which counts a `Nat` down and
   carries `i` along (`03`). A `Nat` counter costs nothing (§5);
-* `for k, v in dict.entries()` folds the entry list;
+* `for {key, value} in dict` folds the entry list;
 * an IO or fallible body uses the `do` variant of the driver, whose
   recursive call sits inside the block (`04`).
 

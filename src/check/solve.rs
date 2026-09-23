@@ -126,11 +126,6 @@ pub(crate) fn method_sig(store: &mut TypeStore, recv: &Type, name: &str, nargs: 
                     store.unify(&e, &Type::list(inner.clone())).ok()?;
                     (vec![], Type::list(inner), pure)
                 }
-                "enumerate" => (vec![], Type::list(Type::pair(Type::Int, e)), pure),
-                "zip" => {
-                    let other = fresh(store);
-                    (vec![Type::list(other.clone())], Type::list(Type::pair(e, other)), pure)
-                }
                 _ => return None,
             }
         }
@@ -167,7 +162,7 @@ pub(crate) fn method_sig(store: &mut TypeStore, recv: &Type, name: &str, nargs: 
             match name {
                 "keys" => (vec![], Type::list(Type::Str), pure),
                 "values" => (vec![], Type::list(v), pure),
-                "entries" => (vec![], Type::list(Type::pair(Type::Str, v)), pure),
+                "entries" => (vec![], Type::list(Type::entry(v)), pure),
                 "has" => (vec![Type::Str], Type::Bool, pure),
                 "length" | "size" => (vec![], Type::Int, pure),
                 "get" => (vec![Type::Str], Type::maybe(v), pure),
@@ -181,11 +176,21 @@ pub(crate) fn method_sig(store: &mut TypeStore, recv: &Type, name: &str, nargs: 
     Some(r)
 }
 
+/// What a builtin that is gone became, said beside the error that it
+/// does not exist.
+pub(crate) fn replaced_by(name: &str) -> &'static str {
+    match name {
+        "zip" => ": a loop over several lists goes through them in lockstep, `for x, y in xs, ys`",
+        "enumerate" => ": count alongside the items with an open range, `for i, x in 0.., xs`",
+        _ => "",
+    }
+}
+
 /// Builtin methods that exist on exactly one builtin type, used to fix a
 /// receiver whose type is not known yet.
 pub(crate) fn unique_receiver(store: &mut TypeStore, name: &str) -> Option<Type> {
     let str_only = ["upper", "lower", "trim", "trim_start", "trim_end", "split", "lines", "replace", "starts_with", "ends_with", "chars", "repeat", "to_int", "parse_int", "parse_float", "char_code"];
-    let list_only = ["map", "filter", "each", "reduce", "any", "all", "find", "push", "pop", "drop_last", "sort", "sorted", "flatten", "enumerate", "zip", "count"];
+    let list_only = ["map", "filter", "each", "reduce", "any", "all", "find", "push", "pop", "drop_last", "sort", "sorted", "flatten", "count"];
     let map_only = ["keys", "values", "entries", "has", "set", "remove", "delete"];
     if str_only.contains(&name) {
         Some(Type::Str)
@@ -340,7 +345,7 @@ impl Checker {
                     Type::List(e) => Some((**e).clone()),
                     Type::Data(RANGE, _) => Some(Type::Int),
                     Type::Str => Some(Type::Str),
-                    Type::Map(v) => Some(Type::pair(Type::Str, (**v).clone())),
+                    Type::Map(v) => Some(Type::entry((**v).clone())),
                     _ => None,
                 };
                 match item {
@@ -351,7 +356,7 @@ impl Checker {
                     None => Err("iteration"),
                 }
             }
-            Class::Index(idx, elem, lit) => match &subject {
+            Class::Index(idx, elem) => match &subject {
                 Type::List(e) => {
                     let e = (**e).clone();
                     self.unify(idx, &Type::Int, line);
@@ -375,20 +380,6 @@ impl Checker {
                     let v = (**v).clone();
                     self.unify_key(idx, line);
                     self.unify(elem, &Type::maybe(v), line);
-                    Ok(Solution::Concrete(vec![]))
-                }
-                Type::Data(PAIR, args) => {
-                    // a pair indexes as [0] / [1]
-                    self.unify(idx, &Type::Int, line);
-                    let (a, b) = (args[0].clone(), args[1].clone());
-                    match lit {
-                        Some(0) => self.unify(elem, &a, line),
-                        Some(1) => self.unify(elem, &b, line),
-                        _ => {
-                            self.error(line, "a pair is indexed by a literal 0 or 1");
-                            true
-                        }
-                    };
                     Ok(Solution::Concrete(vec![]))
                 }
                 _ => Err("indexing"),
@@ -558,8 +549,9 @@ impl Checker {
                 let what = describe_class(&c.class);
                 let s = self.show_type(&subject);
                 match &c.class {
-                    Class::Method(n, _, _) => self.error(line, format!("no method .{}() on a value of type {}", n, s)),
+                    Class::Method(n, _, _) => self.error(line, format!("no method .{}() on a value of type {}{}", n, s, replaced_by(n))),
                     Class::Field(n, _) | Class::SetField(n, _) => self.error(line, format!("no field .{} on a value of type {}", n, s)),
+                    Class::Index(..) if matches!(subject, Type::Data(PAIR, _)) => self.error(line, format!("indexing is not defined on {}: read its fields, `.key` and `.value`", s)),
                     _ => self.error(line, format!("{} is not defined on {}", what, s)),
                 }
                 self.store.constraints[id].solution = Some(Solution::Concrete(vec![]));

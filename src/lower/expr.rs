@@ -915,12 +915,6 @@ impl<'a> Lower<'a> {
                 let vt = self.ty_in(ctx, v, line);
                 Term::call("F.map.entries", vec![Term::TyArg(vt), terms.remove(0)])
             }
-            (Class::Index(_, _, lit), Type::Data(PAIR, args)) => {
-                let a = self.ty_in(ctx, &args[0], line);
-                let b = self.ty_in(ctx, &args[1], line);
-                let f = if *lit == Some(0) { "F.pair.key" } else { "F.pair.value" };
-                Term::call(f, vec![Term::TyArg(a), Term::TyArg(b), terms.remove(0)])
-            }
             (Class::Index(..), Type::List(e)) => {
                 let et = self.ty_in(ctx, e, line);
                 let i = terms.pop().unwrap();
@@ -1289,18 +1283,6 @@ impl<'a> Lower<'a> {
                 };
                 Term::call("F.list.flatten", vec![ta(it), recv])
             }
-            ("enumerate", Type::List(_)) => {
-                let et = elem_ty(self, ctx);
-                Term::call("F.list.enumerate", vec![ta(et), recv])
-            }
-            ("zip", Type::List(_)) => {
-                let et = elem_ty(self, ctx);
-                let ot = match self.store.shallow(&margs[0]) {
-                    Type::List(o) => self.ty_in(ctx, &o, line),
-                    _ => Ty::Unit,
-                };
-                Term::call("F.list.zip", vec![ta(et), ta(ot), recv, arg(&mut terms, 0)])
-            }
             // ranges
             ("to_list", Type::Data(RANGE, _)) => Term::call("F.range.to_list", vec![recv]),
             ("reverse" | "reversed", Type::Data(RANGE, _)) => Term::call("List.reverse", vec![ta(Ty::Param("&2".into())), ta(Ty::U32), Term::call("F.range.to_list", vec![recv])]),
@@ -1507,24 +1489,6 @@ impl<'a> Lower<'a> {
             "lists.repeat" => {
                 let et = self.ty_in(ctx, &args[0].ty, line);
                 Term::call("F.list.repeat", vec![Term::TyArg(et), a(0), a(1)])
-            }
-            "lists.enumerate" => {
-                let et = match self.store.shallow(&args[0].ty) {
-                    Type::List(e) => self.ty_in(ctx, &e, line),
-                    _ => Ty::Unit,
-                };
-                Term::call("F.list.enumerate", vec![Term::TyArg(et), a(0)])
-            }
-            "lists.zip" => {
-                let et = match self.store.shallow(&args[0].ty) {
-                    Type::List(e) => self.ty_in(ctx, &e, line),
-                    _ => Ty::Unit,
-                };
-                let ot = match self.store.shallow(&args[1].ty) {
-                    Type::List(e) => self.ty_in(ctx, &e, line),
-                    _ => Ty::Unit,
-                };
-                Term::call("F.list.zip", vec![Term::TyArg(et), Term::TyArg(ot), a(0), a(1)])
             }
             "io.read_file" => {
                 let t = Term::call("F.io.read_file", vec![a(0)]);

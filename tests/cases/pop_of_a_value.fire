@@ -1,0 +1,7 @@
+# pop on a value that is no variable answers the item, where it stands:
+# not ahead of the statement, so a short-circuit still skips it
+print([1, 2].pop())
+xs = []
+print(len(xs) == 0 or xs.take(1).pop() > 0)
+rows = [[1, 2], [3]]
+print(rows *> r => r.pop())

@@ -115,7 +115,8 @@ the unit whose type parameters it shares (itself for a top-level def),
 parameters, captures, scheme, effect, descent and a body of statements;
 every expression typed; method calls, builtins and operators resolved to
 calls, dictionaries (`Dict`), fields or builtins; data types (declared,
-records, classes, and the builtins `T | nothing`, results, pairs, ranges).
+records, classes, and the builtins `T | nothing`, results, the record
+`{key, value}` (the runtime's `F.Pair`), ranges).
 
 ## Lowering (`src/lower/`)
 
@@ -179,8 +180,8 @@ line it happened at. A failure passing through calls is not wrapped again.
 `F.Return{r}` with `r` the def's own result, whatever the nesting. A
 driver folds it: `F.for_list` over a list, `F.for_range` counting a `Nat`
 down over a range, the `_res` and `_io` variants in effectful defs, and
-`F.loop` (`@unsafe`) for `while` in unsafe defs. Zipped iterables are
-zipped into pairs first; an open range becomes `enumerate_from`.
+`F.loop` (`@unsafe`) for `while` in unsafe defs. Iterables in lockstep
+are zipped into `F.Pair`s first; an open range becomes `enumerate_from`.
 
 **Fuel.** A fuel def matches `fuel` first: `0n` answers a value of the
 result type (built in place; a generic part comes from a parameter of that

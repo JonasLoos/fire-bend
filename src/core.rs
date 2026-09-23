@@ -565,7 +565,6 @@ impl Missed {
                     match (*t, &dt.kind) {
                         (crate::types::MAYBE, _) => if *c == 0 { "nothing".into() } else { parts[0].clone() },
                         (crate::types::RESULT, _) => format!("{{{}: {}}}", if *c == 1 { "ok" } else { "err" }, parts[0]),
-                        (crate::types::PAIR, _) => format!("[{}]", parts.join(", ")),
                         (_, DataKind::Declared) => {
                             let name = &dt.ctors[*c].name;
                             if parts.is_empty() { name.clone() } else { format!("{}({})", name, parts.join(", ")) }
