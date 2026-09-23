@@ -105,9 +105,6 @@ pub struct DataType {
 }
 
 impl DataType {
-    pub fn ctor_index(&self, name: &str) -> Option<usize> {
-        self.ctors.iter().position(|c| c.name == name)
-    }
     /// The field index of a name in constructor 0 (records and classes).
     pub fn field_index(&self, name: &str) -> Option<usize> {
         self.ctors.first().and_then(|c| c.fields.iter().position(|f| f.name == name))
@@ -398,12 +395,6 @@ pub struct Program {
     pub store: TypeStore,
 }
 
-impl Program {
-    pub fn type_name(&self, id: TypeId) -> String {
-        self.types[id].name.clone()
-    }
-}
-
 /// Whether the arms cover every value of the subject's type.
 pub fn arms_exhaustive(arms: &[Arm], types: &[DataType]) -> bool {
     missing_case(arms, types).is_none()
@@ -643,12 +634,7 @@ pub fn walk_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
         }
         StmtKind::Match { subject, arms } => {
             walk_expr(subject, f);
-            for a in arms {
-                if let Some(g) = &a.guard {
-                    walk_expr(g, f);
-                }
-                walk_expr(&a.body, f);
-            }
+            walk_arms(arms, f);
         }
         StmtKind::While { cond, body } => {
             walk_expr(cond, f);
@@ -660,6 +646,15 @@ pub fn walk_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
             }
             walk_block(body, f);
         }
+    }
+}
+
+fn walk_arms(arms: &[Arm], f: &mut dyn FnMut(&Expr)) {
+    for a in arms {
+        if let Some(g) = &a.guard {
+            walk_expr(g, f);
+        }
+        walk_expr(&a.body, f);
     }
 }
 
@@ -701,12 +696,7 @@ pub fn walk_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         }
         ExprKind::Match(subject, arms) => {
             walk_expr(subject, f);
-            for a in arms {
-                if let Some(g) = &a.guard {
-                    walk_expr(g, f);
-                }
-                walk_expr(&a.body, f);
-            }
+            walk_arms(arms, f);
         }
         ExprKind::Block(b) => walk_block(b, f),
         ExprKind::And(a, b) | ExprKind::Or(a, b) => {
