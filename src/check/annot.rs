@@ -23,7 +23,7 @@ impl Checker {
                     if let Some(id) = self.type_names.get(name).cloned() {
                         // a class's fields are known once its constructor is checked
                         if let DataKind::Class { ctor, .. } = self.types[id].kind {
-                            self.ensure_def(ctor, line);
+                            self.ensure_def(ctor);
                         }
                         let (t, _) = self.instantiate_type(id);
                         return t;
@@ -63,13 +63,10 @@ impl Checker {
                 }
                 let id = self.record_shape(names.clone(), line);
                 let (t, subst) = self.instantiate_type(id);
-                // fields are stored sorted by name
-                let dt = self.types[id].clone();
+                // fields are stored sorted by name, one parameter each
                 for (n, ty) in names.iter().zip(tys.iter()) {
-                    let idx = dt.field_index(n).unwrap();
-                    let param = dt.params[idx];
-                    let fv = subst.iter().find(|(v, _)| *v == param).map(|(_, t)| t.clone()).unwrap();
-                    self.unify(&fv, ty, line);
+                    let idx = self.types[id].field_index(n).unwrap();
+                    self.unify(&subst[idx].1, ty, line);
                 }
                 t
             }

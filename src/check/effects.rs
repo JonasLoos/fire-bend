@@ -17,10 +17,10 @@ impl Checker {
         }
         // function values that may be invoked, and non-exhaustive matches
         for d in 0..n {
-            let body = self.defs[d].body.clone();
+            let body = &self.defs[d].body;
             let mut invoked: Vec<Type> = Vec::new();
             let mut aborts = false;
-            walk_block(&body, &mut |e: &Expr| match &e.kind {
+            walk_block(body, &mut |e: &Expr| match &e.kind {
                 ExprKind::CallClosure(f, _) => invoked.push(f.ty.clone()),
                 ExprKind::Dict { args, .. } | ExprKind::Builtin(_, args) => {
                     for a in args {
@@ -34,14 +34,13 @@ impl Checker {
                 }
                 _ => {}
             });
-            let mut stmts_abort = false;
-            for_each_stmt(&body, &mut |s: &Stmt| {
+            for_each_stmt(body, &mut |s: &Stmt| {
                 if let StmtKind::Match { arms, .. } = &s.kind
                     && !arms_exhaustive(arms, &self.types) {
-                        stmts_abort = true;
+                        aborts = true;
                     }
             });
-            if aborts || stmts_abort {
+            if aborts {
                 self.defs[d].own_effect = self.defs[d].own_effect.join(Effect::ABORT);
             }
             for t in invoked {
@@ -85,27 +84,5 @@ impl Checker {
         }
         self.effects_final = effects;
         self.unsafe_final = unsafe_;
-    }
-}
-
-/// Visit every statement of a block, recursively.
-pub(crate) fn for_each_stmt(b: &Block, f: &mut dyn FnMut(&Stmt)) {
-    for s in &b.stmts {
-        f(s);
-        match &s.kind {
-            StmtKind::If { then, else_, .. } => {
-                for_each_stmt(then, f);
-                for_each_stmt(else_, f);
-            }
-            StmtKind::Match { arms, .. } => {
-                for a in arms {
-                    if let ExprKind::Block(b) = &a.body.kind {
-                        for_each_stmt(b, f);
-                    }
-                }
-            }
-            StmtKind::For { body, .. } | StmtKind::While { body, .. } => for_each_stmt(body, f),
-            _ => {}
-        }
     }
 }

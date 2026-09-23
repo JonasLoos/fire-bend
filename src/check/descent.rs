@@ -9,8 +9,8 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
 
-/// A self-call found in a body: its arguments, the facts (`p >= c`) that
-/// hold there, and the variables known to be pieces of each parameter.
+/// A self-call found in a body: its arguments and the facts (`p >= c`)
+/// that hold there.
 struct SelfCall {
     args: Vec<Expr>,
     facts: Vec<(String, i64)>,
@@ -19,12 +19,7 @@ struct SelfCall {
 
 impl Checker {
     pub(crate) fn check_descent(&mut self) {
-        let n = self.defs.len();
-        let mut out = vec![Descent::None; n];
-        for d in 0..n {
-            out[d] = self.descent_of(d);
-        }
-        self.descent_final = out;
+        self.descent_final = (0..self.defs.len()).map(|d| self.descent_of(d)).collect();
     }
 
     /// Cycles between defs, and recursion through nested defs or lambdas.
@@ -107,21 +102,20 @@ impl Checker {
         if matches!(def.kind, DefKind::Main) {
             return Descent::None;
         }
-        // self-calls, with the facts and pieces in scope at each
-        let mut calls: Vec<SelfCall> = Vec::new();
-        let mut pieces: HashMap<String, usize> = HashMap::new();
-        let mut in_loop_calls = Vec::new();
         let params: Vec<String> = def.params.iter().map(|p| p.name.clone()).collect();
         // a parameter that is reassigned is no longer the parameter
         let mut reassigned: HashSet<String> = HashSet::new();
-        for_each_stmt_local(&def.body, &mut |s: &Stmt| {
+        for_each_stmt(&def.body, &mut |s: &Stmt| {
             if let StmtKind::Assign { name, .. } = &s.kind
                 && params.contains(name) {
                     reassigned.insert(name.clone());
                 }
         });
-        self.collect_calls(d, &def.body, &mut Vec::new(), &mut pieces, &params, &mut calls, &mut in_loop_calls, false);
-        for line in in_loop_calls {
+        // self-calls, with the facts in scope at each, and the pieces
+        let mut collector = Collector { ck: self, d, params: &params, facts: Vec::new(), pieces: HashMap::new(), calls: Vec::new(), in_loop: Vec::new() };
+        collector.block(&def.body, false);
+        let Collector { pieces, calls, in_loop, .. } = collector;
+        for line in in_loop {
             self.error(line, format!("'{0}' calls itself inside a loop body; a loop body is its own def in Bend and cannot call the def around it: recurse over the list instead of looping (`match xs` with `[x, ...rest]`, calling '{0}' on `rest`), or drop the recursion and keep a worklist in the loop (`for _ in 0..limit` with `break` when it is empty)", def.name));
         }
         if calls.is_empty() {
@@ -180,7 +174,7 @@ impl Checker {
             }
         }
         let line = calls.first().map(|c| c.line).unwrap_or(def.line);
-        let hint = if params.iter().any(|p| matches!(self.shallow(&def.params[params.iter().position(|q| q == p).unwrap()].ty), Type::Int)) {
+        let hint = if def.params.iter().any(|p| matches!(self.shallow(&p.ty), Type::Int)) {
             "recurse on a piece of a matched parameter, or on an int decreased by a literal (`n - 1`) under a guard such as `if n <= 0 do return ...`"
         } else {
             "recurse on a piece of a matched parameter (`match xs` with `[h, ...t]`, or a constructor pattern)"
@@ -211,160 +205,164 @@ impl Checker {
         }
         None
     }
+}
 
-    /// Walk a block collecting self-calls with their facts, and the
-    /// variables that are pieces of a parameter (bound by a match on it).
-    fn collect_calls(&self, d: DefId, b: &Block, facts: &mut Vec<(String, i64)>, pieces: &mut HashMap<String, usize>, params: &[String], calls: &mut Vec<SelfCall>, in_loop: &mut Vec<usize>, loop_body: bool) {
-        let mut i = 0;
-        while i < b.stmts.len() {
-            let s = &b.stmts[i];
+/// Walks a def's body collecting its self-calls with the facts that hold
+/// at each, and the variables that are pieces of a parameter (bound by a
+/// match on it).
+struct Collector<'a> {
+    ck: &'a Checker,
+    d: DefId,
+    params: &'a [String],
+    facts: Vec<(String, i64)>,
+    pieces: HashMap<String, usize>,
+    calls: Vec<SelfCall>,
+    /// Lines of self-calls inside a loop body.
+    in_loop: Vec<usize>,
+}
+
+impl Collector<'_> {
+    fn block(&mut self, b: &Block, loop_body: bool) {
+        for s in &b.stmts {
             match &s.kind {
                 StmtKind::Let { value, .. } | StmtKind::Assign { value, .. } | StmtKind::Expr(value) | StmtKind::Return(value) => {
-                    self.collect_expr(d, value, facts, pieces, params, calls, in_loop, loop_body);
+                    self.expr(value, loop_body);
                 }
                 StmtKind::If { cond, then, else_ } => {
-                    self.collect_expr(d, cond, facts, pieces, params, calls, in_loop, loop_body);
-                    let pos = facts_from(cond, true, params, self);
-                    let neg = facts_from(cond, false, params, self);
-                    let n0 = facts.len();
-                    facts.extend(pos);
-                    self.collect_calls(d, then, facts, pieces, params, calls, in_loop, loop_body);
-                    facts.truncate(n0);
-                    facts.extend(neg.clone());
-                    self.collect_calls(d, else_, facts, pieces, params, calls, in_loop, loop_body);
-                    facts.truncate(n0);
+                    self.expr(cond, loop_body);
+                    let pos = facts_from(cond, true, self.params, self.ck);
+                    let neg = facts_from(cond, false, self.params, self.ck);
+                    let n0 = self.facts.len();
+                    self.facts.extend(pos);
+                    self.block(then, loop_body);
+                    self.facts.truncate(n0);
+                    self.facts.extend(neg.clone());
+                    self.block(else_, loop_body);
+                    self.facts.truncate(n0);
                     // an early return: the negation holds for the rest of the block
-                    if else_.stmts.is_empty() && self.block_always_returns(then) {
-                        facts.extend(neg);
+                    if else_.stmts.is_empty() && self.ck.block_always_returns(then) {
+                        self.facts.extend(neg);
                     }
                 }
                 StmtKind::Match { subject, arms } => {
-                    self.collect_expr(d, subject, facts, pieces, params, calls, in_loop, loop_body);
-                    let of_param = match &subject.kind {
-                        ExprKind::Var(v) => params.iter().position(|p| p == v).or_else(|| pieces.get(v).cloned()),
-                        _ => None,
-                    };
+                    self.expr(subject, loop_body);
+                    let of_param = self.param_of(subject);
                     for a in arms {
-                        let n0 = facts.len();
-                        if let Some(pi) = of_param {
-                            let mut names = Vec::new();
-                            pattern_pieces(&a.pat, &mut names);
-                            for nm in names {
-                                pieces.insert(nm, pi);
-                            }
-                        }
-                        if let Some(g) = &a.guard {
-                            self.collect_expr(d, g, facts, pieces, params, calls, in_loop, loop_body);
-                        }
-                        self.collect_expr(d, &a.body, facts, pieces, params, calls, in_loop, loop_body);
-                        facts.truncate(n0);
+                        let n0 = self.facts.len();
+                        self.arm(a, of_param, loop_body);
+                        self.facts.truncate(n0);
                     }
                 }
                 StmtKind::For { iters, body, .. } => {
                     for it in iters {
                         match it {
-                            Iter::Items(e, _) | Iter::Counter(e) => self.collect_expr(d, e, facts, pieces, params, calls, in_loop, loop_body),
+                            Iter::Items(e, _) | Iter::Counter(e) => self.expr(e, loop_body),
                         }
                     }
-                    self.collect_calls(d, body, facts, pieces, params, calls, in_loop, true);
+                    self.block(body, true);
                 }
                 StmtKind::While { cond, body } => {
-                    self.collect_expr(d, cond, facts, pieces, params, calls, in_loop, true);
-                    self.collect_calls(d, body, facts, pieces, params, calls, in_loop, true);
+                    self.expr(cond, true);
+                    self.block(body, true);
                 }
                 StmtKind::Break | StmtKind::Continue | StmtKind::Bind { .. } => {}
             }
-            i += 1;
         }
     }
 
-    fn collect_expr(&self, d: DefId, e: &Expr, facts: &mut Vec<(String, i64)>, pieces: &mut HashMap<String, usize>, params: &[String], calls: &mut Vec<SelfCall>, in_loop: &mut Vec<usize>, loop_body: bool) {
+    /// The parameter a match subject is (or is a piece of).
+    fn param_of(&self, subject: &Expr) -> Option<usize> {
+        match &subject.kind {
+            ExprKind::Var(v) => self.params.iter().position(|p| p == v).or_else(|| self.pieces.get(v).cloned()),
+            _ => None,
+        }
+    }
+
+    /// A match arm; on a parameter, the names it binds are its pieces.
+    fn arm(&mut self, a: &Arm, of_param: Option<usize>, loop_body: bool) {
+        if let Some(pi) = of_param {
+            let mut names = Vec::new();
+            pattern_pieces(&a.pat, &mut names);
+            for nm in names {
+                self.pieces.insert(nm, pi);
+            }
+        }
+        if let Some(g) = &a.guard {
+            self.expr(g, loop_body);
+        }
+        self.expr(&a.body, loop_body);
+    }
+
+    fn expr(&mut self, e: &Expr, loop_body: bool) {
         match &e.kind {
             ExprKind::Call { def, args, .. } => {
                 for a in args {
-                    self.collect_expr(d, a, facts, pieces, params, calls, in_loop, loop_body);
+                    self.expr(a, loop_body);
                 }
-                if *def == d {
+                if *def == self.d {
                     if loop_body {
-                        in_loop.push(e.line);
+                        self.in_loop.push(e.line);
                     }
-                    calls.push(SelfCall { args: args.clone(), facts: facts.clone(), line: e.line });
+                    self.calls.push(SelfCall { args: args.clone(), facts: self.facts.clone(), line: e.line });
                 }
             }
             ExprKind::If(c, t, el) => {
-                self.collect_expr(d, c, facts, pieces, params, calls, in_loop, loop_body);
-                let pos = facts_from(c, true, params, self);
-                let neg = facts_from(c, false, params, self);
-                let n0 = facts.len();
-                facts.extend(pos);
-                self.collect_expr(d, t, facts, pieces, params, calls, in_loop, loop_body);
-                facts.truncate(n0);
-                facts.extend(neg);
-                self.collect_expr(d, el, facts, pieces, params, calls, in_loop, loop_body);
-                facts.truncate(n0);
+                self.expr(c, loop_body);
+                let pos = facts_from(c, true, self.params, self.ck);
+                let neg = facts_from(c, false, self.params, self.ck);
+                let n0 = self.facts.len();
+                self.facts.extend(pos);
+                self.expr(t, loop_body);
+                self.facts.truncate(n0);
+                self.facts.extend(neg);
+                self.expr(el, loop_body);
+                self.facts.truncate(n0);
             }
             ExprKind::Match(subject, arms) => {
-                self.collect_expr(d, subject, facts, pieces, params, calls, in_loop, loop_body);
-                let of_param = match &subject.kind {
-                    ExprKind::Var(v) => params.iter().position(|p| p == v).or_else(|| pieces.get(v).cloned()),
-                    _ => None,
-                };
+                // unlike in a statement match, facts an arm leaves are kept
+                self.expr(subject, loop_body);
+                let of_param = self.param_of(subject);
                 for a in arms {
-                    if let Some(pi) = of_param {
-                        let mut names = Vec::new();
-                        pattern_pieces(&a.pat, &mut names);
-                        for nm in names {
-                            pieces.insert(nm, pi);
-                        }
-                    }
-                    if let Some(g) = &a.guard {
-                        self.collect_expr(d, g, facts, pieces, params, calls, in_loop, loop_body);
-                    }
-                    self.collect_expr(d, &a.body, facts, pieces, params, calls, in_loop, loop_body);
+                    self.arm(a, of_param, loop_body);
                 }
             }
-            ExprKind::Block(b) => self.collect_calls(d, b, facts, pieces, params, calls, in_loop, loop_body),
+            ExprKind::Block(b) => self.block(b, loop_body),
             ExprKind::And(a, b) => {
-                self.collect_expr(d, a, facts, pieces, params, calls, in_loop, loop_body);
-                let pos = facts_from(a, true, params, self);
-                let n0 = facts.len();
-                facts.extend(pos);
-                self.collect_expr(d, b, facts, pieces, params, calls, in_loop, loop_body);
-                facts.truncate(n0);
+                self.expr(a, loop_body);
+                let pos = facts_from(a, true, self.params, self.ck);
+                let n0 = self.facts.len();
+                self.facts.extend(pos);
+                self.expr(b, loop_body);
+                self.facts.truncate(n0);
             }
             ExprKind::Or(a, b) => {
-                self.collect_expr(d, a, facts, pieces, params, calls, in_loop, loop_body);
-                let neg = facts_from(a, false, params, self);
-                let n0 = facts.len();
-                facts.extend(neg);
-                self.collect_expr(d, b, facts, pieces, params, calls, in_loop, loop_body);
-                facts.truncate(n0);
+                self.expr(a, loop_body);
+                let neg = facts_from(a, false, self.params, self.ck);
+                let n0 = self.facts.len();
+                self.facts.extend(neg);
+                self.expr(b, loop_body);
+                self.facts.truncate(n0);
             }
-            ExprKind::List(items) | ExprKind::Con(_, _, items) | ExprKind::Builtin(_, items) => {
+            ExprKind::List(items) | ExprKind::Con(_, _, items) | ExprKind::Builtin(_, items) | ExprKind::Dict { args: items, .. } => {
                 for it in items {
-                    self.collect_expr(d, it, facts, pieces, params, calls, in_loop, loop_body);
+                    self.expr(it, loop_body);
                 }
             }
-            ExprKind::Dict { args, .. } => {
-                for it in args {
-                    self.collect_expr(d, it, facts, pieces, params, calls, in_loop, loop_body);
-                }
-            }
-            ExprKind::Field(o, _, _) | ExprKind::Not(o) | ExprKind::Abort(o) => self.collect_expr(d, o, facts, pieces, params, calls, in_loop, loop_body),
+            ExprKind::Field(o, _, _) | ExprKind::Not(o) | ExprKind::Abort(o) => self.expr(o, loop_body),
             ExprKind::SetField(o, _, _, v) => {
-                self.collect_expr(d, o, facts, pieces, params, calls, in_loop, loop_body);
-                self.collect_expr(d, v, facts, pieces, params, calls, in_loop, loop_body);
+                self.expr(o, loop_body);
+                self.expr(v, loop_body);
             }
             ExprKind::CallClosure(f, args) => {
-                self.collect_expr(d, f, facts, pieces, params, calls, in_loop, loop_body);
+                self.expr(f, loop_body);
                 for a in args {
-                    self.collect_expr(d, a, facts, pieces, params, calls, in_loop, loop_body);
+                    self.expr(a, loop_body);
                 }
             }
             ExprKind::FString(parts) => {
                 for p in parts {
                     if let FPart::Expr(x, _) = p {
-                        self.collect_expr(d, x, facts, pieces, params, calls, in_loop, loop_body);
+                        self.expr(x, loop_body);
                     }
                 }
             }
@@ -375,27 +373,8 @@ impl Checker {
 
 /// Names bound by a constructor or list pattern (pieces of the subject).
 fn pattern_pieces(p: &Pat, out: &mut Vec<String>) {
-    match p {
-        Pat::Con(_, _, subs) => {
-            for s in subs {
-                match s {
-                    Pat::Bind(n) => out.push(n.clone()),
-                    other => pattern_pieces(other, out),
-                }
-            }
-        }
-        Pat::List(items, rest) => {
-            for s in items {
-                match s {
-                    Pat::Bind(n) => out.push(n.clone()),
-                    other => pattern_pieces(other, out),
-                }
-            }
-            if let Some(Some(r)) = rest {
-                out.push(r.clone());
-            }
-        }
-        _ => {}
+    if !matches!(p, Pat::Bind(_)) {
+        p.binders(out);
     }
 }
 
@@ -441,19 +420,9 @@ fn facts_from(cond: &Expr, positive: bool, params: &[String], ck: &Checker) -> V
                         _ => vec![],
                     }
                 }
-                Class::Eq => {
-                    // p == k gives no lower bound; p != k neither
-                    vec![]
-                }
                 _ => vec![],
             }
         }
         _ => vec![],
     }
-}
-
-/// Visit every statement of a block, not descending into nested lambdas
-/// (which are separate defs anyway).
-pub(crate) fn for_each_stmt_local(b: &Block, f: &mut dyn FnMut(&Stmt)) {
-    super::effects::for_each_stmt(b, f)
 }

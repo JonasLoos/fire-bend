@@ -43,8 +43,7 @@ impl Checker {
             for p in &self.defs[d].params {
                 w.origin.insert(p.name.clone(), Origin::Param);
             }
-            let body = self.defs[d].body.clone();
-            w.block(&body, &Live::new());
+            w.block(&self.defs[d].body, &Live::new());
             let mut found = w.found;
             found.sort_by_key(|(l, n, _)| (*l, n.clone()));
             found.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
@@ -101,13 +100,7 @@ impl Walk<'_> {
                 l.extend(self.block(else_, after));
                 self.expr(cond, &l)
             }
-            StmtKind::Match { subject, arms } => {
-                let mut l = Live::new();
-                for a in arms {
-                    l.extend(self.arm(a, after));
-                }
-                self.expr(subject, &l)
-            }
+            StmtKind::Match { subject, arms } => self.arms(subject, arms, after),
             StmtKind::For { patterns, iters, body } => {
                 let mut binders = Vec::new();
                 for p in patterns {
@@ -172,6 +165,15 @@ impl Walk<'_> {
         head
     }
 
+    /// A match: live before it is what its subject and any arm read.
+    fn arms(&mut self, subject: &Expr, arms: &[Arm], after: &Live) -> Live {
+        let mut l = Live::new();
+        for a in arms {
+            l.extend(self.arm(a, after));
+        }
+        self.expr(subject, &l)
+    }
+
     fn arm(&mut self, a: &Arm, after: &Live) -> Live {
         let mut l = self.expr(&a.body, after);
         let mut names = Vec::new();
@@ -193,13 +195,7 @@ impl Walk<'_> {
                 l.extend(self.expr(el, after));
                 self.expr(c, &l)
             }
-            ExprKind::Match(subject, arms) => {
-                let mut l = Live::new();
-                for a in arms {
-                    l.extend(self.arm(a, after));
-                }
-                self.expr(subject, &l)
-            }
+            ExprKind::Match(subject, arms) => self.arms(subject, arms, after),
             _ => {
                 let mut out = after.clone();
                 walk_expr(e, &mut |x: &Expr| match &x.kind {

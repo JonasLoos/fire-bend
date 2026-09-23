@@ -1677,26 +1677,5 @@ fn mark_body(b: &mut Body, counts: &HashMap<String, usize>) {
     }
 }
 
-pub(crate) fn for_each_stmt(b: &Block, f: &mut dyn FnMut(&Stmt)) {
-    for s in &b.stmts {
-        f(s);
-        match &s.kind {
-            StmtKind::If { then, else_, .. } => {
-                for_each_stmt(then, f);
-                for_each_stmt(else_, f);
-            }
-            StmtKind::Match { arms, .. } => {
-                for a in arms {
-                    if let ExprKind::Block(b) = &a.body.kind {
-                        for_each_stmt(b, f);
-                    }
-                }
-            }
-            StmtKind::For { body, .. } | StmtKind::While { body, .. } => for_each_stmt(body, f),
-            _ => {}
-        }
-    }
-}
-
 // keep the map ordered for deterministic output
 pub type OrderedMap<K, V> = BTreeMap<K, V>;

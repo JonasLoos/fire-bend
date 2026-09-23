@@ -59,7 +59,7 @@ impl Checker {
             Some(id) => *id,
             None => return,
         };
-        let self_ty = Type::Data(id, self.types[id].params.iter().map(|v| Type::Var(*v)).collect());
+        let self_ty = self.class_self_type(id);
         for (ci, c) in ctors.iter().enumerate() {
             for (fi, (_, t)) in c.fields.iter().enumerate() {
                 if let Some(t) = t {
@@ -115,8 +115,8 @@ impl Checker {
         id
     }
 
-    /// The type of the object being built or received: the class applied
-    /// to its field variables.
+    /// The type of the object being built or received: the class (or any
+    /// declared type) applied to its own parameters.
     pub(crate) fn class_self_type(&self, tid: TypeId) -> Type {
         Type::Data(tid, self.types[tid].params.iter().map(|v| Type::Var(*v)).collect())
     }
@@ -142,14 +142,12 @@ impl Checker {
         // parameters: every one is a member (public ones show)
         let mut params = Vec::new();
         for (i, p) in source.params.iter().enumerate() {
-            let name = match &p.pattern {
-                ast::Pattern::Identifier(n) => n.clone(),
-                ast::Pattern::Typed { pattern, .. } => match &**pattern {
-                    ast::Pattern::Identifier(n) => n.clone(),
-                    _ => format!("__p{}", i),
-                },
-                _ => {
-                    self.error(line, "class parameters are plain names");
+            let name = match plain_name(&p.pattern) {
+                Some(n) => n.clone(),
+                None => {
+                    if !matches!(p.pattern, ast::Pattern::Typed { .. }) {
+                        self.error(line, "class parameters are plain names");
+                    }
                     format!("__p{}", i)
                 }
             };
@@ -162,26 +160,14 @@ impl Checker {
             self.declare(&name, Binding::Member { root: name.clone(), root_ty: fty.clone(), path: vec![], ty: fty.clone(), mutable: p.is_var });
             params.push(Param { name, ty: fty });
         }
-        // defaults, in the constructor's own frame
-        let defaults: Vec<Option<Expr>> = source.params.iter().zip(params.iter()).map(|(p, cp)| {
-            p.default.as_ref().map(|d| {
-                let x = self.check_expr(d, Some(&cp.ty));
-                self.unify(&cp.ty, &x.ty, line);
-                x
-            })
-        }).collect();
-        self.defs[id].defaults = defaults;
+        self.defs[id].defaults = self.check_defaults(&source.params, &params, line);
         // every member and method the body declares, before any type
         // mentions the class (its parameters are its fields)
         self.prescan_members(tid, &source.body);
         self.hoist_defs(&source.body);
         // the monomorphic type is visible from here on
-        let ptys: Vec<Type> = params.iter().map(|p| p.ty.clone()).collect();
         let selft = self.class_self_type(tid);
-        let c = self.store.clos_singleton(self.defs[id].closure_id);
-        let fty = Type::Fn(ptys, Box::new(selft), c);
-        let mono = self.defs[id].mono.clone();
-        self.unify(&mono, &fty, line);
+        self.bind_mono(id, &params, selft, line);
         self.defs[id].params = params.clone();
         let mut body = self.check_block_stmts(&source.body);
         // the methods, while the constructor's scope is in place
@@ -190,7 +176,7 @@ impl Checker {
             _ => vec![],
         };
         for m in methods {
-            self.ensure_def(m, line);
+            self.ensure_def(m);
         }
         // the object
         let fields: Vec<(String, Type)> = self.types[tid].ctors[0].fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
@@ -206,28 +192,17 @@ impl Checker {
         for s in body {
             match &s.node {
                 ast::Statement::Declaration { is_public, is_mutable, pattern, value } => {
-                    let name = match pattern {
-                        ast::Pattern::Identifier(n) => n.clone(),
-                        ast::Pattern::Typed { pattern, .. } => match &**pattern {
-                            ast::Pattern::Identifier(n) => n.clone(),
-                            _ => continue,
-                        },
-                        _ => continue,
-                    };
+                    let Some(name) = plain_name(pattern) else { continue };
                     if let ast::Expression::Lambda { params, body } = value {
                         // a method
-                        let stmts = match &**body {
-                            ast::Expression::Block(stmts) => stmts.clone(),
-                            other => vec![ast::Stmt { node: ast::Statement::Expression(other.clone()), line: s.line }],
-                        };
-                        self.declare_method(tid, &name, params, None, stmts, false, s.line);
+                        self.declare_method(tid, name, params, None, lambda_body_stmts(body, s.line), false, s.line);
                         continue;
                     }
-                    if self.types[tid].field_index(&name).is_some() {
+                    if self.types[tid].field_index(name).is_some() {
                         continue;
                     }
-                    let (_, fty) = self.add_field(tid, &name, *is_public);
-                    self.declare(&name, Binding::Member { root: name.clone(), root_ty: fty.clone(), path: vec![], ty: fty, mutable: *is_mutable });
+                    let (_, fty) = self.add_field(tid, name, *is_public);
+                    self.declare(name, Binding::Member { root: name.clone(), root_ty: fty.clone(), path: vec![], ty: fty, mutable: *is_mutable });
                 }
                 ast::Statement::Assignment { targets, .. } if matches!(targets.as_slice(), [(ast::Pattern::SpreadInto { .. }, _)]) => {
                     // the adopted parent's members show where it is adopted
@@ -239,11 +214,7 @@ impl Checker {
                     if let [(ast::Pattern::Identifier(name), ast::AssignmentOp::Assign)] = targets.as_slice() {
                         if let ast::Expression::Lambda { params, body } = value {
                             // a private method
-                            let stmts = match &**body {
-                                ast::Expression::Block(stmts) => stmts.clone(),
-                                other => vec![ast::Stmt { node: ast::Statement::Expression(other.clone()), line: s.line }],
-                            };
-                            self.declare_method(tid, name, params, None, stmts, false, s.line);
+                            self.declare_method(tid, name, params, None, lambda_body_stmts(body, s.line), false, s.line);
                             continue;
                         }
                         if self.types[tid].field_index(name).is_none() && self.lookup(name).is_none() {
@@ -260,27 +231,17 @@ impl Checker {
     /// `public var count = start` (or any binding) inside a constructor.
     pub(crate) fn check_member_declaration(&mut self, tid: TypeId, is_public: bool, is_mutable: bool, pattern: &ast::Pattern, value: &ast::Expression) -> Vec<Stmt> {
         let line = self.line;
-        let name = match pattern {
-            ast::Pattern::Identifier(n) => n.clone(),
-            ast::Pattern::Typed { pattern, .. } => match &**pattern {
-                ast::Pattern::Identifier(n) => n.clone(),
-                _ => {
-                    self.error(line, "members are declared with plain names");
-                    return vec![];
-                }
-            },
-            _ => {
-                if is_public {
-                    self.error(line, "members are declared with plain names");
-                    return vec![];
-                }
-                return self.check_let(pattern, value, is_mutable);
+        let Some(name) = plain_name(pattern).cloned() else {
+            if is_public || matches!(pattern, ast::Pattern::Typed { .. }) {
+                self.error(line, "members are declared with plain names");
+                return vec![];
             }
+            return self.check_let(pattern, value, is_mutable);
         };
         if let ast::Expression::Lambda { .. } = value {
             // a method: declared by the prescan, checked after the body
             if let Some(m) = self.types[tid].method(&name) {
-                self.ensure_def(m, line);
+                self.ensure_def(m);
             }
             return vec![];
         }
@@ -371,13 +332,7 @@ impl Checker {
                 self.declare(&f.name, Binding::Member { root: root.to_string(), root_ty: root_ty.clone(), path: p, ty: ftys[i].clone(), mutable: false });
             }
         }
-        let methods: Vec<(String, DefId)> = match &self.types[ptid].kind {
-            DataKind::Class { methods, .. } => methods.clone(),
-            _ => vec![],
-        };
-        for (n, m) in methods {
-            self.declare(&n, Binding::Func(m));
-        }
+        self.declare_methods(ptid);
         if let Some(gp) = self.types[ptid].parent_field()
             && let Type::Data(gtid, gargs) = self.shallow(&ftys[gp]) {
                 let mut p = path.clone();
@@ -417,16 +372,17 @@ impl Checker {
             Binding::Member { root, root_ty, path, ty, mutable } => (root.clone(), root_ty.clone(), path.clone(), ty.clone(), *mutable),
             _ => unreachable!(),
         };
-        if let FrameKind::Method(_) = self.frame_ref().kind {
-            self.frame().mutates_member = true;
-            if !mutable && path.is_empty() {
-                self.error(line, format!("cannot assign to member '{}': declare it with `var`", root));
+        match self.frame_ref().kind {
+            FrameKind::Method(_) => {
+                self.frame().mutates_member = true;
+                if !mutable && path.is_empty() {
+                    self.error(line, format!("cannot assign to member '{}': declare it with `var`", root));
+                }
             }
-        } else if let FrameKind::Ctor(_) = self.frame_ref().kind {
             // the constructor initializes freely
-        } else {
+            FrameKind::Ctor(_) => {}
             // a lambda inside a method: captured by value
-            self.error(line, format!("cannot assign to '{}' from a lambda; state that changes lives in the object", root));
+            _ => self.error(line, format!("cannot assign to '{}' from a lambda; state that changes lives in the object", root)),
         }
         self.unify(&ty, &value.ty, line);
         if path.is_empty() {
@@ -458,7 +414,6 @@ impl Checker {
         let frame_index = self.frames.len() - 1;
         let id = self.new_def(name, DefKind::Method { rec: tid, mutates: false, returns_value: false }, None, line);
         self.defs[id].unsafe_ = is_unsafe || self.frame_ref().unsafe_;
-        self.defs[id].class = Some(tid);
         self.defs[id].source = Some(Source {
             params: params.to_vec(),
             return_type,
@@ -484,32 +439,16 @@ impl Checker {
             let ret = self.frame_ref().ret.clone();
             self.unify(&ret, &t, line);
         }
-        let mut defaults: Vec<Option<Expr>> = vec![None];
-        defaults.extend(source.params.iter().zip(own.iter()).map(|(p, cp)| {
-            p.default.as_ref().map(|d| {
-                let x = self.check_expr(d, Some(&cp.ty));
-                self.unify(&cp.ty, &x.ty, line);
-                x
-            })
-        }));
-        let mut param_stmts = Vec::new();
-        for (p, ast_p) in own.iter().zip(source.params.iter()) {
-            param_stmts.extend(self.destructure_param(p, &ast_p.pattern));
-        }
+        // `self` has no default
+        let mut defaults = vec![None];
+        defaults.extend(self.check_defaults(&source.params, &own, line));
+        let param_stmts = self.destructure_params(&own, &source.params);
         params.extend(own);
-        let ptys: Vec<Type> = params.iter().map(|p| p.ty.clone()).collect();
         let ret = self.frame_ref().ret.clone();
-        let c = self.store.clos_singleton(self.defs[id].closure_id);
-        let fty = Type::Fn(ptys, Box::new(ret), c);
-        let mono = self.defs[id].mono.clone();
-        self.unify(&mono, &fty, line);
+        self.bind_mono(id, &params, ret, line);
         self.defs[id].params = params.clone();
         self.defs[id].defaults = defaults;
-        self.hoist_defs(&source.body);
-        let mut body = self.check_block_stmts(&source.body);
-        param_stmts.append(&mut body.stmts);
-        body.stmts = param_stmts;
-        self.finish_body_value(&mut body, line);
+        let body = self.check_def_body(param_stmts, &source.body, line);
         (params, body)
     }
 
@@ -531,6 +470,12 @@ impl Checker {
             }
         }
         // own methods, by bare name
+        self.declare_methods(tid);
+        vec![Param { name: self_name, ty: selft }]
+    }
+
+    /// Declare the methods of a class by bare name.
+    fn declare_methods(&mut self, tid: TypeId) {
         let methods: Vec<(String, DefId)> = match &self.types[tid].kind {
             DataKind::Class { methods, .. } => methods.clone(),
             _ => vec![],
@@ -538,7 +483,6 @@ impl Checker {
         for (n, m) in methods {
             self.declare(&n, Binding::Func(m));
         }
-        vec![Param { name: self_name, ty: selft }]
     }
 
     /// A mutating method answers the rebuilt receiver (and its value).
@@ -556,18 +500,13 @@ impl Checker {
         });
     }
 
-    /// The type a method's receiver has: its own class.
-    pub(crate) fn class_self_type_for_method(&self, m: DefId) -> Type {
-        match self.defs[m].class {
-            Some(tid) => self.class_self_type(tid),
-            None => Type::Unit,
-        }
-    }
-
     /// The object a method is called on: the receiver itself, or the
     /// adopted parent that owns the method.
     pub(crate) fn receiver_for(&mut self, recv: Expr, tid: TypeId, m: DefId) -> Expr {
-        let owner = self.defs[m].class.unwrap_or(tid);
+        let owner = match self.defs[m].kind {
+            DefKind::Method { rec, .. } => rec,
+            _ => tid,
+        };
         if owner == tid {
             return recv;
         }
@@ -586,13 +525,14 @@ impl Checker {
             _ => parent,
         }
     }
+}
 
-    /// After a mutating method: store the new object back where the
-    /// receiver came from, wrapping a parent back into its child.
-    /// `recv` is the receiver as the method sees it (already the adopted
-    /// parent when the method is inherited).
-    pub(crate) fn rebind_receiver(&mut self, recv: &Expr, new_obj: Expr, _tid: TypeId, _m: DefId) -> Vec<Stmt> {
-        self.rebind_path(recv, new_obj)
+/// The statements of a lambda's body (an expression body is one
+/// statement).
+fn lambda_body_stmts(body: &ast::Expression, line: usize) -> Vec<ast::Stmt> {
+    match body {
+        ast::Expression::Block(stmts) => stmts.clone(),
+        other => vec![ast::Stmt { node: ast::Statement::Expression(other.clone()), line }],
     }
 }
 

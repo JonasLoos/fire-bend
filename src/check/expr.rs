@@ -6,7 +6,7 @@
 use super::*;
 
 /// Global builtins by name, when the name is not shadowed by a binding.
-const GLOBALS: &[&str] = &[
+pub(crate) const GLOBALS: &[&str] = &[
     "print", "len", "sum", "min", "max", "abs", "round", "sorted", "reversed", "range", "error", "assert", "str", "int", "float",
 ];
 
@@ -91,11 +91,8 @@ impl Checker {
                 self.error(line, "`...` is only valid inside a list pattern");
                 self.lit(Lit::Nothing)
             }
-            ast::Expression::PreviousResult => match self.frame_ref().piped.last().cloned() {
-                Some(t) => {
-                    let name = format!("__pipe{}", self.frame_ref().piped.len());
-                    self.var(&name, t)
-                }
+            ast::Expression::PreviousResult => match self.frame_ref().piped.clone() {
+                Some(t) => self.var("__pipe1", t),
                 None => {
                     self.error(line, "`$` is only valid on the right of a pipeline operator");
                     let t = self.fresh();
@@ -163,7 +160,7 @@ impl Checker {
                 }
             },
             ast::Expression::Lambda { params, body } => self.check_lambda(params, body),
-            ast::Expression::Block(stmts) => self.check_block_expr(stmts, expected),
+            ast::Expression::Block(stmts) => self.check_block_expr(stmts),
             ast::Expression::Call { function, args, named_args } => self.check_call(function, args, named_args, expected),
             ast::Expression::MemberAccess { object, member } => self.check_member(object, member),
             ast::Expression::SpreadMember { .. } => {
@@ -226,12 +223,11 @@ impl Checker {
                 self.def_value(d, name)
             }
             Some(Binding::Ctor(tid, ci)) => {
-                let (t, subst) = self.instantiate_type(tid);
+                let (t, _) = self.instantiate_type(tid);
                 let fields = self.types[tid].ctors[ci].fields.len();
                 if fields > 0 {
                     self.error(line, format!("the constructor {} takes {} field(s): call it", name, fields));
                 }
-                let _ = subst;
                 if let Some(e) = expected {
                     self.unify(e, &t, line);
                 }
@@ -249,7 +245,6 @@ impl Checker {
         }
     }
 
-    /// A def used as a value.
     /// A def that captures bindings of the program's top level needs them
     /// from whoever calls it: the caller captures them too.
     pub(crate) fn capture_through(&mut self, d: DefId) {
@@ -262,9 +257,10 @@ impl Checker {
         }
     }
 
+    /// A def used as a value.
     fn def_value(&mut self, d: DefId, name: &str) -> Expr {
         let line = self.line;
-        self.ensure_def(d, line);
+        self.ensure_def(d);
         self.capture_through(d);
         let nested = self.defs[d].unit != d && !matches!(self.defs[d].kind, DefKind::Method { .. });
         if nested && !self.defs[d].captures.is_empty() {
@@ -445,14 +441,12 @@ impl Checker {
         }
         let id = self.record_shape(names.clone(), line);
         let (t, subst) = self.instantiate_type(id);
-        // order the values by the shape's (sorted) field order
-        let dt = self.types[id].clone();
-        let mut ordered: Vec<Option<Expr>> = (0..dt.ctors[0].fields.len()).map(|_| None).collect();
+        // order the values by the shape's (sorted) field order, one
+        // parameter per field
+        let mut ordered: Vec<Option<Expr>> = (0..subst.len()).map(|_| None).collect();
         for (n, x) in names.iter().zip(values.into_iter()) {
-            let idx = dt.field_index(n).unwrap();
-            let param = dt.params[idx];
-            let fv = subst.iter().find(|(v, _)| *v == param).map(|(_, t)| t.clone()).unwrap();
-            self.unify(&fv, &x.ty, line);
+            let idx = self.types[id].field_index(n).unwrap();
+            self.unify(&subst[idx].1, &x.ty, line);
             if ordered[idx].is_some() {
                 self.error(line, format!("duplicate field {}", n));
             }
@@ -579,10 +573,10 @@ impl Checker {
                 // an operator a class defines: a method call, the right operand free
                 if let Type::Data(tid, _) = self.shallow(&a.ty)
                     && !matches!(self.types[tid].kind, DataKind::Builtin)
-                        && let Some(m) = self.method_through_parents(tid, aop.symbol()) {
-                            let _ = m;
-                            return self.method_call_on(a, aop.symbol(), std::slice::from_ref(right), &[], expected, line);
-                        }
+                    && self.method_through_parents(tid, aop.symbol()).is_some()
+                {
+                    return self.method_call_on(a, aop.symbol(), std::slice::from_ref(right), &[], expected, line);
+                }
                 let b = self.check_expr(right, Some(&a.ty));
                 let (a, b) = self.adapt_literals(a, b);
                 self.unify(&a.ty, &b.ty, line);
@@ -611,21 +605,15 @@ impl Checker {
     fn adapt_literals(&mut self, a: Expr, b: Expr) -> (Expr, Expr) {
         let af = matches!(self.shallow(&a.ty), Type::Float);
         let bf = matches!(self.shallow(&b.ty), Type::Float);
-        let a = match (&a.kind, bf) {
-            (ExprKind::Lit(Lit::Int(i)), true) => {
-                let i = *i;
-                self.lit(Lit::Float(i as f64))
-            }
-            _ => a,
-        };
-        let b = match (&b.kind, af) {
-            (ExprKind::Lit(Lit::Int(i)), true) => {
-                let i = *i;
-                self.lit(Lit::Float(i as f64))
-            }
-            _ => b,
-        };
-        (a, b)
+        (self.float_literal_if(a, bf), self.float_literal_if(b, af))
+    }
+
+    /// An int literal as a float literal, when `float` says so.
+    pub(crate) fn float_literal_if(&mut self, x: Expr, float: bool) -> Expr {
+        match x.kind {
+            ExprKind::Lit(Lit::Int(i)) if float => self.lit(Lit::Float(i as f64)),
+            _ => x,
+        }
     }
 
     // -- lambdas and blocks ----------------------------------------------------
@@ -633,48 +621,19 @@ impl Checker {
     /// A lambda: a new def in the current unit, checked in its own frame.
     pub(crate) fn check_lambda(&mut self, params: &[ast::Param], body: &ast::Expression) -> Expr {
         let line = self.line;
-        self.lambda_counter += 1;
-        let name = format!("fn{}", self.lambda_counter);
-        let unit = Some(self.unit());
-        let id = self.new_def(&name, DefKind::Lambda, unit, line);
-        self.defs[id].unsafe_ = self.frame_ref().unsafe_;
-        self.defs[id].state = State::InProgress;
+        let id = self.new_lambda("fn", true);
         let ret = self.fresh();
-        self.frames.push(Frame {
-            def: id,
-            kind: FrameKind::Plain,
-            scopes: vec![Scope::default()],
-            captures: Vec::new(),
-            loop_depth: 0,
-            returns: Vec::new(),
-            ret: ret.clone(),
-            mutates_member: false,
-            piped: Vec::new(),
-            unsafe_: self.defs[id].unsafe_,
-        });
+        self.push_lambda_frame(id, ret.clone());
         let own = self.check_params(params, line);
-        let defaults: Vec<Option<Expr>> = params.iter().zip(own.iter()).map(|(p, cp)| {
-            p.default.as_ref().map(|d| {
-                let x = self.check_expr(d, Some(&cp.ty));
-                self.unify(&cp.ty, &x.ty, line);
-                x
-            })
-        }).collect();
-        let mut param_stmts = Vec::new();
-        for (p, ast_p) in own.iter().zip(params.iter()) {
-            param_stmts.extend(self.destructure_param(p, &ast_p.pattern));
-        }
-        let param_types: Vec<Type> = own.iter().map(|p| p.ty.clone()).collect();
-        let c = self.store.clos_singleton(self.defs[id].closure_id);
-        let fty = Type::Fn(param_types, Box::new(ret.clone()), c);
-        let mono = self.defs[id].mono.clone();
-        self.unify(&mono, &fty, line);
+        let defaults = self.check_defaults(params, &own, line);
+        let param_stmts = self.destructure_params(&own, params);
+        let fty = self.bind_mono(id, &own, ret.clone(), line);
         self.defs[id].params = own.clone();
         self.defs[id].defaults = defaults;
         // calls hoisted out of the body stay in the body, not in front of
         // the statement that makes the lambda
         let outer = std::mem::take(&mut self.pending);
-        let mut body_block = match body {
+        let body_block = match body {
             ast::Expression::Block(stmts) => {
                 self.hoist_defs(stmts);
                 self.check_block_stmts(stmts)
@@ -687,37 +646,61 @@ impl Checker {
             }
         };
         self.pending = outer;
-        let mut stmts = param_stmts;
-        stmts.append(&mut body_block.stmts);
-        body_block.stmts = stmts;
+        let mut body_block = Block { stmts: param_stmts.into_iter().chain(body_block.stmts).collect() };
         self.finish_body_value(&mut body_block, line);
         let frame = self.frames.pop().unwrap();
-        let captures = frame.captures.clone();
         self.solve_pending();
-        let ret = self.join_returns_of(&frame, ret);
-        let fty = Type::Fn(own.iter().map(|p| p.ty.clone()).collect(), Box::new(ret.clone()), c);
+        self.finish_lambda(id, own, ret, body_block, frame.captures, Some(fty))
+    }
+
+    /// A new lambda def in the current unit, in progress. With
+    /// `inherit_unsafe` it takes the enclosing def's `unsafe` flag.
+    fn new_lambda(&mut self, prefix: &str, inherit_unsafe: bool) -> DefId {
+        self.lambda_counter += 1;
+        let unit = Some(self.unit());
+        let id = self.new_def(&format!("{}{}", prefix, self.lambda_counter), DefKind::Lambda, unit, self.line);
+        if inherit_unsafe {
+            self.defs[id].unsafe_ = self.frame_ref().unsafe_;
+        }
+        self.defs[id].state = State::InProgress;
+        id
+    }
+
+    /// The frame a lambda's body is checked in.
+    fn push_lambda_frame(&mut self, id: DefId, ret: Type) {
+        let unsafe_ = self.frame_ref().unsafe_;
+        self.frames.push(Frame::new(id, FrameKind::Plain, ret, unsafe_));
+    }
+
+    /// Complete a lambda def and answer it as a value. Its type is `fty`
+    /// when already made, otherwise made here.
+    fn finish_lambda(&mut self, id: DefId, params: Vec<Param>, ret: Type, body: Block, captures: Vec<(String, Type)>, fty: Option<Type>) -> Expr {
+        let fty = fty.unwrap_or_else(|| {
+            let c = self.store.clos_singleton(id);
+            Type::Fn(params.iter().map(|p| p.ty.clone()).collect(), Box::new(ret.clone()), c)
+        });
         let d = &mut self.defs[id];
-        d.params = own;
+        d.params = params;
         d.ret = ret;
-        d.body = body_block;
+        d.body = body;
         d.captures = captures;
         d.scheme = Some(Scheme { vars: vec![], dicts: vec![], ty: fty.clone() });
         d.state = State::Done;
         self.expr(ExprKind::Lambda(id), fty)
     }
 
-    fn join_returns_of(&mut self, _frame: &Frame, ret: Type) -> Type {
-        ret
+    /// `name = value`, then `x`, as one block value (its statements at
+    /// `line`).
+    fn let_in(&mut self, name: String, value: Expr, x: Expr, line: usize) -> Expr {
+        let ty = x.ty.clone();
+        let block = Block { stmts: vec![Stmt { kind: StmtKind::Let { name, value }, line }, Stmt { kind: StmtKind::Expr(x), line }] };
+        self.expr(ExprKind::Block(block), ty)
     }
 
     /// A block used as a value: its last expression statement.
-    pub(crate) fn check_block_expr(&mut self, stmts: &[ast::Stmt], expected: Option<&Type>) -> Expr {
+    pub(crate) fn check_block_expr(&mut self, stmts: &[ast::Stmt]) -> Expr {
         let line = self.line;
-        self.push_scope();
-        self.hoist_defs(stmts);
-        let mut block = self.check_block_stmts(stmts);
-        self.pop_scope();
-        let _ = expected;
+        let mut block = self.check_scoped(stmts);
         // a branch may leave (`{err} => return ..`): the branches that fall
         // through make the value, and binding it becomes a statement
         // (`lift_exits`); anywhere else such a value is reported there
@@ -744,7 +727,7 @@ impl Checker {
         let mut names: Vec<String> = Vec::new();
         let mut declared: Vec<String> = Vec::new();
         let mut note = |b: &Block| {
-            effects::for_each_stmt(b, &mut |s: &Stmt| match &s.kind {
+            for_each_stmt(b, &mut |s: &Stmt| match &s.kind {
                 StmtKind::Assign { name, .. } if !names.contains(name) => names.push(name.clone()),
                 StmtKind::Let { name, .. } => declared.push(name.clone()),
                 _ => {}
@@ -841,11 +824,11 @@ impl Checker {
                 }
                 if let ast::Expression::Identifier(n) = &**object
                     && n == "self"
-                        && let FrameKind::Ctor(tid) | FrameKind::Method(tid) = self.frame_ref().kind
-                            && let Some(m) = self.method_through_parents(tid, member) {
-                                let _ = m;
-                                return self.call_def_by_name(member, args, named, expected);
-                            }
+                    && let FrameKind::Ctor(tid) | FrameKind::Method(tid) = self.frame_ref().kind
+                    && self.method_through_parents(tid, member).is_some()
+                {
+                    return self.call_def_by_name(member, args, named, expected);
+                }
                 return self.check_method_call(object, member, args, named, expected);
             }
             _ => {}
@@ -950,7 +933,7 @@ impl Checker {
 
     fn call_def(&mut self, d: DefId, name: &str, args: &[ast::Expression], named: &[(String, ast::Expression)], expected: Option<&Type>) -> Expr {
         let line = self.line;
-        self.ensure_def(d, line);
+        self.ensure_def(d);
         self.capture_through(d);
         let nested = self.defs[d].unit != d && !matches!(self.defs[d].kind, DefKind::Method { .. });
         if nested && !self.defs[d].captures.is_empty() && self.defs[d].state == State::Done {
@@ -1028,7 +1011,7 @@ impl Checker {
             if classes.len() == 1 && solve::unique_receiver(&mut self.store, member).is_none() && solve::method_sig(&mut self.store, &Type::Str, member, args.len()).is_none() {
                 let tid = classes[0];
                 if let DataKind::Class { ctor, .. } = self.types[tid].kind {
-                    self.ensure_def(ctor, line);
+                    self.ensure_def(ctor);
                 }
                 let (t, _) = self.instantiate_type(tid);
                 self.unify(&recv.ty, &t, line);
@@ -1091,7 +1074,6 @@ impl Checker {
         all.extend(xs);
         let subject = all[0].ty.clone();
         let e = self.dict(Class::Method(member.to_string(), atys, ret.clone()), subject, all, ret.clone(), line);
-        let _ = expected;
         // `pop` answers (container, value): the container is stored back
         // into a variable, and dropped, in place, from a value that is not one
         if member == "pop" {
@@ -1117,16 +1099,11 @@ impl Checker {
     /// call in front of the statement and rebinds the variable.
     fn call_class_method(&mut self, recv: Expr, tid: TypeId, m: DefId, member: &str, args: &[ast::Expression], named: &[(String, ast::Expression)], expected: Option<&Type>) -> Expr {
         let line = self.line;
-        self.ensure_def(m, line);
+        self.ensure_def(m);
         let (fty, targs, dicts) = self.instantiate_def_type(m, line);
         let params = self.instantiated_params(m, &fty);
-        let mut xs = vec![recv];
         // the receiver seen by the method is the object that owns it
-        let owner_ty = self.class_self_type_for_method(m);
-        let recv_expr = xs.pop().unwrap();
-        let recv_expr = self.receiver_for(recv_expr, tid, m);
-        let _ = owner_ty;
-        xs.push(recv_expr);
+        let mut xs = vec![self.receiver_for(recv, tid, m)];
         let rest = self.arrange_args(m, member, &params, args, named, 1);
         xs.extend(rest);
         let ret = self.fresh();
@@ -1161,7 +1138,7 @@ impl Checker {
             self.var(&tmp, ret.clone())
         };
         // a method that answers nothing only changes its receiver
-        let rebinds = if returns_value { self.rebind_receiver(&recv_expr, new_obj, tid, m) } else { self.rebind_change(&recv_expr, new_obj) };
+        let rebinds = if returns_value { self.rebind_path(&recv_expr, new_obj) } else { self.rebind_change(&recv_expr, new_obj) };
         self.pending.extend(rebinds);
         if returns_value {
             let vt = match self.shallow(&ret) {
@@ -1178,12 +1155,10 @@ impl Checker {
     // -- members and indexing ------------------------------------------------------
 
     fn check_member(&mut self, object: &ast::Expression, member: &str) -> Expr {
-        let line = self.line;
         if let ast::Expression::Import(m) = object {
             return self.module_value(m, member);
         }
         let recv = self.check_expr(object, None);
-        let _ = line;
         self.check_member_of(recv, member)
     }
 
@@ -1192,11 +1167,9 @@ impl Checker {
         let rt = self.shallow(&recv.ty);
         if let Type::Data(tid, _) = &rt {
             let tid = *tid;
-            if self.types[tid].field_index(member).is_none()
-                && let Some(m) = self.method_through_parents(tid, member) {
-                    self.error(line, format!("{}.{} is a method: call it, or wrap it in a lambda", self.types[tid].name, member));
-                    let _ = m;
-                }
+            if self.types[tid].field_index(member).is_none() && self.method_through_parents(tid, member).is_some() {
+                self.error(line, format!("{}.{} is a method: call it, or wrap it in a lambda", self.types[tid].name, member));
+            }
         }
         let ty = self.fresh();
         let subject = recv.ty.clone();
@@ -1415,23 +1388,10 @@ impl Checker {
         let line = self.line;
         if mentions_dollar(right) {
             // a synthetic lambda `$ => right`
-            self.lambda_counter += 1;
-            let id = self.new_def(&format!("stage{}", self.lambda_counter), DefKind::Lambda, Some(self.unit()), line);
-            self.defs[id].unsafe_ = self.frame_ref().unsafe_;
-            self.defs[id].state = State::InProgress;
+            let id = self.new_lambda("stage", true);
             let ret = self.fresh();
-            self.frames.push(Frame {
-                def: id,
-                kind: FrameKind::Plain,
-                scopes: vec![Scope::default()],
-                captures: Vec::new(),
-                loop_depth: 0,
-                returns: Vec::new(),
-                ret: ret.clone(),
-                mutates_member: false,
-                piped: vec![input.clone()],
-                unsafe_: self.defs[id].unsafe_,
-            });
+            self.push_lambda_frame(id, ret.clone());
+            self.frame().piped = Some(input.clone());
             let pname = "__pipe1".to_string();
             self.declare(&pname, Binding::Local { ty: input.clone(), mutable: false });
             let outer = std::mem::take(&mut self.pending);
@@ -1441,17 +1401,8 @@ impl Checker {
             let mut body = Block { stmts };
             self.finish_body_value(&mut body, line);
             let frame = self.frames.pop().unwrap();
-            let captures = frame.captures.clone();
-            let c = self.store.clos_singleton(self.defs[id].closure_id);
-            let fty = Type::Fn(vec![input.clone()], Box::new(ret.clone()), c);
-            let d = &mut self.defs[id];
-            d.params = vec![Param { name: pname, ty: input.clone() }];
-            d.ret = ret;
-            d.body = body;
-            d.captures = captures;
-            d.scheme = Some(Scheme { vars: vec![], dicts: vec![], ty: fty.clone() });
-            d.state = State::Done;
-            return self.expr(ExprKind::Lambda(id), fty);
+            let params = vec![Param { name: pname, ty: input.clone() }];
+            return self.finish_lambda(id, params, ret, body, frame.captures, None);
         }
         self.check_expr(right, None)
     }
@@ -1476,9 +1427,9 @@ impl Checker {
                 self.apply(f, vec![l])
             }
             P::Map | P::Filter => {
-                let (list_ty, wrapped_err) = match &lt {
-                    Type::Data(RESULT, args) => (self.shallow(&args[1]), Some(args[0].clone())),
-                    other => (other.clone(), None),
+                let list_ty = match &lt {
+                    Type::Data(RESULT, args) => self.shallow(&args[1]),
+                    other => other.clone(),
                 };
                 let elem = match &list_ty {
                     Type::List(e) => (**e).clone(),
@@ -1519,71 +1470,40 @@ impl Checker {
                     },
                     _ => elem.clone(),
                 };
-                let base = match wrapped_err {
-                    Some(_) => {
-                        let inner_list = self.var("__railway", list_ty.clone());
-                        let _ = inner_list;
-                        l
-                    }
-                    None => l,
-                };
-                let recv_ty = if let Type::Data(RANGE, _) = list_ty { Type::range() } else { Type::list(elem.clone()) };
-                let recv = if let Type::Data(RESULT, _) = &lt { base } else { base };
-                let result_ty = Type::list(out_elem.clone());
+                let recv_ty = if let Type::Data(RANGE, _) = list_ty { Type::range() } else { Type::list(elem) };
+                let result_ty = Type::list(out_elem);
                 if let Type::Data(RESULT, args) = &lt {
-                    let (e, _) = (args[0].clone(), args[1].clone());
-                    let stage_call = |ck: &mut Checker, v: Expr| -> Expr {
-                        ck.dict(Class::Method(stage.into(), vec![f.ty.clone()], result_ty.clone()), recv_ty.clone(), vec![v, f.clone()], result_ty.clone(), line)
-                    };
+                    let e = args[0].clone();
                     let tmp = self.temp("rw");
-                    let v = self.var(&tmp, list_ty.clone());
-                    let applied = stage_call(self, v);
-                    let done = self.expr(ExprKind::Con(RESULT, 1, vec![applied]), Type::result(e.clone(), result_ty.clone()));
-                    let et = self.temp("err");
-                    let ev = self.var(&et, e.clone());
-                    let fail = self.expr(ExprKind::Con(RESULT, 0, vec![ev]), Type::result(e.clone(), result_ty.clone()));
-                    let arms = vec![
-                        Arm { pat: Pat::Con(RESULT, 1, vec![Pat::Bind(tmp)]), guard: None, body: done, line },
-                        Arm { pat: Pat::Con(RESULT, 0, vec![Pat::Bind(et)]), guard: None, body: fail, line },
-                    ];
-                    return self.expr(ExprKind::Match(Box::new(recv), arms), Type::result(e, result_ty));
+                    let v = self.var(&tmp, list_ty);
+                    let applied = self.dict(Class::Method(stage.into(), vec![f.ty.clone()], result_ty.clone()), recv_ty, vec![v, f], result_ty.clone(), line);
+                    let rt = Type::result(e.clone(), result_ty);
+                    let done = self.expr(ExprKind::Con(RESULT, 1, vec![applied]), rt.clone());
+                    return self.pass_errors(l, tmp, done, &e, rt, line);
                 }
-                self.dict(Class::Method(stage.into(), vec![f.ty.clone()], result_ty.clone()), recv_ty, vec![recv, f], result_ty, line)
+                self.dict(Class::Method(stage.into(), vec![f.ty.clone()], result_ty.clone()), recv_ty, vec![l, f], result_ty, line)
             }
             P::Handle => {
-                match &lt {
-                    Type::Data(RESULT, args) => {
-                        let (e, a) = (args[0].clone(), args[1].clone());
-                        let h = self.handler(right, &e, &a);
-                        self.handle_one(l, h, e, a)
-                    }
-                    Type::List(elem) => match self.shallow(elem) {
-                        Type::Data(RESULT, args) => {
-                            let (e, a) = (args[0].clone(), args[1].clone());
-                            let h = self.handler(right, &e, &a);
-                            // per element
-                            self.lambda_counter += 1;
-                            let hv = self.temp("h");
-                            let hl = self.var(&hv, h.ty.clone());
-                            let f = self.handle_lambda(hl, e.clone(), a.clone());
-                            let out = Type::list(a.clone());
-                            let call = self.dict(Class::Method("map".into(), vec![f.ty.clone()], out.clone()), Type::list(elem.as_ref().clone()), vec![l, f], out.clone(), line);
-                            let block = Block { stmts: vec![
-                                Stmt { kind: StmtKind::Let { name: hv, value: h }, line },
-                                Stmt { kind: StmtKind::Expr(call), line },
-                            ] };
-                            self.expr(ExprKind::Block(block), out)
-                        }
-                        _ => {
-                            self.error(line, "`!>` needs a result (or a list of results) on the left");
-                            l
-                        }
-                    },
-                    _ => {
-                        self.error(line, "`!>` needs a result (or a list of results) on the left");
-                        l
-                    }
+                if let Type::Data(RESULT, args) = &lt {
+                    let (e, a) = (args[0].clone(), args[1].clone());
+                    let h = self.handler(right, &e, &a);
+                    return self.handle_one(l, h, e, a);
                 }
+                if let Type::List(elem) = &lt
+                    && let Type::Data(RESULT, args) = self.shallow(elem)
+                {
+                    let (e, a) = (args[0].clone(), args[1].clone());
+                    let h = self.handler(right, &e, &a);
+                    // per element
+                    let hv = self.temp("h");
+                    let hl = self.var(&hv, h.ty.clone());
+                    let f = self.handle_lambda(hl, e, a.clone());
+                    let out = Type::list(a);
+                    let call = self.dict(Class::Method("map".into(), vec![f.ty.clone()], out.clone()), Type::list(elem.as_ref().clone()), vec![l, f], out, line);
+                    return self.let_in(hv, h, call, line);
+                }
+                self.error(line, "`!>` needs a result (or a list of results) on the left");
+                l
             }
         }
     }
@@ -1621,61 +1541,63 @@ impl Checker {
     /// `result |> f`: apply f to the ok value; a stage answering a result
     /// binds, one answering a value maps.
     fn railway(&mut self, l: Expr, f: Expr, e: Type, a: Type) -> Expr {
-        let line = self.line;
         let tmp = self.temp("ok");
-        let v = self.var(&tmp, a.clone());
+        let v = self.var(&tmp, a);
         let applied = self.apply(f, vec![v]);
+        let (done, rt) = self.bind_or_wrap(applied, &e);
+        let line = self.line;
+        self.pass_errors(l, tmp, done, &e, rt, line)
+    }
+
+    /// A stage's value on an ok value as a result of error type `e`: a
+    /// result binds, any other value is wrapped as the ok value.
+    fn bind_or_wrap(&mut self, applied: Expr, e: &Type) -> (Expr, Type) {
+        let line = self.line;
         let out_a = match self.shallow(&applied.ty) {
             Type::Data(RESULT, args) => {
-                self.unify(&e, &args[0], line);
+                self.unify(e, &args[0], line);
                 args[1].clone()
             }
             other => other,
         };
-        let rt = Type::result(e.clone(), out_a.clone());
+        let rt = Type::result(e.clone(), out_a);
         let done = match self.shallow(&applied.ty) {
             Type::Data(RESULT, _) => applied,
             _ => self.expr(ExprKind::Con(RESULT, 1, vec![applied]), rt.clone()),
         };
+        (done, rt)
+    }
+
+    /// `match subject: Done(ok) => done; Fail(err) => Fail(err)`, answering
+    /// the result type `rt` (its arms at `line`).
+    fn pass_errors(&mut self, subject: Expr, ok: String, done: Expr, e: &Type, rt: Type, line: usize) -> Expr {
         let et = self.temp("err");
         let ev = self.var(&et, e.clone());
         let fail = self.expr(ExprKind::Con(RESULT, 0, vec![ev]), rt.clone());
         let arms = vec![
-            Arm { pat: Pat::Con(RESULT, 1, vec![Pat::Bind(tmp)]), guard: None, body: done, line },
+            Arm { pat: Pat::Con(RESULT, 1, vec![Pat::Bind(ok)]), guard: None, body: done, line },
             Arm { pat: Pat::Con(RESULT, 0, vec![Pat::Bind(et)]), guard: None, body: fail, line },
         ];
-        self.expr(ExprKind::Match(Box::new(l), arms), rt)
+        self.expr(ExprKind::Match(Box::new(subject), arms), rt)
     }
 
     /// A stage over elements that are results: apply to ok values, pass
     /// errs along (a filter keeps them).
     fn lift_stage(&mut self, f: Expr, e: Type, a: Type, is_filter: bool) -> Expr {
         let line = self.line;
-        self.lambda_counter += 1;
-        let id = self.new_def(&format!("rail{}", self.lambda_counter), DefKind::Lambda, Some(self.unit()), line);
-        self.defs[id].state = State::InProgress;
+        let id = self.new_lambda("rail", false);
         let fv = self.temp("f");
         let elem_ty = Type::result(e.clone(), a.clone());
         let p = "__elem".to_string();
         let ret = self.fresh();
-        self.frames.push(Frame {
-            def: id,
-            kind: FrameKind::Plain,
-            scopes: vec![Scope::default()],
-            captures: vec![(fv.clone(), f.ty.clone())],
-            loop_depth: 0,
-            returns: Vec::new(),
-            ret: ret.clone(),
-            mutates_member: false,
-            piped: Vec::new(),
-            unsafe_: self.frame_ref().unsafe_,
-        });
+        self.push_lambda_frame(id, ret.clone());
+        self.frame().captures.push((fv.clone(), f.ty.clone()));
         self.declare(&p, Binding::Local { ty: elem_ty.clone(), mutable: false });
         self.declare(&fv, Binding::Local { ty: f.ty.clone(), mutable: false });
         let subject = self.var(&p, elem_ty.clone());
         let fvar = self.var(&fv, f.ty.clone());
         let ok = self.temp("ok");
-        let okv = self.var(&ok, a.clone());
+        let okv = self.var(&ok, a);
         let applied = self.apply(fvar, vec![okv]);
         let body = if is_filter {
             self.unify(&Type::Bool, &applied.ty, line);
@@ -1688,47 +1610,18 @@ impl Checker {
             self.unify(&ret, &Type::Bool, line);
             self.expr(ExprKind::Match(Box::new(subject), arms), Type::Bool)
         } else {
-            let out_a = match self.shallow(&applied.ty) {
-                Type::Data(RESULT, args) => {
-                    self.unify(&e, &args[0], line);
-                    args[1].clone()
-                }
-                other => other,
-            };
-            let rt = Type::result(e.clone(), out_a);
-            let done = match self.shallow(&applied.ty) {
-                Type::Data(RESULT, _) => applied,
-                _ => self.expr(ExprKind::Con(RESULT, 1, vec![applied]), rt.clone()),
-            };
-            let et = self.temp("err");
-            let ev = self.var(&et, e.clone());
-            let fail = self.expr(ExprKind::Con(RESULT, 0, vec![ev]), rt.clone());
-            let arms = vec![
-                Arm { pat: Pat::Con(RESULT, 1, vec![Pat::Bind(ok)]), guard: None, body: done, line },
-                Arm { pat: Pat::Con(RESULT, 0, vec![Pat::Bind(et)]), guard: None, body: fail, line },
-            ];
-            self.unify(&ret, &rt, line);
-            self.expr(ExprKind::Match(Box::new(subject), arms), rt)
+            let (done, rt) = self.bind_or_wrap(applied, &e);
+            let body = self.pass_errors(subject, ok, done, &e, rt, line);
+            self.unify(&ret, &body.ty, line);
+            body
         };
         let mut block = Block { stmts: vec![Stmt { kind: StmtKind::Expr(body), line }] };
         self.finish_body_value(&mut block, line);
         let frame = self.frames.pop().unwrap();
-        let c = self.store.clos_singleton(self.defs[id].closure_id);
-        let fty = Type::Fn(vec![elem_ty.clone()], Box::new(ret.clone()), c);
-        let d = &mut self.defs[id];
-        d.params = vec![Param { name: p, ty: elem_ty }];
-        d.ret = ret;
-        d.body = block;
-        d.captures = frame.captures;
-        d.scheme = Some(Scheme { vars: vec![], dicts: vec![], ty: fty.clone() });
-        d.state = State::Done;
+        let params = vec![Param { name: p, ty: elem_ty }];
+        let lam = self.finish_lambda(id, params, ret, block, frame.captures, None);
         // bind the stage function under the captured name before use
-        let lam = self.expr(ExprKind::Lambda(id), fty.clone());
-        let block = Block { stmts: vec![
-            Stmt { kind: StmtKind::Let { name: fv, value: f }, line },
-            Stmt { kind: StmtKind::Expr(lam), line },
-        ] };
-        self.expr(ExprKind::Block(block), fty)
+        self.let_in(fv, f, lam, line)
     }
 
     /// The handler of `!>`: a function of the error, a stage over `$`, or a
@@ -1752,28 +1645,13 @@ impl Checker {
     /// `_ => value` as a lambda over the error type.
     fn const_lambda(&mut self, value: Expr, param_ty: Type) -> Expr {
         let line = self.line;
-        self.lambda_counter += 1;
-        let id = self.new_def(&format!("const{}", self.lambda_counter), DefKind::Lambda, Some(self.unit()), line);
-        self.defs[id].state = State::InProgress;
+        let id = self.new_lambda("const", false);
         let vname = self.temp("v");
         let vt = value.ty.clone();
-        let p = "__ignored".to_string();
         let body = Block { stmts: vec![Stmt { kind: StmtKind::Return(Expr { kind: ExprKind::Var(vname.clone()), ty: vt.clone(), line }), line }] };
-        let c = self.store.clos_singleton(self.defs[id].closure_id);
-        let fty = Type::Fn(vec![param_ty.clone()], Box::new(vt.clone()), c);
-        let d = &mut self.defs[id];
-        d.params = vec![Param { name: p, ty: param_ty }];
-        d.ret = vt.clone();
-        d.body = body;
-        d.captures = vec![(vname.clone(), vt.clone())];
-        d.scheme = Some(Scheme { vars: vec![], dicts: vec![], ty: fty.clone() });
-        d.state = State::Done;
-        let lam = self.expr(ExprKind::Lambda(id), fty.clone());
-        let block = Block { stmts: vec![
-            Stmt { kind: StmtKind::Let { name: vname, value }, line },
-            Stmt { kind: StmtKind::Expr(lam), line },
-        ] };
-        self.expr(ExprKind::Block(block), fty)
+        let params = vec![Param { name: "__ignored".to_string(), ty: param_ty }];
+        let lam = self.finish_lambda(id, params, vt.clone(), body, vec![(vname.clone(), vt)], None);
+        self.let_in(vname, value, lam, line)
     }
 
     /// `match r: Done(v) => v; Fail(e) => h(e)`
@@ -1795,27 +1673,15 @@ impl Checker {
     /// A lambda `r => match r ...` handling one result with `h` (a local).
     fn handle_lambda(&mut self, h: Expr, e: Type, a: Type) -> Expr {
         let line = self.line;
-        self.lambda_counter += 1;
-        let id = self.new_def(&format!("handle{}", self.lambda_counter), DefKind::Lambda, Some(self.unit()), line);
-        self.defs[id].state = State::InProgress;
+        let id = self.new_lambda("handle", false);
         let hname = match &h.kind {
             ExprKind::Var(n) => n.clone(),
             _ => unreachable!(),
         };
         let elem_ty = Type::result(e.clone(), a.clone());
         let p = "__elem".to_string();
-        self.frames.push(Frame {
-            def: id,
-            kind: FrameKind::Plain,
-            scopes: vec![Scope::default()],
-            captures: vec![(hname.clone(), h.ty.clone())],
-            loop_depth: 0,
-            returns: Vec::new(),
-            ret: a.clone(),
-            mutates_member: false,
-            piped: Vec::new(),
-            unsafe_: self.frame_ref().unsafe_,
-        });
+        self.push_lambda_frame(id, a.clone());
+        self.frame().captures.push((hname.clone(), h.ty.clone()));
         self.declare(&p, Binding::Local { ty: elem_ty.clone(), mutable: false });
         self.declare(&hname, Binding::Local { ty: h.ty.clone(), mutable: false });
         let subject = self.var(&p, elem_ty.clone());
@@ -1823,16 +1689,8 @@ impl Checker {
         let mut block = Block { stmts: vec![Stmt { kind: StmtKind::Expr(body), line }] };
         self.finish_body_value(&mut block, line);
         let frame = self.frames.pop().unwrap();
-        let c = self.store.clos_singleton(self.defs[id].closure_id);
-        let fty = Type::Fn(vec![elem_ty.clone()], Box::new(a.clone()), c);
-        let d = &mut self.defs[id];
-        d.params = vec![Param { name: p, ty: elem_ty }];
-        d.ret = a;
-        d.body = block;
-        d.captures = frame.captures;
-        d.scheme = Some(Scheme { vars: vec![], dicts: vec![], ty: fty.clone() });
-        d.state = State::Done;
-        self.expr(ExprKind::Lambda(id), fty)
+        let params = vec![Param { name: p, ty: elem_ty }];
+        self.finish_lambda(id, params, a, block, frame.captures, None)
     }
 
     // -- globals and modules ------------------------------------------------------
@@ -1974,9 +1832,14 @@ impl Checker {
                 return self.lit(Lit::Nothing);
             }
         };
+        self.forwarding_lambda(arity, ast::Expression::Identifier(name.to_string()))
+    }
+
+    /// `(__g0, ..) => function(__g0, ..)` over `arity` parameters.
+    fn forwarding_lambda(&mut self, arity: usize, function: ast::Expression) -> Expr {
         let params: Vec<ast::Param> = (0..arity).map(|i| ast::Param { is_public: false, is_var: false, pattern: ast::Pattern::Identifier(format!("__g{}", i)), default: None }).collect();
         let args: Vec<ast::Expression> = (0..arity).map(|i| ast::Expression::Identifier(format!("__g{}", i))).collect();
-        let body = ast::Expression::Call { function: Box::new(ast::Expression::Identifier(name.to_string())), args, named_args: vec![] };
+        let body = ast::Expression::Call { function: Box::new(function), args, named_args: vec![] };
         self.check_lambda(&params, &body)
     }
 
@@ -2037,14 +1900,8 @@ impl Checker {
         match self.module_sig(module, name, 1) {
             Some((ps, ret, _)) if ps.is_empty() => self.expr(ExprKind::Builtin(format!("{}.{}", module, name), vec![]), ret),
             Some((ps, _, _)) => {
-                let params: Vec<ast::Param> = (0..ps.len()).map(|i| ast::Param { is_public: false, is_var: false, pattern: ast::Pattern::Identifier(format!("__g{}", i)), default: None }).collect();
-                let args: Vec<ast::Expression> = (0..ps.len()).map(|i| ast::Expression::Identifier(format!("__g{}", i))).collect();
-                let body = ast::Expression::Call {
-                    function: Box::new(ast::Expression::MemberAccess { object: Box::new(ast::Expression::Import(module.to_string())), member: name.to_string() }),
-                    args,
-                    named_args: vec![],
-                };
-                self.check_lambda(&params, &body)
+                let function = ast::Expression::MemberAccess { object: Box::new(ast::Expression::Import(module.to_string())), member: name.to_string() };
+                self.forwarding_lambda(ps.len(), function)
             }
             None => {
                 self.error(line, format!("unknown module member ${}.{}{}", module, name, solve::replaced_by(name)));
@@ -2106,8 +1963,7 @@ fn stmt_mentions_dollar(s: &ast::Stmt) -> bool {
 /// its last statement's value, or a `return`.
 fn stmts_answer_result(stmts: &[ast::Stmt]) -> bool {
     use ast::Statement as S;
-    let returns = |ss: &[ast::Stmt]| stmts_return_result(ss);
-    if returns(stmts) {
+    if stmts_return_result(stmts) {
         return true;
     }
     match stmts.last().map(|s| &s.node) {

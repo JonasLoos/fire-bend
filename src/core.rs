@@ -12,7 +12,7 @@
 //
 // The lowering (lower/) reads only this. It never re-infers anything.
 
-use crate::types::{ClosId, ConstraintId, Scheme, TVar, Type, TypeId, TypeStore};
+use crate::types::{ConstraintId, Scheme, TVar, Type, TypeId, TypeStore};
 
 pub type DefId = usize;
 
@@ -201,8 +201,6 @@ pub struct Def {
     /// The def itself or something it calls is `unsafe` (Bend's report).
     pub relies_on_unsafe: bool,
     pub descent: Descent,
-    /// The lambda-site id of this def when used as a value.
-    pub closure_id: ClosId,
     pub line: usize,
 }
 
@@ -595,6 +593,34 @@ impl Missed {
                 }
             },
         }
+    }
+}
+
+/// Visit every statement of a block and of the blocks nested in its
+/// statements (branches, arms, loop bodies), not inside expressions.
+pub fn for_each_stmt(b: &Block, f: &mut dyn FnMut(&Stmt)) {
+    for s in &b.stmts {
+        for_stmt_and_nested(s, f);
+    }
+}
+
+/// Visit a statement and the statements nested in it, as `for_each_stmt`.
+pub fn for_stmt_and_nested(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
+    f(s);
+    match &s.kind {
+        StmtKind::If { then, else_, .. } => {
+            for_each_stmt(then, f);
+            for_each_stmt(else_, f);
+        }
+        StmtKind::Match { arms, .. } => {
+            for a in arms {
+                if let ExprKind::Block(b) = &a.body.kind {
+                    for_each_stmt(b, f);
+                }
+            }
+        }
+        StmtKind::For { body, .. } | StmtKind::While { body, .. } => for_each_stmt(body, f),
+        _ => {}
     }
 }
 
