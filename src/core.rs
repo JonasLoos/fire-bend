@@ -404,14 +404,29 @@ pub fn pat_total(p: &Pat, types: &[DataType]) -> bool {
 /// Whether the arms cover every value of the subject's type.
 pub fn arms_exhaustive(arms: &[Arm], types: &[DataType]) -> bool {
     let total: Vec<&Pat> = arms.iter().filter(|a| a.guard.is_none()).map(|a| &a.pat).collect();
+    pats_exhaustive(&total, types)
+}
+
+/// Whether the patterns together cover every value of their type.
+fn pats_exhaustive(total: &[&Pat], types: &[DataType]) -> bool {
     if total.iter().any(|p| pat_total(p, types)) {
         return true;
     }
-    // every constructor of one data type, each with total fields
+    // every constructor of one data type: one with total fields, or, for a
+    // constructor of one field, patterns that cover that field
+    // (`nothing`, `Leaf`, `Node(..)` on a `Tree | nothing`)
     if let Some(Pat::Con(id, _, _)) = total.first() {
         let dt = &types[*id];
         return (0..dt.ctors.len()).all(|ci| {
-            total.iter().any(|p| matches!(p, Pat::Con(i, c, ps) if i == id && *c == ci && ps.iter().all(|q| pat_total(q, types))))
+            let rows: Vec<&Vec<Pat>> = total.iter().filter_map(|p| match p {
+                Pat::Con(i, c, ps) if i == id && *c == ci => Some(ps),
+                _ => None,
+            }).collect();
+            rows.iter().any(|ps| ps.iter().all(|q| pat_total(q, types)))
+                || (dt.ctors[ci].fields.len() == 1 && !rows.is_empty() && {
+                    let firsts: Vec<&Pat> = rows.iter().map(|ps| &ps[0]).collect();
+                    pats_exhaustive(&firsts, types)
+                })
         });
     }
     let t = total.iter().any(|p| matches!(p, Pat::Lit(Lit::Bool(true))));

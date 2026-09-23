@@ -297,8 +297,8 @@ fn partial_matches(core: &core::Program) -> Vec<usize> {
     fn visit(b: &core::Block, types: &[core::DataType], out: &mut std::collections::BTreeSet<usize>) {
         for s in &b.stmts {
             match &s.kind {
-                core::StmtKind::Match { arms, .. } if !core::arms_exhaustive(arms, types) => {
-                    out.insert(s.line);
+                core::StmtKind::Match { subject, arms } if !core::arms_exhaustive(arms, types) => {
+                    out.insert(subject.line);
                 }
                 core::StmtKind::If { then, else_, .. } => {
                     visit(then, types, out);
@@ -309,8 +309,8 @@ fn partial_matches(core: &core::Program) -> Vec<usize> {
             }
             let mut blocks = Vec::new();
             core::walk_stmt(s, &mut |e: &core::Expr| match &e.kind {
-                core::ExprKind::Match(_, arms) if !core::arms_exhaustive(arms, types) => {
-                    out.insert(e.line);
+                core::ExprKind::Match(subject, arms) if !core::arms_exhaustive(arms, types) => {
+                    out.insert(subject.line);
                 }
                 core::ExprKind::Block(b) => blocks.push(b.clone()),
                 _ => {}

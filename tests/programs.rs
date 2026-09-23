@@ -193,3 +193,11 @@ fn property_tests_build() {
     let out = String::from_utf8_lossy(&run.stdout);
     assert!(out.contains("law sorted_is_strict: FAILS"), "{}", out);
 }
+
+#[test]
+fn check_lists_partial_matches() {
+    let source = std::fs::read_to_string(repo().join("tests/cases/match_coverage_through_maybe.fire")).unwrap();
+    let (_, report) = fire_bend::compile_for_check(&source).unwrap();
+    // `partial` leaves out `Minus`; `name` covers every case
+    assert_eq!(report.partial_matches, vec![18]);
+}
