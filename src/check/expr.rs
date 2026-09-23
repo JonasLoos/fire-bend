@@ -1047,19 +1047,20 @@ impl Checker {
         let e = self.dict(Class::Method(member.to_string(), atys, ret.clone()), subject, all, ret.clone(), line);
         let _ = expected;
         // `pop` answers (container, value): the container is stored back
-        // into a variable, and dropped from a value that is not one
+        // into a variable, and dropped, in place, from a value that is not one
         if member == "pop" {
-            let tmp = self.temp("pop");
-            self.pending.push(Stmt { kind: StmtKind::Let { name: tmp.clone(), value: e }, line });
             let ct = self.fresh();
             let vt = self.fresh();
             self.unify(&ret, &Type::pair(ct.clone(), vt.clone()), line);
-            if self.is_path(&recv_copy) {
-                let t = self.var(&tmp, ret.clone());
-                let cont = self.expr(ExprKind::Field(Box::new(t), PAIR, 0), ct);
-                let stmts = self.rebind_path(&recv_copy, cont);
-                self.pending.extend(stmts);
+            if !self.is_path(&recv_copy) {
+                return self.expr(ExprKind::Field(Box::new(e), PAIR, 1), vt);
             }
+            let tmp = self.temp("pop");
+            self.pending.push(Stmt { kind: StmtKind::Let { name: tmp.clone(), value: e }, line });
+            let t = self.var(&tmp, ret.clone());
+            let cont = self.expr(ExprKind::Field(Box::new(t), PAIR, 0), ct);
+            let stmts = self.rebind_path(&recv_copy, cont);
+            self.pending.extend(stmts);
             let t = self.var(&tmp, ret);
             return self.expr(ExprKind::Field(Box::new(t), PAIR, 1), vt);
         }
