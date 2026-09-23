@@ -267,6 +267,12 @@ impl Checker {
                 }
             }
         }
+        // `kids *> depth` inside `depth`: recursion through a function value,
+        // which Bend's checker cannot follow (and a template cannot name the
+        // def it is an argument of)
+        if d == self.current_def() {
+            self.error(line, format!("'{0}' is passed as a function inside its own body; Bend cannot check recursion through a function value: call '{0}' directly on a piece of a matched parameter. For a list of children (`kids *> {0}`), write a def over the list: `match ts` with `[Node(v, kids), ...rest] =>` calling itself on `kids` and on `rest`", name));
+        }
         let (t, targs, dicts) = self.instantiate_def_type(d, line);
         self.note_call(d, line);
         self.expr(ExprKind::DefRef { def: d, targs, dicts }, t)

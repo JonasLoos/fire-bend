@@ -129,6 +129,7 @@ fn check(file: &str, image: String, rep: &fire_bend::Report) -> i32 {
         Err(e) => fail(&format!("cannot run `bend` ({}); is it installed and on PATH?", e)),
     };
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
     let open: Vec<&(String, usize, Proof)> = rep.laws.iter().filter(|(n, _, p)| *p == Proof::Open && !proven_by_file.contains(n)).collect();
     // open laws are Bend's TODOs; anything else is a real rejection
     let todo_only = text.contains(" found.") && text.contains("TODO") && !text.contains("- expected");
@@ -137,6 +138,13 @@ fn check(file: &str, image: String, rep: &fire_bend::Report) -> i32 {
     if !out.status.success() && !todo_only {
         status = 1;
         match explain(&text, &rep.laws.iter().map(|(n, l, _)| (n.clone(), *l)).collect::<Vec<_>>()) {
+            // a failing def named after a law proven in the file is that proof
+            Some((name, _)) if proven_by_file.contains(&name) => {
+                let line = rep.laws.iter().find(|(n, _, _)| *n == name).map(|(_, l, _)| *l).unwrap_or(0);
+                let (lhs, rhs) = (field(&text, "- expected :"), field(&text, "- observed :"));
+                eprintln!("{}: line {}: the proof of law {} in {} does not check: expected {}, found {}", file, line, name, proof_path.display(), lhs.unwrap_or("?".into()), rhs.unwrap_or("?".into()));
+                failed = Some(name);
+            }
             Some((name, message)) => {
                 eprintln!("{}: {}", file, message);
                 failed = Some(name);
@@ -149,7 +157,11 @@ fn check(file: &str, image: String, rep: &fire_bend::Report) -> i32 {
         let width = rep.laws.iter().map(|(n, _, _)| n.len()).max().unwrap_or(0);
         for (name, _, proof) in &rep.laws {
             let how = match proof {
+                _ if failed.as_deref() == Some(name.as_str()) && proven_by_file.contains(name) => "its proof does not check".to_string(),
                 _ if failed.as_deref() == Some(name.as_str()) => "does NOT hold".to_string(),
+                // Bend stopped at a rejection: nothing it would certify is known
+                Proof::Open if status != 0 && !proven_by_file.contains(name) => "open: a claim".to_string(),
+                _ if status != 0 => "not checked: Bend rejected the program".to_string(),
                 _ if proven_by_file.contains(name) => format!("proven in {}", proof_path.display()),
                 Proof::Closed => "proven: Bend computed both sides".to_string(),
                 Proof::Finite => "proven: every case of its finite types".to_string(),

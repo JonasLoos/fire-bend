@@ -1,0 +1,23 @@
+# a def that counts an int down takes a fuel; used as a value (a pipeline
+# stage, an argument, an element of a list) it still starts its own fuel
+def fact(n)
+    if n <= 1 do 1 else n * fact(n - 1)
+def rep(s, n)
+    if n <= 0 do "" else s + rep(s, n - 1)
+def apply(f, x)
+    f(x)
+print([1, 2, 3, 4] *> fact)
+print(apply(fact, 5))
+print(["a", "b"] *> rep($, 3))
+fs = [fact]
+print(fs[0](6))
+gs = [fact, n => n + 1]
+print(gs[0](3), gs[1](3))
+# stored with another function, a def whose recursion reorders its
+# parameters is called with them in its own order
+def keep(b: [int], a: [int])
+    match a
+        [] => b
+        [x, ...xs] => keep(b + [x], xs)
+hs = [keep, (b, a) => a]
+print(hs[0]([1], [2, 3]), hs[1]([1], [2, 3]))

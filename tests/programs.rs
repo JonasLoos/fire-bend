@@ -106,6 +106,8 @@ fn unsupported_programs_are_rejected_with_a_message() {
         ("def even(n)\n    if n <= 0 do true else odd(n - 1)\ndef odd(n)\n    if n <= 0 do false else even(n - 1)\nprint(even(4))\n", "mutual recursion"),
         ("for i in 0..\n    print(i)\n", "never ends"),
         ("def g(xs)\n    for x in xs\n        g(xs)\n    0\n", "calls itself inside a loop body"),
+        // recursion through a function value has no image Bend can check
+        ("type R\n    N(v: int, kids: [R])\ndef t(r)\n    match r\n        N(v, kids) => v + (kids *> t |> sum)\nprint(t(N(1, [])))\n", "passed as a function inside its own body"),
         // laws speak about pure, total defs and types
         ("def say(x)\n    print(x)\n    x\nlaw bad\n    say(1) == 1\n", "performs IO"),
         ("unsafe def spin(n)\n    spin(n + 1)\nlaw bad\n    spin(1) == 1\n", "relies on unsafe code"),
@@ -166,6 +168,42 @@ fn laws_are_classified_and_property_tested() {
     for law in ["cycle_of_three", "twice_small", "twice_length", "cents_text"] {
         assert!(out.contains(&format!("law {}: holds", law)), "{}", out);
     }
+}
+
+/// A law over a generic type is stated for ints, as `fire --test` samples
+/// it: over `Unit` every value is equal, and a false law could be proven.
+#[test]
+fn laws_over_generic_types_are_stated_for_ints() {
+    let src = "type Tree\n    Leaf\n    Node(left: Tree, value, right: Tree)\ndef rot(t)\n    match t\n        Node(Node(ll, x, lr), v, r) => Node(Node(ll, v, lr), x, r)\n        other => other\nlaw rot_is_identity\n    for t: Tree\n    rot(t) == t\n";
+    let (image, _) = fire_bend::compile_for_check(src).unwrap();
+    assert!(image.contains("for +t: Tree<U32>"), "{}", image);
+}
+
+/// `fire --check` reports a law proven in the `.proof.bend` file only when
+/// Bend accepts the whole image; a failing proof is the proof's fault.
+#[test]
+fn check_reports_proofs_from_the_proof_file() {
+    if std::env::var("BEND_TESTS").unwrap_or_default() == "skip" || !bend_available() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("fire-proof-tests-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("app.fire");
+    std::fs::write(&prog, "def app(xs, ys)\n    match xs\n        [] => ys\n        [h, ...t] => [h] + app(t, ys)\nlaw app_nil_left\n    for xs: [int]\n    app([], xs) == xs\nlaw app_small\n    app([1], [2]) == [1, 2]\nlaw app_nil\n    for xs: [int]\n    app(xs, []) == xs\nprint(app([1], [2]))\n").unwrap();
+    let run = |proof: &str| {
+        std::fs::write(dir.join("app.proof.bend"), proof).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_fire")).arg(&prog).arg("--check").output().unwrap();
+        (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    };
+    // a proof that checks
+    let (ok, text) = run("def app_nil_left(xs):\n  {==}\n");
+    assert!(ok && text.contains("app_nil_left  proven in") && text.contains("app_nil       open"), "{}", text);
+    // a proof that does not: the law is not reported proven, nor are the others
+    let (ok, text) = run("def app_nil_left(xs):\n  {==}\n\ndef app_nil(xs):\n  {==}\n");
+    assert!(!ok && text.contains("app_nil       its proof does not check") && text.contains("app_small     not checked"), "{}", text);
+    // a proof file Bend rejects before any law
+    let (ok, text) = run("def app_nil_left(xs):\n  match xs:\n    case Nil{}:\n      match xs:\n        case Nil{}:\n          {==}\n");
+    assert!(!ok && !text.contains("proven"), "{}", text);
 }
 
 #[test]

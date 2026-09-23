@@ -1,0 +1,17 @@
+# a tree whose children are a list: the recursion runs over the list of
+# trees, calling itself on the children of the first and on the rest
+type Rose
+    Node(value: int, kids: [Rose])
+
+def forest_total(ts)
+    match ts
+        [] => 0
+        [Node(v, kids), ...rest] => v + forest_total(kids) + forest_total(rest)
+
+def forest_depth(ts)
+    match ts
+        [] => 0
+        [Node(_, kids), ...rest] => max(1 + forest_depth(kids), forest_depth(rest))
+
+t = Node(1, [Node(2, []), Node(3, [Node(4, [])])])
+print(forest_total([t]), forest_depth([t]))

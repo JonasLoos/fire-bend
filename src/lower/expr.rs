@@ -468,6 +468,7 @@ impl<'a> Lower<'a> {
                 args.push(Term::TyArg(t.clone()));
             }
         }
+        let callee = if img.fuel { self.fuel_entry(def.id) } else { img.name.clone() };
         if img.env.is_some() {
             args.push(Term::var("__e"));
         }
@@ -476,7 +477,7 @@ impl<'a> Lower<'a> {
         }
         let mut lam_params = vec!["__e".to_string()];
         lam_params.extend(params);
-        Term::Lam(lam_params, Box::new(Term::Call(img.name.clone(), args)))
+        Term::Lam(lam_params, Box::new(Term::Call(callee, args)))
     }
 
     /// `~(e => x => name(<forwarded template args>, e, x))`: the closed
@@ -511,9 +512,7 @@ impl<'a> Lower<'a> {
                 args.push(Term::TyArg(Ty::Param(tn.clone())));
             }
         }
-        if img.fuel {
-            args.push(Term::var("__fuel"));
-        }
+        let callee = if img.fuel { self.fuel_entry(def.id) } else { img.name.clone() };
         // a def without captures has no environment parameter: the code
         // takes the (unit) environment and drops it
         if img.env.is_some() {
@@ -525,7 +524,7 @@ impl<'a> Lower<'a> {
         let _ = ctx;
         let mut lam_params = vec!["__e".to_string()];
         lam_params.extend(params);
-        Term::Lam(lam_params, Box::new(Term::Call(img.name.clone(), args)))
+        Term::Lam(lam_params, Box::new(Term::Call(callee, args)))
     }
 
     /// A top-level def used as a value.
@@ -556,10 +555,9 @@ impl<'a> Lower<'a> {
                 args.push(Term::TyArg(t.clone()));
             }
         }
-        if img.fuel
-            && let Descent::Fuel(i) = def.descent {
-                args.push(Term::call("F.i32.fuel", vec![Term::var(&params[i])]));
-            }
+        // a def counting down an int starts its fuel in a forwarder: the
+        // code is inlined where it is called, so it may use each argument once
+        let callee = if img.fuel { self.fuel_entry(d) } else { img.name.clone() };
         if img.env.is_some() {
             args.push(Term::var("__e"));
         }
@@ -568,7 +566,7 @@ impl<'a> Lower<'a> {
         }
         let mut lam_params = vec!["__e".to_string()];
         lam_params.extend(params);
-        let code = Term::Lam(lam_params, Box::new(Term::Call(img.name.clone(), args)));
+        let code = Term::Lam(lam_params, Box::new(Term::Call(callee, args)));
         let env = self.env_record(ctx, d);
         let env_ty = self.env_ty(d, None, &ctx.tparams.clone(), line);
         FnVal { code, env, env_ty, mode: img.mode }

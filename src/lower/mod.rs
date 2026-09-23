@@ -296,8 +296,10 @@ impl<'a> Lower<'a> {
         self.classify_fn_params();
         // a law has an image, never emitted, for the lambdas inside it
         for d in &self.core.defs {
-            let image = self.make_image(d.id);
-            self.images[d.id] = Some(image);
+            if self.images[d.id].is_none() {
+                let image = self.make_image(d.id);
+                self.images[d.id] = Some(image);
+            }
         }
         // data types
         for id in BUILTIN_TYPES..self.core.types.len() {
@@ -628,14 +630,18 @@ impl<'a> Lower<'a> {
         }
         self.types.push(TypeDef { name: name.clone(), params: vec![], ctors });
         // the apply def: match the sum and call the member's code
-        let first = &self.core.defs[set[0]];
-        let arity = first.params.len();
         let (ptys, rty, mode) = self.member_signature(set[0], line);
         let mut arms = Vec::new();
         for d in set {
             let (dp, dr, dm) = self.member_signature(*d, line);
             let _ = (dp, dr, dm);
             let cname = format!("{}.{}", name, self.def_names[*d].replace('.', "_"));
+            // a sum may be built while an earlier def's image is made (its
+            // parameter holds functions a later lambda flows into)
+            if self.images[*d].is_none() {
+                let image = self.make_image(*d);
+                self.images[*d] = Some(image);
+            }
             let img = self.images[*d].clone().unwrap();
             if !img.tparams.is_empty() || !img.dicts.is_empty() {
                 self.error(line, format!("the function {} belongs to a generic def and cannot be stored with other functions in one value", self.def_names[*d]));
@@ -644,10 +650,13 @@ impl<'a> Lower<'a> {
             if img.env.is_some() {
                 args.push(Term::var("env"));
             }
-            for i in 0..arity {
+            // values in image order (a structural def puts its descending
+            // parameter first)
+            for &i in &img.order {
                 args.push(Term::var(&format!("a{}", i)));
             }
-            let call = Term::Call(img.name.clone(), args);
+            let callee = if img.fuel { self.fuel_entry(*d) } else { img.name.clone() };
+            let call = Term::Call(callee, args);
             // the sum answers in the join mode of its members
             let call = self.lift_mode(call, img.mode, mode, &rty);
             arms.push((ir::Pat::Ctor(cname, vec![("env".to_string(), false)]), Body::term(call)));
@@ -1043,6 +1052,30 @@ impl<'a> Lower<'a> {
     }
 
     // -- derived defs ---------------------------------------------------------------------------
+
+    /// A def that counts an int down, used as a value: `fact.F.value(n)`
+    /// takes the def's parameters without the fuel and starts it.
+    pub fn fuel_entry(&mut self, d: DefId) -> String {
+        let img = self.images[d].clone().unwrap();
+        let name = format!("{}.F.value", img.name);
+        if self.derived.insert(name.clone()) {
+            let def = self.core.defs[d].clone();
+            let mut ir_def = self.def_header(&img, &def, def.line);
+            ir_def.name = name.clone();
+            ir_def.params.retain(|p| p.name != "__fuel");
+            let mut args: Vec<Term> = ir_def.tmpl_types.iter().map(|t| Term::TmplTy(Ty::Param(t.clone()))).collect();
+            args.extend(ir_def.tmpl_funcs.iter().map(|(f, _)| Term::TmplRef(f.clone())));
+            args.extend(ir_def.erased.iter().map(|t| Term::TyArg(Ty::Param(t.clone()))));
+            if let Descent::Fuel(i) = def.descent {
+                args.push(Term::call("F.i32.fuel", vec![Term::var(&local_name(&def.params[i].name))]));
+            }
+            args.extend(ir_def.params.iter().map(|p| Term::var(&p.name)));
+            ir_def.body = Body::term(Term::Call(img.name.clone(), args));
+            self.mark_reusable(&mut ir_def);
+            self.defs.push(ir_def);
+        }
+        name
+    }
 
     /// A record type holding `n` live-out values of a branch.
     pub fn out_type(&mut self, n: usize) -> String {

@@ -65,6 +65,16 @@ impl Checker {
         for (n, _) in &frame.captures {
             self.error(line, format!("a law speaks about defs and types; '{}' is a value of the program (quantify it with `for`, or make it a def)", n));
         }
+        // a type parameter the law leaves open is int, as `fire --test`
+        // samples it: over `Tree<Unit>` every value is equal, and a proof
+        // would say nothing about the values
+        for (_, t) in &tvars {
+            let mut free = Vec::new();
+            self.store.free_vars(t, &mut free);
+            for v in free {
+                self.unify(&Type::Var(v), &Type::Int, line);
+            }
+        }
         self.defs[id].state = State::Done;
         self.solve_pending();
         // how it is proven
