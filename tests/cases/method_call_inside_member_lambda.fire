@@ -1,0 +1,18 @@
+# a lambda inside a method calls a sibling method on the receiver it
+# captures; a lambda's body takes the pipeline that follows it
+def Box(n: int)
+    public var calls = 0
+    public small = x => x < n
+    public smalls = xs => xs ?> small($)
+    public scaled = (xs, k) => xs *> (x => if small(x) do x * k else x)
+    public bump = () =>
+        calls += 1
+        n
+    public after = xs =>
+        bump()
+        xs ?> small($) *> $ + calls
+b = Box(3)
+print(b.smalls([1, 5, 2]))
+print(b.scaled([1, 4], 10))
+var c = Box(2)
+print(c.after([0, 1, 7]), c.calls)

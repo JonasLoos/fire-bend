@@ -187,10 +187,17 @@ fn humanize_parse_error(source: &str, e: pest::error::Error<Rule>) -> pest::erro
     }
 
     let rest = &source[pos.min(source.len())..];
+    // the whole word or operator at the error, not just its first character
+    let token: String = match rest.chars().next() {
+        Some(c) if c.is_alphanumeric() || c == '_' => rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect(),
+        Some(c) if "&|!=<>+-*/%^~.:?".contains(c) => rest.chars().take_while(|c| "&|!=<>+-*/%^~.:?".contains(*c)).take(3).collect(),
+        Some(c) => c.to_string(),
+        None => String::new(),
+    };
     let found = match rest.chars().next() {
         None => "end of input".to_string(),
         Some('\n') => "end of line".to_string(),
-        Some(c) => format!("'{}'", c),
+        Some(_) => format!("'{}'", token),
     };
     let mut message = match expected.split_last() {
         None => format!("unexpected {}", found),
@@ -213,6 +220,22 @@ fn humanize_parse_error(source: &str, e: pest::error::Error<Rule>) -> pest::erro
     }
     if collapse && (rest.starts_with("for ") || rest.starts_with("for\t")) {
         message.push_str("\n  hint: Fire comprehensions put the loop first — `[for x in xs do x * 2]`, not `[x * 2 for x in xs]`");
+    }
+    // `a && b` fails at the second `&` (the first is bitwise and)
+    let doubled = |c: char| token.starts_with(c) && (token.starts_with(&format!("{}{}", c, c)) || source[..pos].ends_with(c));
+    match token.as_str() {
+        _ if doubled('&') => message.push_str("\n  hint: Fire writes `and` for `&&`"),
+        _ if doubled('|') => message.push_str("\n  hint: Fire writes `or` for `||`"),
+        "!" => message.push_str("\n  hint: Fire writes `not x` for `!x`"),
+        "return" | "break" | "continue" => message.push_str(&format!(
+            "\n  hint: `{}` is a statement: it goes on a line of its own, after `do` or after `=>`, not inside an expression", token)),
+        "else" if source.contains("else if ") => message.push_str("\n  hint: Fire writes `elif` for `else if`"),
+        _ => {}
+    }
+    let line_before = source[..pos].rsplit('\n').next().unwrap_or("");
+    let do_ends_line = |after: &str| matches!(after.trim_start_matches([' ', '\t']).chars().next(), None | Some('\n') | Some('#'));
+    if (line_before.trim_end().ends_with(" do") && do_ends_line(rest)) || (token == "do" && do_ends_line(&rest[2..])) {
+        message.push_str("\n  hint: `do` takes its body on the same line; for an indented block, leave `do` out");
     }
     if rest.starts_with('/') && source[..pos].ends_with('/') {
         message.push_str("\n  hint: '//' isn't Fire — comments start with '#', floor division is (a / b).floor()");
@@ -264,6 +287,46 @@ pub struct Report {
     pub unsafe_defs: Vec<(String, usize)>,
     /// Defs that are not unsafe themselves but call unsafe code.
     pub relying: Vec<(String, usize)>,
+    /// Lines of matches whose arms cover only some values: they abort on
+    /// the rest.
+    pub partial_matches: Vec<usize>,
+}
+
+/// The lines of matches that do not cover every value of their subject.
+fn partial_matches(core: &core::Program) -> Vec<usize> {
+    fn visit(b: &core::Block, types: &[core::DataType], out: &mut std::collections::BTreeSet<usize>) {
+        for s in &b.stmts {
+            match &s.kind {
+                core::StmtKind::Match { subject, arms } if !core::arms_exhaustive(arms, types) => {
+                    out.insert(subject.line);
+                }
+                core::StmtKind::If { then, else_, .. } => {
+                    visit(then, types, out);
+                    visit(else_, types, out);
+                }
+                core::StmtKind::For { body, .. } | core::StmtKind::While { body, .. } => visit(body, types, out),
+                _ => {}
+            }
+            let mut blocks = Vec::new();
+            core::walk_stmt(s, &mut |e: &core::Expr| match &e.kind {
+                core::ExprKind::Match(subject, arms) if !core::arms_exhaustive(arms, types) => {
+                    out.insert(subject.line);
+                }
+                core::ExprKind::Block(b) => blocks.push(b.clone()),
+                _ => {}
+            });
+            for b in &blocks {
+                visit(b, types, out);
+            }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    for d in &core.defs {
+        if !matches!(d.kind, core::DefKind::Law) {
+            visit(&d.body, &core.types, &mut out);
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// The image `fire --check` hands to Bend (every law, the open ones as
@@ -287,6 +350,7 @@ pub fn compile_for_check(source: &str) -> Result<(String, Report), Vec<Diag>> {
             report.relying.push((name, d.line));
         }
     }
+    report.partial_matches = partial_matches(&core);
     Ok((ir.render(), report))
 }
 

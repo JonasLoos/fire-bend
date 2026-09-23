@@ -36,6 +36,7 @@ with align `<` `>` `^`. Numbers pad on the left, text on the right:
 "[{total:8.2f}]"      # [    3.50]
 "{name:<8}|{n:>5}"    # columns
 "{'ada':*^9}"         # ***ada***
+"{cents / 100:>6}"    # any expression before the spec
 ```
 
 Blocks are introduced by indentation, never by a colon; a comment may close
@@ -95,8 +96,11 @@ def fib(n)
 
 `return` exits a function early. Parameters take defaults (`=`),
 annotations (`:`) and destructuring patterns (`{age} => age + 1`). A lambda
-body stops before a pipeline operator: in `xs ?> n => n > 2 |> sum` the
-lambda is `n => n > 2`; parenthesize to change that.
+that is a pipeline stage stops before the next pipeline operator: in
+`xs ?> n => n > 2 |> sum` the stage is `n => n > 2`. A lambda that starts
+the chain takes the rest of it as its body: `f = x => x |> g` is
+`x => (x |> g)`, and so is a match arm (`n => n |> $ * 2`). Parenthesize
+to change either.
 
 Calls take keyword arguments: positional first, then `name = value` in any
 order. Only defs and lambdas take keywords; builtins are positional.
@@ -363,9 +367,15 @@ Literals match by equality, records by field names, lists by shape, an
 identifier always matches and binds, and a constructor of a declared type
 matches positionally (`Node(l, v, r) =>`, `Leaf =>`, §7.1). A match on a
 `T | nothing` value uses a `nothing` arm and a value arm (`n =>` or `n: int
-=>`); on a result it uses `{ok}` and `{err}` arms. A match whose arms cover
-every case is exhaustive and cannot fail; one that does not is fallible
-(§11). In statement position the arms need not share a type.
+=>`), and beside a `nothing` arm any other pattern matches the value
+(`{r, c} =>`, `[a, b] =>`, `Leaf =>`, `0 =>`); on a result it uses `{ok}`
+and `{err}` arms. A match whose arms cover every case is exhaustive and
+cannot fail; one that does not is fallible (§11), and `fire --check` lists
+it. In statement position the arms need not share a type; used as a value,
+arms answering `nothing` and arms answering a `T` make a `T | nothing`.
+
+An arm's body may be `return`, `break` or `continue` on the arm's line
+(`nothing => return 0`), as after `do`.
 
 ### Comprehensions
 
@@ -530,9 +540,13 @@ is bitwise or; between types (`int | nothing`) it is a union.
 **Absent values.** `xs[i]` on a list aborts when out of range, but a
 lookup that can miss has type `T | nothing`: `m[k]`, `xs.first()`,
 `xs.last()`, `xs.find(f)`, `xs.index_of(x)`, `s.index_of(t)`, and a function
-that returns `nothing` on one path and a value on another. Such a value
-must be matched or defaulted (`x or default`) before it is used as a `T`;
-`.member` on it is a type error.
+that returns `nothing` on one path and a value on another, as well as an
+`if` or `match` whose branches do. Such a value must be matched or
+defaulted (`x or default`) before it is used as a `T`; `.member` on it is a
+type error. A list literal with `nothing` beside values is a list of
+`T | nothing` (`[nothing, 5]`), and a list or dictionary of `T | nothing`
+takes a plain value or `nothing` in an assignment (`parent[i] = j`,
+`parent[i] = nothing`).
 
 `str(x)`, `int(x)`, `float(x)` convert; `"7".to_int()` aborts on bad text,
 `"7".parse_int()` returns a result.
@@ -621,8 +635,9 @@ length`.
 contains take drop reversed`.
 
 `sorted` and `sort` order ints, floats, strings, lists and records
-(field by field); with a key they are stable, and the key may itself be
-fallible or print.
+(field by field), and a range as the list of its numbers; with a key they
+are stable, and the key may itself be fallible or print. A builtin that
+takes one value can be a pipeline stage (`xs |> max`, `*> round`).
 
 ## 14. Operator precedence
 

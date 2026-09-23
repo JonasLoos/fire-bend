@@ -342,12 +342,6 @@ impl Pat {
             }
         }
     }
-    pub fn irrefutable(&self) -> bool {
-        match self {
-            Pat::Bind(_) | Pat::Wild => true,
-            _ => false,
-        }
-    }
 }
 
 /// What a law claims.
@@ -395,17 +389,44 @@ impl Program {
     }
 }
 
+/// A pattern that matches every value of its type: a name, `_`, or the
+/// only constructor of its type (a pair, a record, a class) over such
+/// patterns.
+pub fn pat_total(p: &Pat, types: &[DataType]) -> bool {
+    match p {
+        Pat::Bind(_) | Pat::Wild => true,
+        Pat::Con(id, _, ps) => types[*id].ctors.len() == 1 && ps.iter().all(|q| pat_total(q, types)),
+        Pat::List(items, Some(_)) => items.is_empty(),
+        _ => false,
+    }
+}
+
 /// Whether the arms cover every value of the subject's type.
 pub fn arms_exhaustive(arms: &[Arm], types: &[DataType]) -> bool {
     let total: Vec<&Pat> = arms.iter().filter(|a| a.guard.is_none()).map(|a| &a.pat).collect();
-    if total.iter().any(|p| p.irrefutable()) {
+    pats_exhaustive(&total, types)
+}
+
+/// Whether the patterns together cover every value of their type.
+fn pats_exhaustive(total: &[&Pat], types: &[DataType]) -> bool {
+    if total.iter().any(|p| pat_total(p, types)) {
         return true;
     }
-    // every constructor of one data type, each with irrefutable fields
+    // every constructor of one data type: one with total fields, or, for a
+    // constructor of one field, patterns that cover that field
+    // (`nothing`, `Leaf`, `Node(..)` on a `Tree | nothing`)
     if let Some(Pat::Con(id, _, _)) = total.first() {
         let dt = &types[*id];
         return (0..dt.ctors.len()).all(|ci| {
-            total.iter().any(|p| matches!(p, Pat::Con(i, c, ps) if i == id && *c == ci && ps.iter().all(|q| q.irrefutable())))
+            let rows: Vec<&Vec<Pat>> = total.iter().filter_map(|p| match p {
+                Pat::Con(i, c, ps) if i == id && *c == ci => Some(ps),
+                _ => None,
+            }).collect();
+            rows.iter().any(|ps| ps.iter().all(|q| pat_total(q, types)))
+                || (dt.ctors[ci].fields.len() == 1 && !rows.is_empty() && {
+                    let firsts: Vec<&Pat> = rows.iter().map(|ps| &ps[0]).collect();
+                    pats_exhaustive(&firsts, types)
+                })
         });
     }
     let t = total.iter().any(|p| matches!(p, Pat::Lit(Lit::Bool(true))));
@@ -413,10 +434,16 @@ pub fn arms_exhaustive(arms: &[Arm], types: &[DataType]) -> bool {
     if t && f {
         return true;
     }
-    // [] and [h, ...t] cover every list
-    let nil = total.iter().any(|p| matches!(p, Pat::List(items, None) if items.is_empty()));
-    let cons = total.iter().any(|p| matches!(p, Pat::List(items, Some(_)) if items.len() == 1 && items[0].irrefutable()));
-    nil && cons
+    // lists: a `[a, b, ...rest]` covers every length from its own up, and
+    // exact shapes (`[]`, `[a]`) must cover each length below
+    let items_total = |items: &Vec<Pat>| items.iter().all(|q| pat_total(q, types));
+    let Some(open) = total.iter().filter_map(|p| match p {
+        Pat::List(items, Some(_)) if items_total(items) => Some(items.len()),
+        _ => None,
+    }).min() else {
+        return false;
+    };
+    (0..open).all(|n| total.iter().any(|p| matches!(p, Pat::List(items, None) if items.len() == n && items_total(items))))
 }
 
 /// Visit every expression in a block (statements first, then nested

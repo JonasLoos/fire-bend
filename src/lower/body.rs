@@ -681,7 +681,9 @@ impl<'a> Lower<'a> {
                     used.insert(local_name(&f.name));
                 }
             }
-            if let ExprKind::Lambda(d) = &e.kind {
+            // a lambda site, or a call of a def with captures: the caller
+            // builds the environment record from its own locals
+            if let ExprKind::Lambda(d) | ExprKind::Call { def: d, .. } | ExprKind::DefRef { def: d, .. } = &e.kind {
                 for (n, _) in &self.core.defs[*d].captures {
                     match ctx.template_param(n) {
                         Some(FnParamKind::Template { env, .. }) => {
@@ -816,6 +818,7 @@ impl<'a> Lower<'a> {
             body,
         };
         self.mark_reusable(&mut d);
+        self.ir_units.insert(name.clone(), ctx.unit);
         self.defs.push(d);
         name
     }

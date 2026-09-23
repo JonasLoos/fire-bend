@@ -220,6 +220,19 @@ pub fn describe_class(c: &Class) -> String {
 }
 
 impl Checker {
+    /// A dictionary key: dictionaries are keyed by strings.
+    fn unify_key(&mut self, idx: &Type, line: usize) {
+        match self.shallow(idx) {
+            Type::Str | Type::Var(_) => {
+                self.unify(idx, &Type::Str, line);
+            }
+            _ => {
+                let t = self.show_type(idx);
+                self.error(line, format!("dictionary keys are strings, found {}; convert the key with str(k)", t));
+            }
+        }
+    }
+
     /// The def that performs what a constraint provides: for an instance of
     /// a generic def's dictionary, that generic def.
     fn effect_owner(&self, id: ConstraintId) -> DefId {
@@ -360,7 +373,7 @@ impl Checker {
                 }
                 Type::Map(v) => {
                     let v = (**v).clone();
-                    self.unify(idx, &Type::Str, line);
+                    self.unify_key(idx, line);
                     self.unify(elem, &Type::maybe(v), line);
                     Ok(Solution::Concrete(vec![]))
                 }
@@ -390,7 +403,7 @@ impl Checker {
                 }
                 Type::Map(v) => {
                     let v = (**v).clone();
-                    self.unify(idx, &Type::Str, line);
+                    self.unify_key(idx, line);
                     self.unify(val, &v, line);
                     Ok(Solution::Concrete(vec![]))
                 }

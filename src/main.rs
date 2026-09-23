@@ -159,8 +159,10 @@ fn check(file: &str, image: String, rep: &fire_bend::Report) -> i32 {
         }
     }
     if rep.unsafe_defs.is_empty() {
-        if status == 0 {
+        if status == 0 && rep.partial_matches.is_empty() {
             println!("every def terminates and every match is covered (checked by Bend)");
+        } else if status == 0 {
+            println!("every def terminates (checked by Bend)");
         }
     } else {
         println!("unsafe (termination not checked):");
@@ -171,6 +173,10 @@ fn check(file: &str, image: String, rep: &fire_bend::Report) -> i32 {
         if !callers.is_empty() {
             println!("  and what calls it: {}", callers.join(", "));
         }
+    }
+    if !rep.partial_matches.is_empty() {
+        let lines: Vec<String> = rep.partial_matches.iter().map(|l| l.to_string()).collect();
+        println!("matches that cover only some values, and abort on the rest: line {}", lines.join(", "));
     }
     if status == 0 && !open.is_empty() {
         println!("{} open law(s)", open.len());

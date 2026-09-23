@@ -819,14 +819,19 @@ impl Checker {
                 if ok && !tys.is_empty() {
                     // `nothing` arms lift the others into a maybe
                     let mut ty = tys[0].clone();
-                    let nothing_arm = arms.iter().any(|a| matches!(a.body.kind, ExprKind::Lit(Lit::Nothing)));
+                    let nothing_arm = arms.iter().any(|a| expr::is_nothing_value(&a.body));
                     let value_arm = arms.iter().any(|a| !matches!(self.shallow(&a.body.ty), Type::Unit));
                     if nothing_arm && value_arm {
                         let inner = arms.iter().find(|a| !matches!(self.shallow(&a.body.ty), Type::Unit)).map(|a| a.body.ty.clone()).unwrap();
+                        let inner = match self.shallow(&inner) {
+                            Type::Data(MAYBE, args) => args[0].clone(),
+                            _ => inner,
+                        };
                         ty = Type::maybe(inner.clone());
                         for a in arms.iter_mut() {
-                            if matches!(a.body.kind, ExprKind::Lit(Lit::Nothing)) {
-                                a.body = Expr { kind: ExprKind::Con(MAYBE, 0, vec![]), ty: ty.clone(), line: a.line };
+                            if expr::is_nothing_value(&a.body) {
+                                let b = std::mem::replace(&mut a.body, Expr { kind: ExprKind::Lit(Lit::Nothing), ty: Type::Unit, line: a.line });
+                                a.body = self.absent(b, &ty);
                             } else {
                                 let b = std::mem::replace(&mut a.body, Expr { kind: ExprKind::Lit(Lit::Nothing), ty: Type::Unit, line: a.line });
                                 a.body = self.some(b);
@@ -901,7 +906,20 @@ impl Checker {
         let is_maybe = |c: &Checker, t: &Type| matches!(c.shallow(t), Type::Data(MAYBE, _));
         let nothing = rets.iter().any(|r| r.1);
         let maybe = rets.iter().any(|r| !r.1 && is_maybe(self, &r.0));
-        let plain = rets.iter().any(|r| !r.1 && !is_maybe(self, &r.0) && !matches!(self.shallow(&r.0), Type::Unit | Type::Var(_)));
+        // a value of a type not known yet is a value too (a generic
+        // parameter, say), except the def's own result (a recursive call)
+        let ret_var = match self.shallow(ret) {
+            Type::Var(v) => Some(v),
+            _ => None,
+        };
+        let plain = rets.iter().any(|r| {
+            !r.1 && !is_maybe(self, &r.0)
+                && match self.shallow(&r.0) {
+                    Type::Unit => false,
+                    Type::Var(v) => Some(v) != ret_var,
+                    _ => true,
+                }
+        });
         let inner = match self.shallow(ret) {
             Type::Data(MAYBE, args) => Some(args[0].clone()),
             _ if (nothing || maybe) && plain => Some(self.fresh()),

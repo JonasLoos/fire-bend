@@ -1,0 +1,23 @@
+# coverage looks inside the value of a T | nothing: name covers every case
+type Op
+    Plus
+    Minus
+    Num(v: int)
+def op_of(s)
+    if s == "+" do return Plus
+    if s == "-" do return Minus
+    if s == "7" do return Num(7)
+    nothing
+def name(s)
+    match op_of(s)
+        nothing => "unknown"
+        Plus => "plus"
+        Minus => "minus"
+        Num(n) => "num {n}"
+def partial(s)
+    match op_of(s)
+        nothing => "unknown"
+        Plus => "plus"
+        Num(n) => "num {n}"
+print(["+", "-", "7", "?"] *> name)
+print(partial("+"))

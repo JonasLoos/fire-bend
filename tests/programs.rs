@@ -167,3 +167,37 @@ fn laws_are_classified_and_property_tested() {
         assert!(out.contains(&format!("law {}: holds", law)), "{}", out);
     }
 }
+
+#[test]
+fn property_tests_build() {
+    // a constructor over another declared type, a binding completed by a
+    // loop the test program drops, and lists that repeat an element
+    let sources = [
+        "type O\n    A\n    B\ntype E\n    N(v: int)\n    Bn(o: O, l: E, r: E)\ndef size(e)\n    match e\n        N(_) => 1\n        Bn(_, l, r) => 1 + size(l) + size(r)\nlaw size_positive\n    for e: E\n    size(e) >= 1\n",
+        "var xs = []\nfor i in [1, 2]\n    xs.push({size: i})\nprint(sum(xs *> $.size))\ndef twice(n)\n    n * 2\nlaw twice_even\n    for n: int\n    twice(n) % 2 == 0\n",
+    ];
+    for src in sources {
+        fire_bend::compile_tests(src).unwrap_or_else(|d| panic!("{:?}", d));
+    }
+    // a false law that only a repeated element breaks is caught
+    let src = "def increasing(xs: [int])\n    for i in 1..len(xs)\n        if xs[i - 1] >= xs[i] do return false\n    true\nlaw sorted_is_strict\n    for xs: [int]\n    increasing(sorted(xs))\n";
+    let tests = fire_bend::compile_tests(src).unwrap();
+    if std::env::var("BEND_TESTS").unwrap_or_default() == "skip" || !bend_available() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("fire-dup-tests-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("dups.bend");
+    std::fs::write(&file, &tests).unwrap();
+    let run = Command::new("bend").arg(&file).env("BEND_NO_TELEMETRY", "1").output().unwrap();
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(out.contains("law sorted_is_strict: FAILS"), "{}", out);
+}
+
+#[test]
+fn check_lists_partial_matches() {
+    let source = std::fs::read_to_string(repo().join("tests/cases/match_coverage_through_maybe.fire")).unwrap();
+    let (_, report) = fire_bend::compile_for_check(&source).unwrap();
+    // `partial` leaves out `Minus`; `name` covers every case
+    assert_eq!(report.partial_matches, vec![18]);
+}

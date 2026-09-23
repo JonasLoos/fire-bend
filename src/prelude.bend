@@ -389,6 +389,10 @@ def F.i32.show.k(+x: U32, neg: Bool) -> String:
 def F.i32.show(+x: U32) -> String:
   F.i32.show.k(x, F.i32.neg(x))
 
+# the message an index out of range aborts with
+def F.index_error(what: String, +i: U32, +len: U32) -> String:
+  what ++ " index " ++ F.i32.show(i) ++ " out of range for length " ++ F.i32.show(len)
+
 def F.i32.to_f32.k(+x: U32, neg: Bool) -> F32:
   match neg:
     case True{}:
@@ -606,15 +610,15 @@ def F.str.nat_index.k(+len: U32, +i: U32, neg: Bool) -> Nat:
 def F.str.nat_index(+len: U32, +i: U32) -> Nat:
   F.str.nat_index.k(len, i, F.i32.neg(i))
 
-def F.str.index.k(m: Maybe<&2, Char>) -> Result<&2, &2, String, String>:
+def F.str.index.k(m: Maybe<&2, Char>, +i: U32, +len: U32) -> Result<&2, &2, String, String>:
   match m:
     case Some{c}:
       Done{SCon{c, SNil{}}}
     case None{}:
-      Fail{"string index out of range"}
+      Fail{F.index_error("string", i, len)}
 
 def F.str.index(+s: String, +i: U32) -> Result<&2, &2, String, String>:
-  F.str.index.k(String.get(s, F.str.nat_index(F.str.len(s), i)))
+  F.str.index.k(String.get(s, F.str.nat_index(F.str.len(s), i)), i, F.str.len(s))
 
 def F.str.take(s: String, +n: U32) -> String:
   String.take(s, U32.to_nat(F.i32.max(n, 0)))
@@ -941,15 +945,15 @@ def F.list.take(-A: Data, xs: List<&2, A>, +n: U32) -> List<&2, A>:
 def F.list.drop(-A: Data, xs: List<&2, A>, +n: U32) -> List<&2, A>:
   List.drop(&2, A, xs, U32.to_nat(F.i32.max(n, 0)))
 
-def F.list.index.k(-A: Data, m: Maybe<&2, A>) -> Result<&2, &2, String, A>:
+def F.list.index.k(-A: Data, m: Maybe<&2, A>, +i: U32, +len: U32) -> Result<&2, &2, String, A>:
   match m:
     case Some{v}:
       Done{v}
     case None{}:
-      Fail{"list index out of range"}
+      Fail{F.index_error("list", i, len)}
 
 def F.list.index(-A: Data, +xs: List<&2, A>, +i: U32) -> Result<&2, &2, String, A>:
-  F.list.index.k(A, List.get(&2, A, xs, F.str.nat_index(F.list.len(A, xs), i)))
+  F.list.index.k(A, List.get(&2, A, xs, F.str.nat_index(F.list.len(A, xs), i)), i, F.list.len(A, xs))
 
 def F.list.slice.k(-A: Data, xs: List<&2, A>, +a: U32, +b: U32) -> List<&2, A>:
   List.take(&2, A, List.drop(&2, A, xs, U32.to_nat(a)), U32.to_nat(F.i32.max((b - a : U32), 0)))
@@ -976,7 +980,7 @@ def F.list.set.k(-A: Data, +xs: List<&2, A>, +i: U32, +v: A, ok: Bool) -> Result
     case True{}:
       Done{F.list.set.go(A, xs, F.str.nat_index(F.list.len(A, xs), i), v)}
     case False{}:
-      Fail{"list index out of range"}
+      Fail{F.index_error("list", i, F.list.len(A, xs))}
 
 def F.list.set(-A: Data, +xs: List<&2, A>, +i: U32, +v: A) -> Result<&2, &2, String, List<&2, A>>:
   F.list.set.k(A, xs, i, v, Bool.and(F.i32.lt(i, F.list.len(A, xs)), F.i32.ge(i, (0 - F.list.len(A, xs) : U32))))

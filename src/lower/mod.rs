@@ -131,6 +131,12 @@ pub struct Lower<'a> {
     /// The mode a higher-order builtin method's term came out in (set by
     /// `builtin_method`, read by `concrete_op`).
     pub hof_mode: Option<Mode>,
+    /// Units whose type parameters are templates although no dictionary
+    /// or function parameter asks for it: a template argument in their
+    /// image mentions one (a loop driver's state type, say).
+    pub force_template: HashSet<DefId>,
+    /// The unit each emitted def (its body or a helper) belongs to.
+    pub ir_units: HashMap<String, DefId>,
 }
 
 /// Which laws an image carries: a runnable program carries the ones the
@@ -143,6 +149,37 @@ pub enum Laws {
 }
 
 pub fn lower_program(core: &Program, laws: Laws) -> Result<ir::Program, Vec<Diag>> {
+    // A unit's type parameters are erased unless something needs them at
+    // compile time. Where a template argument of the image still mentions
+    // an erased one, the unit is lowered again with template parameters;
+    // its callers then pass types as templates, which may need the same.
+    let mut force_template = HashSet::new();
+    loop {
+        let lw = lower_once(core, laws, force_template.clone());
+        if !lw.diags.is_empty() {
+            return Err(lw.diags);
+        }
+        let mut more = false;
+        for d in &lw.defs {
+            if d.erased.is_empty() {
+                continue;
+            }
+            let mut used = std::collections::BTreeSet::new();
+            d.body.template_params(&mut used);
+            if d.erased.iter().any(|p| used.contains(p))
+                && let Some(&unit) = lw.ir_units.get(&d.name)
+                && force_template.insert(unit)
+            {
+                more = true;
+            }
+        }
+        if !more {
+            return Ok(ir::Program { types: lw.types, defs: lw.defs, raw_prelude: PRELUDE.to_string() });
+        }
+    }
+}
+
+fn lower_once(core: &Program, laws: Laws, force_template: HashSet<DefId>) -> Lower<'_> {
     let mut lw = Lower {
         laws,
         core,
@@ -164,12 +201,11 @@ pub fn lower_program(core: &Program, laws: Laws) -> Result<ir::Program, Vec<Diag
         outs: HashSet::new(),
         ctor_names: Vec::new(),
         hof_mode: None,
+        force_template,
+        ir_units: HashMap::new(),
     };
     lw.run();
-    if !lw.diags.is_empty() {
-        return Err(lw.diags);
-    }
-    Ok(ir::Program { types: lw.types, defs: lw.defs, raw_prelude: PRELUDE.to_string() })
+    lw
 }
 
 /// Names Base declares that a user name must not shadow.
@@ -258,10 +294,8 @@ impl<'a> Lower<'a> {
         }
         self.compute_eff_params();
         self.classify_fn_params();
+        // a law has an image, never emitted, for the lambdas inside it
         for d in &self.core.defs {
-            if matches!(d.kind, DefKind::Law) {
-                continue;
-            }
             let image = self.make_image(d.id);
             self.images[d.id] = Some(image);
         }
@@ -832,7 +866,10 @@ impl<'a> Lower<'a> {
         }
         let fnp = self.fn_kinds[d].clone();
         // the unit's template function parameters are forwarded by lambdas
-        let template = !dicts.is_empty() || fnp.iter().any(|k| matches!(k, FnParamKind::Template { .. })) || self.fn_kinds[unit].iter().any(|k| matches!(k, FnParamKind::Template { .. }));
+        let template = !dicts.is_empty()
+            || fnp.iter().any(|k| matches!(k, FnParamKind::Template { .. }))
+            || self.fn_kinds[unit].iter().any(|k| matches!(k, FnParamKind::Template { .. }))
+            || self.force_template.contains(&unit);
         let env = if def.captures.is_empty() {
             None
         } else {
@@ -926,6 +963,7 @@ impl<'a> Lower<'a> {
         ir_def.is_unsafe = def.unsafe_ && !matches!(def.kind, DefKind::Lambda);
         // lambdas of an unsafe def are unsafe too when they recurse (they cannot)
         self.mark_reusable(&mut ir_def);
+        self.ir_units.insert(ir_def.name.clone(), def.unit);
         self.defs.push(ir_def);
     }
 

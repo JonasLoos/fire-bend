@@ -11,6 +11,22 @@ impl Checker {
     pub(crate) fn check_pattern(&mut self, p: &ast::Pattern, subject: &Type, maybe_value: bool) -> Pat {
         let line = self.line;
         let st = self.shallow(subject);
+        // beside a `nothing` arm, a structured pattern matches the value
+        if maybe_value
+            && let Type::Data(MAYBE, args) = &st
+        {
+            let structured = match p {
+                ast::Pattern::Object(_) | ast::Pattern::List(_) | ast::Pattern::Ctor(..) => true,
+                ast::Pattern::Identifier(name) => self.ctor_names.contains_key(name),
+                ast::Pattern::Literal(e) => !matches!(e, ast::Expression::Nothing),
+                _ => false,
+            };
+            if structured {
+                let inner = args[0].clone();
+                let sub = self.check_pattern(p, &inner, false);
+                return Pat::Con(MAYBE, 1, vec![sub]);
+            }
+        }
         match p {
             ast::Pattern::Identifier(name) => {
                 if name == "_" {

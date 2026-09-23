@@ -124,7 +124,7 @@ else = { (w* ~ block_nl | w+) ~ kw_else ~ (w+ ~ pipeline_expr_simple | w* ~ bloc
 /// Match statement.
 match_stmt = { kw_match ~ w+ ~ expression_small ~ w* ~ block }
 /// A guarded match arm: `pattern if condition => body` (only valid inside a match block).
-guarded_arm = { typecheck ~ w+ ~ kw_if ~ w+ ~ expression_small ~ w* ~ lambda_op ~ w* ~ (lambda_expr | block) }
+guarded_arm = { typecheck ~ w+ ~ kw_if ~ w+ ~ expression_small ~ w* ~ lambda_op ~ w* ~ (return_stmt | break_stmt | continue_stmt | pipeline_expr | block) }
 /// Method definition statement. The body block is optional: a constructor
 /// whose `public` parameters already declare all members needs none.
 /// `unsafe def` skips the termination check.
@@ -178,7 +178,9 @@ pipeline_expr_simple = { lambda_expr ~ (w* ~ pipeline_op ~ w* ~ pipeline_expr_si
 /// The part before `=>` is parsed once as an ordinary expression and upgraded
 /// to a parameter list by the AST builder — speculatively parsing it as
 /// parameters and re-parsing on failure made nesting exponentially slow.
-lambda_expr = { loop_expr ~ (w* ~ lambda_op ~ w* ~ (lambda_expr | block))? }
+/// A body may also be `return`, `break` or `continue`, which a match arm
+/// needs (`nothing => return 0`).
+lambda_expr = { loop_expr ~ (w* ~ lambda_op ~ w* ~ (return_stmt | break_stmt | continue_stmt | lambda_expr | block))? }
 /// A comprehension (`for x in xs do body`, `for x in xs if cond do body`)
 /// or a conditional expression.
 loop_expr = { loop_clause ~ (w+ ~ if_expr | do_or_block) | if_expr | expression_small }
@@ -405,10 +407,17 @@ string = @{ "'" ~ (!"'" ~ ANY)* ~ "'" }
 /// Double-quoted f-string (formatted string) literal with interpolation.
 fstring = { "\"" ~ (fstring_interp | fstring_escape | fstring_text)* ~ "\"" }
 /// An interpolated expression within an f-string.
-fstring_interp = { "{" ~ w* ~ (fstring_formatted | expression_big ~ w*) ~ "}" }
+fstring_interp = { "{" ~ w* ~ (fstring_formatted ~ "}" | fstring_split ~ "}" | expression_big ~ w* ~ "}") }
 /// An interpolation with a format spec: `{price:.2f}`, `{name:>10}`.
-/// The target is an access expression; parenthesize anything bigger.
 fstring_formatted = { call_or_access ~ format_spec }
+/// A format spec after a bigger expression (`{total / n:.1f}`): the text
+/// before the spec is parsed on its own (`fstring_expression`), since a `:`
+/// inside an expression would read as a type annotation.
+fstring_split = { fstring_target ~ format_spec_strict }
+/// `[[fill]align][width][.precision][f]`, and nothing else before the `}`.
+format_spec_strict = @{ ":" ~ ((!("}" | "\"" | NEWLINE) ~ ANY) ~ ("<" | ">" | "^") | ("<" | ">" | "^"))? ~ ASCII_DIGIT* ~ ("." ~ ASCII_DIGIT+)? ~ "f"? ~ &"}" }
+fstring_target = @{ ("'" ~ (!"'" ~ ANY)* ~ "'" | !(":" | "{" | "}" | "\"" | NEWLINE) ~ ANY)+ }
+fstring_expression = { SOI ~ w* ~ expression_big ~ w* ~ EOI }
 /// A format spec: `:` followed by `[[fill]align][width][.precision][type]`.
 format_spec = @{ ":" ~ (!("}" | "\"" | NEWLINE) ~ ANY)+ }
 /// An escape sequence within an f-string.
