@@ -309,9 +309,6 @@ def F.i32.eq(a: U32, b: U32) -> Bool:
 def F.i32.lt(a: U32, b: U32) -> Bool:
   U32.is_lt(U32.xor(a, 2147483648), U32.xor(b, 2147483648))
 
-def F.i32.le(a: U32, b: U32) -> Bool:
-  U32.is_le(U32.xor(a, 2147483648), U32.xor(b, 2147483648))
-
 def F.i32.ge(a: U32, b: U32) -> Bool:
   U32.is_ge(U32.xor(a, 2147483648), U32.xor(b, 2147483648))
 
@@ -465,9 +462,6 @@ def F.f32.has_dot(+s: String) -> Bool:
 
 def F.f32.show(+x: F32) -> String:
   F.f32.show.k(F32.show(x), F.f32.has_dot(F32.show(x)))
-
-def F.f32.add(a: F32, b: F32) -> F32:
-  (a + b : F32)
 
 def F.f32.eq(a: F32, b: F32) -> Bool:
   F32.is_eq(a, b)
@@ -1145,12 +1139,6 @@ def F.list.sort.le(~A: Data, ~lt: A -> A -> Bool, a: A, b: A) -> Bool:
 
 def F.list.sort(~A: Data, ~lt: A -> A -> Bool, xs: List<&2, A>) -> List<&2, A>:
   List.sort(~A, ~F.list.sort.le(~A, ~lt), xs)
-
-# sort by precomputed keys: zip, sort the pairs by key, drop the keys
-def F.list.sort_decorated.key(~K: Data, ~A: Data, e: Unit, p: F.Pair<K, A>) -> K:
-  match p:
-    case F.Pair{k, v}:
-      k
 
 def F.list.sort_decorated.val(~K: Data, ~A: Data, e: Unit, p: F.Pair<K, A>) -> A:
   match p:

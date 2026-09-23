@@ -49,7 +49,6 @@ impl<'a> Lower<'a> {
             }
             ExprKind::Con(tid, ci, args) => {
                 let ts: Vec<Term> = args.iter().map(|a| self.expr(ctx, a, pre)).collect();
-                // a function value stored in a field or list needs its full representation
                 Term::Ctor(self.ctor_name(*tid, *ci), ts)
             }
             ExprKind::Field(obj, tid, idx) => {
@@ -80,7 +79,7 @@ impl<'a> Lower<'a> {
             }
             ExprKind::Dict { id, args } => self.lower_dict_call(ctx, *id, args, &e.ty, pre, line),
             ExprKind::Lambda(d) => self.closure_value(ctx, *d, &e.ty, line),
-            ExprKind::DefRef { def, targs, dicts } => self.def_as_value(ctx, *def, targs, dicts, &e.ty, line),
+            ExprKind::DefRef { def, .. } => self.def_as_value(*def, &e.ty, line),
             ExprKind::Builtin(name, args) => self.lower_builtin(ctx, name, args, &e.ty, pre, line),
             ExprKind::If(c, t, el) => {
                 let cond = self.expr(ctx, c, pre);
@@ -94,9 +93,7 @@ impl<'a> Lower<'a> {
                 let mode = ctx.mode;
                 let a = self.expr_as_term(ctx, t, mode);
                 let b = self.expr_as_term(ctx, el, mode);
-                let thunk_ty = Ty::func(vec![Ty::Unit], mode.wrap(rty.clone()));
-                let pick = Term::call("Bool.pick", vec![Term::TyArg(thunk_ty), cond, Term::Lam(vec!["_".into()], Box::new(a)), Term::Lam(vec!["_".into()], Box::new(b))]);
-                let t = Term::App(Box::new(pick), vec![Term::unit()]);
+                let t = self.pick_thunks(cond, a, b, mode.wrap(rty.clone()));
                 self.bind_monadic(ctx, t, mode, &rty, pre, line)
             }
             ExprKind::Match(subject, arms) => self.lower_match_expr(ctx, subject, arms, &e.ty, pre, line),
@@ -122,9 +119,8 @@ impl<'a> Lower<'a> {
                 }
                 let mode = ctx.mode;
                 let y = self.expr_as_term(ctx, b, mode);
-                let f = Term::Lam(vec!["_".into()], Box::new(self.lift_mode(Term::boolean(false), Mode::Pure, mode, &Ty::Bool)));
-                let pick = Term::call("Bool.pick", vec![Term::TyArg(Ty::func(vec![Ty::Unit], mode.wrap(Ty::Bool))), x, Term::Lam(vec!["_".into()], Box::new(y)), f]);
-                let t = Term::App(Box::new(pick), vec![Term::unit()]);
+                let f = self.lift_mode(Term::boolean(false), Mode::Pure, mode, &Ty::Bool);
+                let t = self.pick_thunks(x, y, f, mode.wrap(Ty::Bool));
                 self.bind_monadic(ctx, t, mode, &Ty::Bool, pre, line)
             }
             ExprKind::Or(a, b) => {
@@ -135,9 +131,8 @@ impl<'a> Lower<'a> {
                 }
                 let mode = ctx.mode;
                 let y = self.expr_as_term(ctx, b, mode);
-                let t_ = Term::Lam(vec!["_".into()], Box::new(self.lift_mode(Term::boolean(true), Mode::Pure, mode, &Ty::Bool)));
-                let pick = Term::call("Bool.pick", vec![Term::TyArg(Ty::func(vec![Ty::Unit], mode.wrap(Ty::Bool))), x, t_, Term::Lam(vec!["_".into()], Box::new(y))]);
-                let t = Term::App(Box::new(pick), vec![Term::unit()]);
+                let t_ = self.lift_mode(Term::boolean(true), Mode::Pure, mode, &Ty::Bool);
+                let t = self.pick_thunks(x, t_, y, mode.wrap(Ty::Bool));
                 self.bind_monadic(ctx, t, mode, &Ty::Bool, pre, line)
             }
             ExprKind::Not(x) => {
@@ -160,24 +155,17 @@ impl<'a> Lower<'a> {
                 }
             }
             ExprKind::FString(parts) => {
-                let mut acc: Option<Term> = None;
-                for p in parts {
-                    let piece = match p {
-                        FPart::Text(t) => Term::Str(t.clone()),
-                        FPart::Expr(x, spec) => {
-                            let s = self.expr(ctx, x, pre);
-                            match spec {
-                                Some(pad) => self.pad(s, pad),
-                                None => s,
-                            }
+                let pieces: Vec<Term> = parts.iter().map(|p| match p {
+                    FPart::Text(t) => Term::Str(t.clone()),
+                    FPart::Expr(x, spec) => {
+                        let s = self.expr(ctx, x, pre);
+                        match spec {
+                            Some(pad) => self.pad(s, pad),
+                            None => s,
                         }
-                    };
-                    acc = Some(match acc {
-                        None => piece,
-                        Some(a) => Term::cat(a, piece),
-                    });
-                }
-                acc.unwrap_or(Term::Str(String::new()))
+                    }
+                }).collect();
+                pieces.into_iter().reduce(Term::cat).unwrap_or(Term::Str(String::new()))
             }
             ExprKind::SelfValue(tid) => {
                 let t = self.core.types[*tid].clone();
@@ -199,14 +187,15 @@ impl<'a> Lower<'a> {
             Type::Data(_, a) => a,
             _ => vec![],
         };
-        let eff = self.eff_params[tid].clone();
-        let mut out = Vec::new();
-        for (v, i) in &eff {
-            let actual = self.instantiate_eff(tid, *v, *i, &args);
-            let at = self.ty_in(ctx, &actual, line);
-            out.push(Term::TyArg(at));
+        self.eff_actuals(tid, &args).iter().map(|a| Term::TyArg(self.ty_in(ctx, a, line))).collect()
+    }
+
+    /// The element type of a list type (`Unit` for anything else).
+    fn list_elem_ty(&mut self, ctx: &FnCtx, t: &Type, line: usize) -> Ty {
+        match self.store.shallow(t) {
+            Type::List(e) => self.ty_in(ctx, &e, line),
+            _ => Ty::Unit,
         }
-        out
     }
 
     /// Bind an operation that may fail right here (an index, a conversion,
@@ -324,13 +313,8 @@ impl<'a> Lower<'a> {
                 call_args.push(Term::TmplRef(dp.name.clone()));
             }
         } else {
-            for (k, _) in img.dicts.iter().enumerate() {
-                let t = match dicts.get(k) {
-                    Some(cid) => self.dict_term(ctx, *cid, line),
-                    None => Term::unit(),
-                };
-                call_args.push(tmpl_arg(t));
-            }
+            let ds = self.dict_args(ctx, &img, dicts, line);
+            call_args.extend(ds);
         }
         // template function codes
         for fv in fn_vals.iter().flatten() {
@@ -423,7 +407,7 @@ impl<'a> Lower<'a> {
         let def = self.core.defs[d].clone();
         let env_ty = self.env_ty(d, use_ty, &ctx.tparams.clone(), line);
         let env = self.env_record(ctx, d);
-        let code = if ctx.unit == def.unit { self.code_term(ctx, &img, &def, line) } else { self.code_term_at(ctx, &img, &def, use_ty, line) };
+        let code = if ctx.unit == def.unit { self.code_term(ctx, &img, &def) } else { self.code_term_at(ctx, &img, &def, use_ty, line) };
         FnVal { code, env, env_ty, mode: img.mode }
     }
 
@@ -445,8 +429,6 @@ impl<'a> Lower<'a> {
     /// The code term of a closure outside its unit: the unit's type
     /// parameters and dictionaries come from the use-site type.
     fn code_term_at(&mut self, ctx: &mut FnCtx, img: &Image, def: &Def, use_ty: Option<&Type>, line: usize) -> Term {
-        let n = def.params.len();
-        let params: Vec<String> = (0..n).map(|i| format!("__a{}", i)).collect();
         let bindings = self.closure_bindings(def.id, use_ty);
         let unit_img = self.images[img.unit].clone().unwrap();
         let mut type_terms = Vec::new();
@@ -457,114 +439,34 @@ impl<'a> Lower<'a> {
         if unit_img.fnp.iter().any(|k| matches!(k, FnParamKind::Template { .. })) {
             self.error(line, format!("a function value made inside {} cannot be called outside it, because {} takes a function as a template; pass the function on instead", self.core.defs[img.unit].name, self.core.defs[img.unit].name));
         }
-        let mut args = Vec::new();
-        if img.template {
-            for t in &type_terms {
-                args.push(Term::TmplTy(t.clone()));
-            }
-        }
         let subst: Vec<(TVar, Type)> = bindings.iter().map(|(v, t)| (*v, t.clone())).collect();
+        let mut dict_terms = Vec::new();
         for dp in &img.dicts {
             let c = self.store.constraints[dp.id].clone();
             let class = self.store.substitute_class(&c.class, &subst);
             let subject = self.store.substitute(&c.subject, &subst);
             let t = self.dict_for(ctx, class, subject, line);
-            args.push(tmpl_arg(t));
+            dict_terms.push(tmpl_arg(t));
         }
-        if !img.template {
-            for t in &type_terms {
-                args.push(Term::TyArg(t.clone()));
-            }
-        }
-        let callee = if img.fuel { self.fuel_entry(def.id) } else { img.name.clone() };
-        if img.env.is_some() {
-            args.push(Term::var("__e"));
-        }
-        for &i in &img.order {
-            args.push(Term::var(&params[i]));
-        }
-        let mut lam_params = vec!["__e".to_string()];
-        lam_params.extend(params);
-        Term::Lam(lam_params, Box::new(Term::Call(callee, args)))
+        let args = image_prefix(img, &type_terms, dict_terms);
+        self.code_lambda(img, def.id, args)
     }
 
     /// `~(e => x => name(<forwarded template args>, e, x))`: the closed
     /// code term of a def, forwarding the current def's template
     /// parameters (the same unit's).
-    fn code_term(&mut self, ctx: &mut FnCtx, img: &Image, def: &Def, _line: usize) -> Term {
-        let n = def.params.len();
-        let params: Vec<String> = (0..n).map(|i| format!("__a{}", i)).collect();
-        let mut args = Vec::new();
-        if img.template {
-            for (_, tn) in &img.tparams {
-                args.push(Term::TmplTy(Ty::Param(tn.clone())));
-            }
-        }
-        // env types of the unit's template fn params
-        let owner_img = self.images[img.unit].clone().unwrap();
-        for k in &owner_img.fnp {
-            if let FnParamKind::Template { env_ty, .. } = k {
-                args.push(Term::TmplTy(Ty::Param(env_ty.clone())));
-            }
-        }
-        for dp in &img.dicts {
-            args.push(Term::TmplRef(dp.name.clone()));
-        }
-        for k in &owner_img.fnp {
-            if let FnParamKind::Template { code, .. } = k {
-                args.push(Term::TmplRef(code.clone()));
-            }
-        }
-        if !img.template {
-            for (_, tn) in &img.tparams {
-                args.push(Term::TyArg(Ty::Param(tn.clone())));
-            }
-        }
-        let callee = if img.fuel { self.fuel_entry(def.id) } else { img.name.clone() };
-        // a def without captures has no environment parameter: the code
-        // takes the (unit) environment and drops it
-        if img.env.is_some() {
-            args.push(Term::var("__e"));
-        }
-        for &i in &img.order {
-            args.push(Term::var(&params[i]));
-        }
-        let _ = ctx;
-        let mut lam_params = vec!["__e".to_string()];
-        lam_params.extend(params);
-        Term::Lam(lam_params, Box::new(Term::Call(callee, args)))
+    fn code_term(&mut self, ctx: &FnCtx, img: &Image, def: &Def) -> Term {
+        let args = self.forward_args(ctx);
+        self.code_lambda(img, def.id, args)
     }
 
-    /// A top-level def used as a value.
-    fn defref_fn_value(&mut self, ctx: &mut FnCtx, d: DefId, targs: &[Type], dicts: &[ConstraintId], line: usize) -> FnVal {
-        let img = self.images[d].clone().unwrap();
-        let def = self.core.defs[d].clone();
-        if img.fnp.iter().any(|k| matches!(k, FnParamKind::Template { .. })) {
-            self.error(line, format!("{} takes a function as a template and cannot be used as a value; wrap it in a lambda", def.name));
-        }
-        let n = def.params.len();
-        let params: Vec<String> = (0..n).map(|i| format!("__a{}", i)).collect();
-        let mut args = Vec::new();
-        let type_terms: Vec<Ty> = targs.iter().map(|t| self.ty_in(ctx, t, line)).collect();
-        if img.template {
-            for t in &type_terms {
-                args.push(Term::TmplTy(t.clone()));
-            }
-        }
-        for (k, _) in img.dicts.iter().enumerate() {
-            let t = match dicts.get(k) {
-                Some(cid) => self.dict_term(ctx, *cid, line),
-                None => Term::unit(),
-            };
-            args.push(tmpl_arg(t));
-        }
-        if !img.template {
-            for t in &type_terms {
-                args.push(Term::TyArg(t.clone()));
-            }
-        }
-        // a def counting down an int starts its fuel in a forwarder: the
-        // code is inlined where it is called, so it may use each argument once
+    /// `__e => __a0 => .. => name(args, __e, __a0, ..)`: the code of a def
+    /// as a lambda over its environment and its values (a def without
+    /// captures ignores the environment). A def counting down an int
+    /// starts its fuel in a forwarder: the code is inlined where it is
+    /// called, so it may use each argument once.
+    fn code_lambda(&mut self, img: &Image, d: DefId, mut args: Vec<Term>) -> Term {
+        let params: Vec<String> = (0..self.core.defs[d].params.len()).map(|i| format!("__a{}", i)).collect();
         let callee = if img.fuel { self.fuel_entry(d) } else { img.name.clone() };
         if img.env.is_some() {
             args.push(Term::var("__e"));
@@ -574,7 +476,28 @@ impl<'a> Lower<'a> {
         }
         let mut lam_params = vec!["__e".to_string()];
         lam_params.extend(params);
-        let code = Term::Lam(lam_params, Box::new(Term::Call(callee, args)));
+        Term::Lam(lam_params, Box::new(Term::Call(callee, args)))
+    }
+
+    /// The dictionary arguments of a call of an image, from the call's
+    /// solved constraints.
+    fn dict_args(&mut self, ctx: &FnCtx, img: &Image, dicts: &[ConstraintId], line: usize) -> Vec<Term> {
+        (0..img.dicts.len()).map(|k| match dicts.get(k) {
+            Some(cid) => tmpl_arg(self.dict_term(ctx, *cid, line)),
+            None => tmpl_arg(Term::unit()),
+        }).collect()
+    }
+
+    /// A top-level def used as a value.
+    fn defref_fn_value(&mut self, ctx: &mut FnCtx, d: DefId, targs: &[Type], dicts: &[ConstraintId], line: usize) -> FnVal {
+        let img = self.images[d].clone().unwrap();
+        if img.fnp.iter().any(|k| matches!(k, FnParamKind::Template { .. })) {
+            self.error(line, format!("{} takes a function as a template and cannot be used as a value; wrap it in a lambda", self.core.defs[d].name));
+        }
+        let type_terms: Vec<Ty> = targs.iter().map(|t| self.ty_in(ctx, t, line)).collect();
+        let dict_terms = self.dict_args(ctx, &img, dicts, line);
+        let args = image_prefix(&img, &type_terms, dict_terms);
+        let code = self.code_lambda(&img, d, args);
         let env = self.env_record(ctx, d);
         let env_ty = self.env_ty(d, None, &ctx.tparams.clone(), line);
         FnVal { code, env, env_ty, mode: img.mode }
@@ -591,7 +514,7 @@ impl<'a> Lower<'a> {
     /// that several functions flow into): its environment in the sum. The
     /// sum's `call` def calls it without type arguments, so a def that
     /// needs operations on its types cannot be stored this way.
-    fn def_as_value(&mut self, _ctx: &mut FnCtx, d: DefId, _targs: &[Type], _dicts: &[ConstraintId], ty: &Type, line: usize) -> Term {
+    fn def_as_value(&mut self, d: DefId, ty: &Type, line: usize) -> Term {
         let img = self.images[d].clone().unwrap();
         if img.template {
             let name = self.core.defs[d].name.clone();
@@ -625,9 +548,8 @@ impl<'a> Lower<'a> {
                     (Class::Index(..), Type::List(_) | Type::Str | Type::Data(RANGE, _)) => Mode::Result,
                     (Class::IndexSet(..), Type::List(_)) => Mode::Result,
                     (Class::Method(n, _, _), Type::Str) if matches!(n.as_str(), "to_int" | "to_float") => Mode::Result,
-                    (Class::Method(n, _, _), Type::List(_)) if matches!(n.as_str(), "min" | "max" | "pop" | "reduce") => {
-                        if n == "reduce" && matches!(&c.class, Class::Method(_, a, _) if a.len() == 1) { Mode::Result } else if n == "reduce" { Mode::Pure } else { Mode::Result }
-                    }
+                    // `reduce` with no initial value fails on an empty list
+                    (Class::Method(n, a, _), Type::List(_)) if matches!(n.as_str(), "min" | "max" | "pop") || (n == "reduce" && a.len() == 1) => Mode::Result,
                     (Class::Method(n, _, _), Type::Data(RANGE, _)) if matches!(n.as_str(), "min" | "max" | "first" | "last") => Mode::Result,
                     (Class::Convert(_, _), Type::Str) => Mode::Result,
                     _ => Mode::Pure,
@@ -685,7 +607,7 @@ impl<'a> Lower<'a> {
                 }
             },
             Some(Solution::Concrete(subs)) => {
-                let (t, m) = self.concrete_op(ctx, id, &subs, terms, fnvals, &rty, line);
+                let (t, m) = self.concrete_op(ctx, id, &subs, terms, fnvals, line);
                 mode = m;
                 t
             }
@@ -705,28 +627,10 @@ impl<'a> Lower<'a> {
     /// The implementation of a class method as a dictionary term.
     pub fn method_dict(&mut self, ctx: &FnCtx, m: DefId, targs: &[Type], dicts: &[ConstraintId], line: usize) -> Term {
         let img = self.images[m].clone().unwrap();
-        let def = self.core.defs[m].clone();
-        let n = def.params.len();
-        let params: Vec<String> = (0..n).map(|i| format!("__a{}", i)).collect();
-        let mut args = Vec::new();
+        let params: Vec<String> = (0..self.core.defs[m].params.len()).map(|i| format!("__a{}", i)).collect();
         let type_terms: Vec<Ty> = targs.iter().map(|t| self.ty(t, &ctx.tparams.clone(), line)).collect();
-        if img.template {
-            for t in &type_terms {
-                args.push(Term::TmplTy(t.clone()));
-            }
-        }
-        for (k, _) in img.dicts.iter().enumerate() {
-            let t = match dicts.get(k) {
-                Some(cid) => self.dict_term(ctx, *cid, line),
-                None => Term::unit(),
-            };
-            args.push(tmpl_arg(t));
-        }
-        if !img.template {
-            for t in &type_terms {
-                args.push(Term::TyArg(t.clone()));
-            }
-        }
+        let dict_terms = self.dict_args(ctx, &img, dicts, line);
+        let mut args = image_prefix(&img, &type_terms, dict_terms);
         for &i in &img.order {
             args.push(Term::var(&params[i]));
         }
@@ -813,8 +717,7 @@ impl<'a> Lower<'a> {
         let params: Vec<String> = (0..arity).map(|i| format!("__d{}", i)).collect();
         let terms: Vec<Term> = params.iter().map(|p| Term::var(p)).collect();
         let mut tmp_ctx = ctx.clone();
-        let rty = Ty::Unit;
-        let (body, mode) = self.concrete_op(&mut tmp_ctx, id, subs, terms, vec![], &rty, line);
+        let (body, mode) = self.concrete_op(&mut tmp_ctx, id, subs, terms, vec![], line);
         // fallible classes answer a result in dictionary form
         let body = match mode {
             Mode::Pure if c.class.fallible() => Term::ctor("Done", vec![body]),
@@ -830,7 +733,7 @@ impl<'a> Lower<'a> {
     /// The Bend term for a solved concrete constraint applied to arguments,
     /// and the mode it answers in (a higher-order method's function may
     /// add to the class's own).
-    fn concrete_op(&mut self, ctx: &mut FnCtx, id: ConstraintId, subs: &[ConstraintId], mut terms: Vec<Term>, fnvals: Vec<FnVal>, _rty: &Ty, line: usize) -> (Term, Mode) {
+    fn concrete_op(&mut self, ctx: &mut FnCtx, id: ConstraintId, subs: &[ConstraintId], mut terms: Vec<Term>, fnvals: Vec<FnVal>, line: usize) -> (Term, Mode) {
         let c = self.store.constraints[id].clone();
         let base = self.dict_mode(id);
         self.hof_mode = None;
@@ -838,16 +741,13 @@ impl<'a> Lower<'a> {
         let st = self.ty_in(ctx, &subject, line);
         let sub_terms: Vec<Term> = subs.iter().map(|s| self.dict_term(ctx, *s, line)).collect();
         let t = match (&c.class, &subject) {
-            (Class::Eq, _) => {
-                let f = self.derived_op(ctx, "eq", &subject, subs, line);
-                apply_term(f, terms)
-            }
-            (Class::Ord, _) => {
-                let f = self.derived_op(ctx, "lt", &subject, subs, line);
-                apply_term(f, terms)
-            }
-            (Class::Show, _) => {
-                let f = self.derived_op(ctx, "show", &subject, subs, line);
+            (Class::Eq | Class::Ord | Class::Show, _) => {
+                let kind = match c.class {
+                    Class::Eq => "eq",
+                    Class::Ord => "lt",
+                    _ => "show",
+                };
+                let f = self.derived_op(ctx, kind, &subject, subs, line);
                 apply_term(f, terms)
             }
             (Class::Arith(op), Type::Int) => {
@@ -963,7 +863,7 @@ impl<'a> Lower<'a> {
                 self.builtin_method(ctx, name, &subject, &st, terms, fnvals, &sub_terms, &margs, &mret, base, line)
             }
             _ => {
-                self.error(line, format!("no implementation of {} on {}", crate::check::describe_class(&c.class), self.store.resolve(&c.subject).show_short()));
+                self.error(line, format!("no implementation of {} on {:?}", crate::check::describe_class(&c.class), self.store.resolve(&c.subject)));
                 Term::unit()
             }
         };
@@ -1012,7 +912,7 @@ impl<'a> Lower<'a> {
                     _ => self.derived_op(ctx, if base == "show" { "repr" } else { base }, e, &[], line),
                 };
                 let prefix = if matches!(ty, Type::List(_)) { "F.list" } else { "F.map" };
-                lambda_over_pub(if base == "show" { 1 } else { 2 }, Term::Call(format!("{}.{}", prefix, base), vec![Term::TmplTy(et), tmpl_arg(sub)]))
+                lambda_over(if base == "show" { 1 } else { 2 }, Term::Call(format!("{}.{}", prefix, base), vec![Term::TmplTy(et), tmpl_arg(sub)]))
             }
             Type::Fn(..) => {
                 self.error(line, format!("cannot {} a function", kind));
@@ -1020,29 +920,22 @@ impl<'a> Lower<'a> {
             }
             Type::Data(id, args) => {
                 let id = *id;
-                let args = args.clone();
                 let name = self.derived_def(base, id, line);
-                let eff = self.eff_params[id].clone();
-                let mut call_args = Vec::new();
-                for (v, i) in &eff {
-                    let actual = self.instantiate_eff(id, *v, *i, &args);
-                    let at = self.ty_in(ctx, &actual, line);
-                    call_args.push(Term::TmplTy(at));
-                }
+                let actuals = self.eff_actuals(id, args);
+                let mut call_args: Vec<Term> = actuals.iter().map(|a| Term::TmplTy(self.ty_in(ctx, a, line))).collect();
                 let inner = component_kind(id, kind);
-                for (v, i) in &eff {
-                    let actual = self.instantiate_eff(id, *v, *i, &args);
+                for (actual, (_, i)) in actuals.iter().zip(self.eff_params[id].clone()) {
                     // the sub-constraint for this argument position (a string
                     // inside a container shows quoted, so derive that one)
-                    let quoted = inner == "repr" && matches!(self.store.shallow(&actual), Type::Str);
-                    let sub = match subs.get(*i) {
+                    let quoted = inner == "repr" && matches!(self.store.shallow(actual), Type::Str);
+                    let sub = match subs.get(i) {
                         Some(s) if !quoted => self.dict_term(ctx, *s, line),
-                        _ => self.derived_op(ctx, inner, &actual, &[], line),
+                        _ => self.derived_op(ctx, inner, actual, &[], line),
                     };
                     call_args.push(tmpl_arg(sub));
                 }
                 let arity = if base == "show" { 1 } else { 2 };
-                lambda_over_pub(arity, Term::Call(name, call_args))
+                lambda_over(arity, Term::Call(name, call_args))
             }
         }
     }
@@ -1116,28 +1009,17 @@ impl<'a> Lower<'a> {
             }
             ("map", Type::List(_)) => {
                 let et = elem_ty(self, ctx);
-                let bt = match self.store.shallow(mret) {
-                    Type::List(b) => self.ty_in(ctx, &b, line),
-                    _ => Ty::Unit,
-                };
+                let bt = self.list_elem_ty(ctx, mret, line);
                 let f = fnvals.remove(0);
-                let driver = match f.mode {
-                    Mode::Pure => "F.list.map_env",
-                    Mode::Result => "F.list.map_res_env",
-                    Mode::Io => "F.list.map_io_env",
-                };
-                let t = Term::Call(driver.into(), vec![Term::TmplTy(f.env_ty.clone()), Term::TmplTy(et), Term::TmplTy(bt), tmpl_arg(f.code), f.env, recv]);
+                let driver = hof_driver("map", f.mode);
+                let t = Term::Call(driver, vec![Term::TmplTy(f.env_ty.clone()), Term::TmplTy(et), Term::TmplTy(bt), tmpl_arg(f.code), f.env, recv]);
                 self.note_hof_mode(t, f.mode.join(base))
             }
             ("filter", Type::List(_)) => {
                 let et = elem_ty(self, ctx);
                 let f = fnvals.remove(0);
-                let driver = match f.mode {
-                    Mode::Pure => "F.list.filter_env",
-                    Mode::Result => "F.list.filter_res_env",
-                    Mode::Io => "F.list.filter_io_env",
-                };
-                let t = Term::Call(driver.into(), vec![Term::TmplTy(f.env_ty.clone()), Term::TmplTy(et), tmpl_arg(f.code), f.env, recv]);
+                let driver = hof_driver("filter", f.mode);
+                let t = Term::Call(driver, vec![Term::TmplTy(f.env_ty.clone()), Term::TmplTy(et), tmpl_arg(f.code), f.env, recv]);
                 self.note_hof_mode(t, f.mode.join(base))
             }
             ("each", Type::List(_)) => {
@@ -1147,44 +1029,28 @@ impl<'a> Lower<'a> {
                     Type::Fn(_, r, _) => self.ty_in(ctx, &r, line),
                     _ => Ty::Unit,
                 };
-                let driver = match f.mode {
-                    Mode::Pure => "F.list.each_env",
-                    Mode::Result => "F.list.each_res_env",
-                    Mode::Io => "F.list.each_io_env",
-                };
-                let t = Term::Call(driver.into(), vec![Term::TmplTy(f.env_ty.clone()), Term::TmplTy(et), Term::TmplTy(rt), tmpl_arg(f.code), f.env, recv]);
+                let driver = hof_driver("each", f.mode);
+                let t = Term::Call(driver, vec![Term::TmplTy(f.env_ty.clone()), Term::TmplTy(et), Term::TmplTy(rt), tmpl_arg(f.code), f.env, recv]);
                 self.note_hof_mode(t, f.mode.join(base))
             }
             ("reduce", Type::List(_)) => {
                 let et = elem_ty(self, ctx);
                 let f = fnvals.remove(0);
                 if terms.is_empty() {
-                    let driver = match f.mode {
-                        Mode::Pure => "F.list.reduce1_env",
-                        Mode::Result => "F.list.reduce1_res_env",
-                        Mode::Io => "F.list.reduce1_io_env",
-                    };
-                    let t = Term::Call(driver.into(), vec![Term::TmplTy(f.env_ty.clone()), Term::TmplTy(et), tmpl_arg(f.code), f.env, recv]);
+                    let driver = hof_driver("reduce1", f.mode);
+                    let t = Term::Call(driver, vec![Term::TmplTy(f.env_ty.clone()), Term::TmplTy(et), tmpl_arg(f.code), f.env, recv]);
                     self.note_hof_mode(t, f.mode.join(base))
                 } else {
                     let at = self.ty_in(ctx, mret, line);
-                    let driver = match f.mode {
-                        Mode::Pure => "F.list.foldl_env",
-                        Mode::Result => "F.list.foldl_res_env",
-                        Mode::Io => "F.list.foldl_io_env",
-                    };
-                    let t = Term::Call(driver.into(), vec![Term::TmplTy(f.env_ty.clone()), Term::TmplTy(et), Term::TmplTy(at), tmpl_arg(f.code), f.env, recv, arg(&mut terms, 0)]);
+                    let driver = hof_driver("foldl", f.mode);
+                    let t = Term::Call(driver, vec![Term::TmplTy(f.env_ty.clone()), Term::TmplTy(et), Term::TmplTy(at), tmpl_arg(f.code), f.env, recv, arg(&mut terms, 0)]);
                     self.note_hof_mode(t, f.mode.join(base))
                 }
             }
             ("any" | "all" | "count" | "find", Type::List(_)) => {
                 let et = elem_ty(self, ctx);
                 let f = fnvals.remove(0);
-                let driver = match f.mode {
-                    Mode::Pure => format!("F.list.{}_env", name),
-                    Mode::Result => format!("F.list.{}_res_env", name),
-                    Mode::Io => format!("F.list.{}_io_env", name),
-                };
+                let driver = hof_driver(name, f.mode);
                 let t = Term::Call(driver, vec![Term::TmplTy(f.env_ty.clone()), Term::TmplTy(et), tmpl_arg(f.code), f.env, recv]);
                 self.note_hof_mode(t, f.mode.join(base))
             }
@@ -1234,12 +1100,8 @@ impl<'a> Lower<'a> {
                         _ => Ty::U32,
                     };
                     let lt = self.elem_op(ctx, subs, subject, "lt", line);
-                    let driver = match f.mode {
-                        Mode::Pure => "F.list.sort_by_key_env",
-                        Mode::Result => "F.list.sort_by_key_res_env",
-                        Mode::Io => "F.list.sort_by_key_io_env",
-                    };
-                    let t = Term::Call(driver.into(), vec![Term::TmplTy(f.env_ty.clone()), Term::TmplTy(et), Term::TmplTy(kt), tmpl_arg(f.code), tmpl_arg(lt), f.env, recv]);
+                    let driver = hof_driver("sort_by_key", f.mode);
+                    let t = Term::Call(driver, vec![Term::TmplTy(f.env_ty.clone()), Term::TmplTy(et), Term::TmplTy(kt), tmpl_arg(f.code), tmpl_arg(lt), f.env, recv]);
                     self.note_hof_mode(t, f.mode.join(base))
                 }
             }
@@ -1277,10 +1139,7 @@ impl<'a> Lower<'a> {
                 Term::call("F.list.is_empty", vec![ta(et), recv])
             }
             ("flatten", Type::List(_)) => {
-                let it = match self.store.shallow(mret) {
-                    Type::List(i) => self.ty_in(ctx, &i, line),
-                    _ => Ty::Unit,
-                };
+                let it = self.list_elem_ty(ctx, mret, line);
                 Term::call("F.list.flatten", vec![ta(it), recv])
             }
             // ranges
@@ -1428,17 +1287,11 @@ impl<'a> Lower<'a> {
                 self.bind_failing(ctx, t, &rty, pre, line)
             }
             "list.drop" => {
-                let et = match self.store.shallow(&args[0].ty) {
-                    Type::List(e) => self.ty_in(ctx, &e, line),
-                    _ => Ty::Unit,
-                };
+                let et = self.list_elem_ty(ctx, &args[0].ty, line);
                 Term::call("F.list.drop", vec![Term::TyArg(et), a(0), a(1)])
             }
             "list.need_exactly" | "list.need_at_least" => {
-                let et = match self.store.shallow(&args[0].ty) {
-                    Type::List(e) => self.ty_in(ctx, &e, line),
-                    _ => Ty::Unit,
-                };
+                let et = self.list_elem_ty(ctx, &args[0].ty, line);
                 let f = if name == "list.need_exactly" { "F.list.need_exactly" } else { "F.list.need_at_least" };
                 let t = Term::call(f, vec![Term::TyArg(et), a(0), a(1)]);
                 self.bind_failing(ctx, t, &Ty::Unit, pre, line)
@@ -1480,10 +1333,7 @@ impl<'a> Lower<'a> {
             "strings.char_code" => Term::call("F.str.char_code", vec![a(0)]),
             "strings.from_char_code" => Term::call("F.str.from_char_code", vec![a(0)]),
             "lists.flatten" => {
-                let it = match self.store.shallow(ret_ty) {
-                    Type::List(i) => self.ty_in(ctx, &i, line),
-                    _ => Ty::Unit,
-                };
+                let it = self.list_elem_ty(ctx, ret_ty, line);
                 Term::call("F.list.flatten", vec![Term::TyArg(it), a(0)])
             }
             "lists.repeat" => {
@@ -1523,6 +1373,23 @@ impl<'a> Lower<'a> {
     }
 }
 
+/// The list driver of a higher-order method in its callback's mode:
+/// `F.list.map_env`, `F.list.map_res_env`, `F.list.map_io_env`.
+fn hof_driver(name: &str, mode: Mode) -> String {
+    format!("F.list.{}{}_env", name, mode.suffix())
+}
+
+/// The leading arguments of a call of an image: its type arguments
+/// (templates or erased) around its dictionaries.
+fn image_prefix(img: &Image, types: &[Ty], dicts: Vec<Term>) -> Vec<Term> {
+    let mut args: Vec<Term> = if img.template { types.iter().map(|t| Term::TmplTy(t.clone())).collect() } else { vec![] };
+    args.extend(dicts);
+    if !img.template {
+        args.extend(types.iter().map(|t| Term::TyArg(t.clone())));
+    }
+    args
+}
+
 /// Builtin methods whose function argument is passed as code plus
 /// environment.
 pub fn is_hof_method(n: &str) -> bool {
@@ -1554,25 +1421,5 @@ pub fn builtin_mode(name: &str) -> Mode {
         "print" | "io.read_file" | "io.write_file" | "time.now" => Mode::Io,
         "assert" | "maybe.unwrap" | "result.unwrap_ok" | "result.unwrap_err" | "list.at" | "list.need_exactly" | "list.need_at_least" => Mode::Result,
         _ => Mode::Pure,
-    }
-}
-
-pub fn lambda_over_pub(arity: usize, call: Term) -> Term {
-    let params: Vec<String> = (0..arity).map(|i| format!("__x{}", i)).collect();
-    let body = match call {
-        Term::Call(f, mut args) => {
-            for p in &params {
-                args.push(Term::var(p));
-            }
-            Term::Call(f, args)
-        }
-        other => other,
-    };
-    Term::Lam(params, Box::new(body))
-}
-
-impl Type {
-    pub fn show_short(&self) -> String {
-        format!("{:?}", self)
     }
 }

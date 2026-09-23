@@ -7,25 +7,15 @@
 use super::body::FnCtx;
 use super::*;
 
-/// A law as the IR carries it: rendered lines.
 impl<'a> Lower<'a> {
     pub fn emit_laws(&mut self) {
         for law in self.core.laws.clone() {
             if self.laws == Laws::Proven && law.proof == Proof::Open {
                 continue;
             }
+            // the IR carries a law as a def holding its Bend text
             let text = self.law_text(&law);
-            self.defs.push(IrDef {
-                name: format!("law:{}", law.name),
-                is_unsafe: false,
-                tmpl_types: vec![],
-                tmpl_funcs: vec![],
-                erased: vec![],
-                erased_types: vec![],
-                params: vec![],
-                ret: Ty::Unit,
-                body: Body::term(Term::Var(text)),
-            });
+            self.defs.push(IrDef::new(format!("law:{}", law.name), vec![], Ty::Unit, Body::term(Term::Var(text))));
         }
     }
 
@@ -45,20 +35,14 @@ impl<'a> Lower<'a> {
         }
         for (i, h) in law.hyps.iter().enumerate() {
             let (t, ty) = self.law_sides(&mut ctx, &[h], &Type::Bool, line);
-            out.push_str(&format!("  for h{}: {{{} == {} : {}}}\n", i, render_term(&t[0]), render_term(&t[1]), ty.render()));
+            out.push_str(&format!("  for h{}: {}\n", i, equation(&t, &ty)));
             names.push(format!("h{}", i));
         }
-        let claim = match &law.claim {
-            Claim::Equation(a, b, t) => {
-                let (ts, ty) = self.law_sides(&mut ctx, &[a, b], t, line);
-                format!("{{{} == {} : {}}}", render_term(&ts[0]), render_term(&ts[1]), ty.render())
-            }
-            Claim::Holds(x) => {
-                let (ts, ty) = self.law_sides(&mut ctx, &[x], &Type::Bool, line);
-                format!("{{{} == {} : {}}}", render_term(&ts[0]), render_term(&ts[1]), ty.render())
-            }
+        let (ts, ty) = match &law.claim {
+            Claim::Equation(a, b, t) => self.law_sides(&mut ctx, &[a, b], t, line),
+            Claim::Holds(x) => self.law_sides(&mut ctx, &[x], &Type::Bool, line),
         };
-        out.push_str(&format!("  {}\n", claim));
+        out.push_str(&format!("  {}\n", equation(&ts, &ty)));
         match law.proof {
             Proof::Closed => {
                 out.push_str(&format!("\ndef {}():\n  {{==}}\n", law.name));
@@ -122,4 +106,9 @@ impl<'a> Lower<'a> {
             self.case_split(vars, i + 1, indent + 2, out);
         }
     }
+}
+
+/// `{a == b : T}`
+fn equation(sides: &[Term], ty: &Ty) -> String {
+    format!("{{{} == {} : {}}}", sides[0].render(), sides[1].render(), ty.render())
 }
