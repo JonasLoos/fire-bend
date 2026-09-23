@@ -1,4 +1,5 @@
-# push (with several values) and pop rebind the list; pop also yields the value
+# push (with several values) and pop rebind their list, at top level, from
+# any binding, and in a def; pop also yields the value
 xs = []
 xs.push(1)
 xs.push(2, 3)
@@ -6,3 +7,19 @@ print(xs)
 var ys = [7, 8, 9]
 last = ys.pop()
 print(last, ys)
+zs = [1, 2, 3]
+z = zs.pop()
+print(z, zs)
+
+def build(n)
+    var out = []
+    for i in 0..n
+        out.push(i)
+    out
+print(build(3))
+
+def words()
+    out = ["a"]
+    out.push("b")
+    out.join(" ")
+print(words())

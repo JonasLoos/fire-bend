@@ -1,3 +1,0 @@
-match [1, 2]
-    [a, b] => print("pair: {a}, {b}")
-    other => print("no match")

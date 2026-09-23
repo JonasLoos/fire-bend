@@ -1,0 +1,56 @@
+# small syntax variants: two-space indentation, list entries on lines of
+# their own, a class with no parameter list, `**` on ints, a lambda with
+# an annotated default, `while` in an unsafe def, and pipelines
+print('hello world')
+
+def my_fun(arg: str): str
+  print(arg)
+  return "the answer"
+print(my_fun("hi"))
+
+var todo = 123
+todo = 456
+print(todo)
+
+square = x => x**2
+cube_maybe = (x, really: bool = false) => if really do x**3 else 42
+print(square(4), cube_maybe(3), cube_maybe(3, true))
+
+x = [1,2,3]
+y = [
+    1
+    2
+    3
+]
+z = [1
+     2
+     3]
+print(x, y, z, x + [4, 5])
+
+match [1, 2]
+    [a, b] => print("pair: {a}, {b}")
+    other => print("no match")
+
+def Counter
+    public var count = 0
+    public increment = () => count += 1
+    public get_count = () => count
+counter = Counter()
+counter.increment()
+print(counter.get_count())
+
+unsafe def count_up(limit)
+    var n = 0
+    while n < limit do n += 1
+    n
+print(count_up(3))
+for i in 0..5
+  if i == 2 do continue
+  if i == 4 do break
+  print(i)
+
+print([1,2,3] *> $**2 |> $[0] |> "result: {$}")
+['a', 'b']
+  ?> $ != 'b'
+  *> $.upper()
+  |> print

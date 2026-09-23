@@ -42,7 +42,7 @@ cart = [
     LineItem("apple", Money(99), 10),
 ]
 total = sum_money(cart)
-print(total.show(), total.cents)
+print(total.show(), total.cents, Money(105).show(), Money(7).show())
 print(cheapest(cart).sku, by_sku(cart) *> $.sku)
 print(discount(total, 10).show())
 print(cart *> $.total().cents)
