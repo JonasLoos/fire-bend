@@ -456,30 +456,73 @@ impl Checker {
         match op {
             B::And | B::Or => {
                 let a = self.check_expr(left, None);
+                // the right side runs only when the left does not decide:
+                // calls hoisted out of it stay with it (`lazy_value`)
                 if op == B::And {
                     self.unify(&Type::Bool, &a.ty, line);
-                    let b = self.check_expr(right, Some(&Type::Bool));
+                    let (b, hoisted) = self.check_lazy(right, Some(&Type::Bool));
                     self.unify(&Type::Bool, &b.ty, line);
+                    if !hoisted.is_empty() {
+                        let b = with_hoisted(hoisted, b);
+                        let no = self.lit(Lit::Bool(false));
+                        return self.lazy_value(ExprKind::If(Box::new(a), Box::new(b), Box::new(no)), Type::Bool);
+                    }
                     return self.expr(ExprKind::And(Box::new(a), Box::new(b)), Type::Bool);
                 }
                 // `or`: logical on bools, the default on a maybe
                 match self.shallow(&a.ty) {
                     Type::Bool => {
-                        let b = self.check_expr(right, Some(&Type::Bool));
+                        let (b, hoisted) = self.check_lazy(right, Some(&Type::Bool));
                         self.unify(&Type::Bool, &b.ty, line);
+                        if !hoisted.is_empty() {
+                            let b = with_hoisted(hoisted, b);
+                            let yes = self.lit(Lit::Bool(true));
+                            return self.lazy_value(ExprKind::If(Box::new(a), Box::new(yes), Box::new(b)), Type::Bool);
+                        }
                         self.expr(ExprKind::Or(Box::new(a), Box::new(b)), Type::Bool)
                     }
                     Type::Data(MAYBE, args) => {
                         let inner = args[0].clone();
-                        let b = self.check_expr(right, Some(&inner));
+                        let (b, hoisted) = self.check_lazy(right, Some(&inner));
                         self.unify(&inner, &b.ty, line);
+                        if !hoisted.is_empty() {
+                            return self.lazy_default(a, b, hoisted, inner);
+                        }
                         self.expr(ExprKind::Builtin("maybe.or".into(), vec![a, b]), inner)
                     }
                     _ => {
-                        let b = self.check_expr(right, None);
-                        let ret = self.fresh();
-                        let t = a.ty.clone();
-                        self.dict(Class::OrElse(b.ty.clone(), ret.clone()), t, vec![a, b], ret, line)
+                        let (b, hoisted) = self.check_lazy(right, None);
+                        if hoisted.is_empty() {
+                            let ret = self.fresh();
+                            let t = a.ty.clone();
+                            return self.dict(Class::OrElse(b.ty.clone(), ret.clone()), t, vec![a, b], ret, line);
+                        }
+                        // the right side hoists calls: whether it is logical
+                        // or a default decides how it is made lazy, so the
+                        // left side's type is settled now (`m[k] or ...`)
+                        self.solve_pending();
+                        match self.shallow(&a.ty) {
+                            Type::Bool => {
+                                self.unify(&Type::Bool, &b.ty, line);
+                                let b = with_hoisted(hoisted, b);
+                                let yes = self.lit(Lit::Bool(true));
+                                self.lazy_value(ExprKind::If(Box::new(a), Box::new(yes), Box::new(b)), Type::Bool)
+                            }
+                            Type::Data(MAYBE, args) => {
+                                let inner = args[0].clone();
+                                let b = self.fit(b, &inner);
+                                self.unify(&inner, &b.ty, line);
+                                self.lazy_default(a, b, hoisted, inner)
+                            }
+                            _ => {
+                                let name = changed_name(&hoisted).unwrap_or("a variable").to_string();
+                                self.error(line, format!("a call that changes `{}` cannot sit in the right side of `or` whose left side's type is not known yet; split it into its own statement", name));
+                                let b = with_hoisted(hoisted, b);
+                                let ret = self.fresh();
+                                let t = a.ty.clone();
+                                self.dict(Class::OrElse(b.ty.clone(), ret.clone()), t, vec![a, b], ret, line)
+                            }
+                        }
                     }
                 }
             }
@@ -1179,7 +1222,10 @@ impl Checker {
         let line = self.line;
         let c = self.check_expr(cond, Some(&Type::Bool));
         self.unify(&Type::Bool, &c.ty, line);
-        let t = self.check_expr(then, expected);
+        // only one branch runs: calls hoisted out of a branch (an `elif`
+        // condition too) stay in it
+        let (t, then_hoisted) = self.check_lazy(then, expected);
+        let outer = std::mem::take(&mut self.pending);
         let rest: Expr = if let Some((ec, eb)) = elifs.first() {
             self.check_if_expr(ec, eb, &elifs[1..], else_, expected.or(Some(&t.ty)))
         } else {
@@ -1191,8 +1237,47 @@ impl Checker {
                 }
             }
         };
+        let rest_hoisted = std::mem::replace(&mut self.pending, outer);
         let (t, rest, ty) = self.join_branches(t, rest);
-        self.expr(ExprKind::If(Box::new(c), Box::new(t), Box::new(rest)), ty)
+        if then_hoisted.is_empty() && rest_hoisted.is_empty() {
+            return self.expr(ExprKind::If(Box::new(c), Box::new(t), Box::new(rest)), ty);
+        }
+        let (t, rest) = (with_hoisted(then_hoisted, t), with_hoisted(rest_hoisted, rest));
+        self.lazy_value(ExprKind::If(Box::new(c), Box::new(t), Box::new(rest)), ty)
+    }
+
+    /// Check an expression that runs only on some paths (the right side of
+    /// `and`/`or`, a branch of an `if` value), answering it with the
+    /// statements hoisted out of it instead of leaving them to run in front
+    /// of the enclosing statement.
+    fn check_lazy(&mut self, e: &ast::Expression, expected: Option<&Type>) -> (Expr, Vec<Stmt>) {
+        let outer = std::mem::take(&mut self.pending);
+        let x = self.check_expr(e, expected);
+        let hoisted = std::mem::replace(&mut self.pending, outer);
+        (x, hoisted)
+    }
+
+    /// `a or b` on a maybe whose default hoists calls: a match that runs
+    /// the default only when the value is absent.
+    fn lazy_default(&mut self, a: Expr, b: Expr, hoisted: Vec<Stmt>, inner: Type) -> Expr {
+        let line = self.line;
+        let b = with_hoisted(hoisted, b);
+        let v = self.temp("v");
+        let present = self.var(&v, inner.clone());
+        let arms = vec![
+            Arm { pat: Pat::Con(MAYBE, 1, vec![Pat::Bind(v)]), guard: None, body: present, line },
+            Arm { pat: Pat::Con(MAYBE, 0, vec![]), guard: None, body: b, line },
+        ];
+        self.lazy_value(ExprKind::Match(Box::new(a), arms), inner)
+    }
+
+    /// A conditional value (`if`, `match`) whose branches hold the calls
+    /// hoisted out of them: the variables those calls change are assigned
+    /// from the branch that ran (`thread_assignments`).
+    fn lazy_value(&mut self, kind: ExprKind, ty: Type) -> Expr {
+        let line = self.line;
+        let e = self.expr(kind, ty.clone());
+        self.thread_assignments(Block { stmts: vec![Stmt { kind: StmtKind::Expr(e), line }] }, ty)
     }
 
     /// Two branch values of one expression: they must agree, except that
@@ -2048,6 +2133,24 @@ fn expr_answers_result(e: &ast::Expression) -> bool {
         }
         _ => false,
     }
+}
+
+/// A value preceded by the statements hoisted out of it, as one block.
+fn with_hoisted(mut hoisted: Vec<Stmt>, x: Expr) -> Expr {
+    if hoisted.is_empty() {
+        return x;
+    }
+    let (ty, line) = (x.ty.clone(), x.line);
+    hoisted.push(Stmt { kind: StmtKind::Expr(x), line });
+    Expr { kind: ExprKind::Block(Block { stmts: hoisted }), ty, line }
+}
+
+/// The first variable that hoisted statements assign.
+pub(crate) fn changed_name(hoisted: &[Stmt]) -> Option<&str> {
+    hoisted.iter().find_map(|s| match &s.kind {
+        StmtKind::Assign { name, .. } => Some(name.as_str()),
+        _ => None,
+    })
 }
 
 /// The types of several values packed as nested pairs.

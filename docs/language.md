@@ -191,6 +191,15 @@ extended list instead, since nothing outside could see the rebinding.
 Writes go through any chain of indexes and members: `rows[r][c] = v`,
 `d[k].push(v)`, `xs[i].name = v`.
 
+Such a call runs only where its value is evaluated: in the right side of
+`and`/`or` only when the left side does not decide (`len(xs) == 0 or
+xs.pop() > 0` leaves an empty `xs` alone), and in an `if` value only in
+the branch taken. The one exception is an `or` whose left side's type is
+not known where it is written (a generic parameter), since it may be
+logical or a default: a change on its right is an error there; split it
+into its own statement. A `while` condition runs on every pass, so a
+change in it is an error too: make the change in the loop body.
+
 A change nothing reads is an error, since it reaches nothing: changing a
 loop's copy of an element (`for p in pts` with `p.x = 0` in the body), a
 parameter that the def neither returns nor reads again, or any binding

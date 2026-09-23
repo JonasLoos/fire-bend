@@ -150,8 +150,16 @@ impl Checker {
                 if !self.frame_ref().unsafe_ {
                     self.error(line, "a `while` loop may not terminate: write it as a `for` over a range or a list, or mark the enclosing def `unsafe def`");
                 }
+                // the condition runs again on every pass: a call hoisted in
+                // front of the loop would run once
+                let before = std::mem::take(&mut self.pending);
                 let c = self.check_expr(condition, Some(&Type::Bool));
                 self.unify(&Type::Bool, &c.ty, line);
+                let hoisted = std::mem::replace(&mut self.pending, before);
+                if !hoisted.is_empty() {
+                    let name = expr::changed_name(&hoisted).unwrap_or("a variable").to_string();
+                    self.error(line, format!("a call that changes `{}` cannot sit in a `while` condition; change it in the loop body", name));
+                }
                 self.frame().loop_depth += 1;
                 let b = self.check_scoped(body);
                 self.frame().loop_depth -= 1;
