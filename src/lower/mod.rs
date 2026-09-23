@@ -245,8 +245,9 @@ impl<'a> Lower<'a> {
         // types: verbatim names for declared types and classes
         for (id, t) in self.core.types.iter().enumerate() {
             let name = match t.kind {
+                // the record {key, value} is the runtime's pair
+                _ if id == PAIR => "F.Pair".to_string(),
                 DataKind::Builtin => match id {
-                    PAIR => "F.Pair".to_string(),
                     RANGE => "F.Range".to_string(),
                     _ => t.name.clone(),
                 },
@@ -921,7 +922,7 @@ impl<'a> Lower<'a> {
                 let e = self.ty(e, names, line);
                 Ty::func(vec![s], Ty::list(e))
             }
-            Class::Index(i, e, _) => {
+            Class::Index(i, e) => {
                 let i = self.ty(i, names, line);
                 let e = self.ty(e, names, line);
                 Ty::func(vec![s, i], Ty::result(Ty::Str, e))
@@ -1112,7 +1113,7 @@ impl<'a> Lower<'a> {
         let tname = self.type_names[tid].clone();
         let fname = field_name(&t.ctors[0].fields[idx].name);
         let name = match t.kind {
-            DataKind::Builtin if tid == PAIR => return if idx == 0 { "F.pair.key".into() } else { "F.pair.value".into() },
+            _ if tid == PAIR => return if idx == 0 { "F.pair.key".into() } else { "F.pair.value".into() },
             DataKind::Builtin if tid == RANGE => return if idx == 0 { "F.range.start".into() } else { "F.range.end".into() },
             _ => format!("{}.F.get_{}", tname, fname),
         };

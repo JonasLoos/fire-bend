@@ -1,0 +1,22 @@
+# entries are {key, value} records: read by field, taken apart by a record
+# pattern, built by a literal, and printed as one
+counts = {}
+counts["a"] = 2
+counts["b"] = 1
+print(sorted(counts.entries(), e => -e.value))
+print(counts.entries() *> $.key)
+for {key, value} in counts
+    print("{key}={value}")
+for i, {key: k, value: v} in 1.., counts.entries()
+    print("{i}. {k} {v}")
+extra = {key: "c", value: 3}
+print(counts.entries() + [extra])
+print(counts.entries().first() == {key: "a", value: 2})
+def swap(e)
+    {key: e.value, value: e.key}
+print(swap(extra))
+match counts.entries()
+    [{key: k, value: v}, ...rest] if v > 5 => print("big {k}")
+    [{key}, ...rest] => print("first {key}")
+    [] => print("none")
+print([1, 2].pop())

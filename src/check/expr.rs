@@ -106,6 +106,7 @@ impl Checker {
                 // `nothing` beside values makes a list of `T | nothing`
                 let absent = items.iter().any(|i| matches!(i, ast::Expression::Nothing));
                 let present = items.iter().any(|i| !matches!(i, ast::Expression::Nothing));
+                let expected_elem = matches!(expected.map(|t| self.shallow(t)), Some(Type::List(_)));
                 let elem = match expected.map(|t| self.shallow(t)) {
                     Some(Type::List(e)) => *e,
                     _ if absent && present => {
@@ -121,7 +122,15 @@ impl Checker {
                         continue;
                     }
                     let x = self.check_expr(it, Some(&elem));
-                    self.unify(&elem, &x.ty, line);
+                    if !out.is_empty() && !expected_elem {
+                        // `[k, v]` with a key and a value: a record groups them
+                        if self.store.unify(&elem, &x.ty).is_err() {
+                            let (a, b) = (self.show_type(&elem), self.show_type(&x.ty));
+                            self.error(line, format!("a list has one element type, and this one mixes {} and {}: to group values of different types, use a record (`{{key: k, value: v}}`)", a, b));
+                        }
+                    } else {
+                        self.unify(&elem, &x.ty, line);
+                    }
                     out.push(x);
                 }
                 self.expr(ExprKind::List(out), Type::list(elem))
@@ -1038,16 +1047,19 @@ impl Checker {
         let e = self.dict(Class::Method(member.to_string(), atys, ret.clone()), subject, all, ret.clone(), line);
         let _ = expected;
         // `pop` answers (container, value): the container is stored back
-        if member == "pop" && self.is_path(&recv_copy) {
+        // into a variable, and dropped from a value that is not one
+        if member == "pop" {
             let tmp = self.temp("pop");
             self.pending.push(Stmt { kind: StmtKind::Let { name: tmp.clone(), value: e }, line });
             let ct = self.fresh();
             let vt = self.fresh();
             self.unify(&ret, &Type::pair(ct.clone(), vt.clone()), line);
-            let t = self.var(&tmp, ret.clone());
-            let cont = self.expr(ExprKind::Field(Box::new(t), PAIR, 0), ct);
-            let stmts = self.rebind_path(&recv_copy, cont);
-            self.pending.extend(stmts);
+            if self.is_path(&recv_copy) {
+                let t = self.var(&tmp, ret.clone());
+                let cont = self.expr(ExprKind::Field(Box::new(t), PAIR, 0), ct);
+                let stmts = self.rebind_path(&recv_copy, cont);
+                self.pending.extend(stmts);
+            }
             let t = self.var(&tmp, ret);
             return self.expr(ExprKind::Field(Box::new(t), PAIR, 1), vt);
         }
@@ -1163,14 +1175,10 @@ impl Checker {
             return self.dict(Class::Method("slice".into(), vec![Type::range()], ret.clone()), subject, vec![recv, r], ret, line);
         }
         let idx = self.check_expr(index, None);
-        let lit = match &idx.kind {
-            ExprKind::Lit(Lit::Int(i)) => Some(*i),
-            _ => None,
-        };
         let elem = self.fresh();
         let subject = recv.ty.clone();
         // a dictionary element read for a mutation is unwrapped by the caller
-        self.dict(Class::Index(idx.ty.clone(), elem.clone(), lit), subject, vec![recv, idx], elem, line)
+        self.dict(Class::Index(idx.ty.clone(), elem.clone()), subject, vec![recv, idx], elem, line)
     }
 
     // -- control ------------------------------------------------------------------
@@ -1893,15 +1901,6 @@ impl Checker {
                 let a = self.fresh();
                 (vec![a.clone(), Type::Int], Type::list(a), pure)
             }
-            ("lists", "enumerate") => {
-                let a = self.fresh();
-                (vec![Type::list(a.clone())], Type::list(Type::pair(Type::Int, a)), pure)
-            }
-            ("lists", "zip") => {
-                let a = self.fresh();
-                let b = self.fresh();
-                (vec![Type::list(a.clone()), Type::list(b.clone())], Type::list(Type::pair(a, b)), pure)
-            }
             ("io", "read_file") => (vec![Type::Str], Type::result(Type::Str, Type::Str), Effect::IO),
             ("io", "write_file") => (vec![Type::Str, Type::Str], Type::result(Type::Str, Type::Unit), Effect::IO),
             ("time", "now") => (vec![], Type::Int, Effect::IO),
@@ -1926,7 +1925,7 @@ impl Checker {
                 self.expr(ExprKind::Builtin(format!("{}.{}", module, name), xs), ret)
             }
             None => {
-                self.error(line, format!("unknown module member ${}.{}", module, name));
+                self.error(line, format!("unknown module member ${}.{}{}", module, name, solve::replaced_by(name)));
                 let t = self.fresh();
                 self.var("__bad", t)
             }
@@ -1949,7 +1948,7 @@ impl Checker {
                 self.check_lambda(&params, &body)
             }
             None => {
-                self.error(line, format!("unknown module member ${}.{}", module, name));
+                self.error(line, format!("unknown module member ${}.{}{}", module, name, solve::replaced_by(name)));
                 let t = self.fresh();
                 self.var("__bad", t)
             }

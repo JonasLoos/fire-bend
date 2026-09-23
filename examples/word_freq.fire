@@ -26,19 +26,19 @@ for w in words
 print("distinct: {len(counts.keys())}")
 
 # sort by word first (stable), then by count descending: count wins, ties by word
-by_word = sorted(counts.entries(), ([w, c]) => w)
-ranked = sorted(by_word, ([w, c]) => -c)
+by_word = sorted(counts.entries(), e => e.key)
+ranked = sorted(by_word, e => -e.value)
 
 def bar(n)
     "#".repeat(n)
 
 print("rank  word        count  bar")
 print("-".repeat(32))
-for i, [w, c] in 1.., ranked.take(8)
+for i, {key: w, value: c} in 1.., ranked.take(8)
     print("{i:>4}  {w:<10}  {c:>5}  {bar(c)}")
 
 # words appearing exactly once, alphabetically, wrapped at 40 columns
-singles = ranked ?> $[1] == 1 *> $[0] |> sorted
+singles = ranked ?> $.value == 1 *> $.key |> sorted
 var line = ""
 var lines = []
 for s in singles
@@ -72,6 +72,6 @@ for k in sorted(buckets.keys(), k => k.to_int())
 
 # top word by a match on the ranked list
 match ranked
-    [[w, c], ...rest] if c > 5 => print("dominant word: {w} x{c}")
-    [[w, c], ...rest] => print("top word: {w}")
+    [{key: w, value: c}, ...rest] if c > 5 => print("dominant word: {w} x{c}")
+    [{key: w}, ...rest] => print("top word: {w}")
     [] => print("no words")

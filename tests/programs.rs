@@ -93,7 +93,7 @@ fn cases() {
 fn unsupported_programs_are_rejected_with_a_message() {
     let cases: &[(&str, &str)] = &[
         ("x = 1\nx = 'a'\n", "reassign"),
-        ("xs = [1, 'a']\n", "expected int, found str"),
+        ("xs = [1, 'a']\n", "mixes int and str"),
         ("\"{h}:{m}\" = \"1:2\"\n", "invalid assignment target"),
         // a helper a method uses is a method: it cannot run before the object exists
         ("def G\n    def h(x)\n        x\n    x = h(1)\n    public p = () => h(x)\nprint(G().p())\n", "while the object is being built"),
@@ -103,6 +103,13 @@ fn unsupported_programs_are_rejected_with_a_message() {
         ("xs = [1]\nprint(2 in xs)\n", "`xs.contains(x)`"),
         ("xs = [1]\nif 2 not in xs do print(1)\n", "`not xs.contains(x)`"),
         ("xs: [int, str] = [1]\n", "one element type"),
+        // entries are {key, value} records, and a comma in `for` means lockstep
+        ("d = {}\nd['a'] = 1\nfor k, v in d\n    print(k)\n", "a comma in `for` goes through several iterables in lockstep"),
+        ("d = {}\nd['a'] = 1\nfor [k, v] in d.entries()\n    print(k)\n", "take it apart with `{key, value}`"),
+        ("d = {}\nd['a'] = 1\nprint(sorted(d.entries(), ([k, v]) => v))\n", "take it apart with `{key, value}`"),
+        ("d = {}\nd['a'] = 1\nprint(d.entries()[0][1])\n", "read its fields, `.key` and `.value`"),
+        ("print([1, 2].zip([3, 4]))\n", "`for x, y in xs, ys`"),
+        ("print([1, 2].enumerate())\n", "`for i, x in 0.., xs`"),
         // totality: every def must be seen to end, or say `unsafe def`
         ("var n = 0\nwhile n < 3 do n += 1\n", "may not terminate"),
         ("def f(n)\n    f(n + 1)\n", "cannot show that 'f' terminates"),

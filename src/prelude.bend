@@ -5,7 +5,8 @@
 # methods. Helpers precede their callers; `+` marks reusable values. The
 # compiler keeps only the blocks a program reaches.
 # -- Core types ---------------------------------------------------------------
-# The pair shape used by entries(), zip, enumerate, pop and zipping loops.
+# The record {key, value}: dictionary entries, and the pairs that pop and
+# lockstep loops pack.
 
 type F.Pair<-A: Data, -B: Data> is Data:
   F.Pair{key: A, value: B}
@@ -1093,9 +1094,6 @@ def F.list.enumerate_from(-A: Data, xs: List<&2, A>, +i: U32) -> List<&2, F.Pair
     case h <> t:
       (F.Pair{i, h} <> F.list.enumerate_from(A, t, (i + 1 : U32)))
 
-def F.list.enumerate(-A: Data, xs: List<&2, A>) -> List<&2, F.Pair<U32, A>>:
-  F.list.enumerate_from(A, xs, 0)
-
 def F.list.zip(-A: Data, -B: Data, xs: List<&2, A>, ys: List<&2, B>) -> List<&2, F.Pair<A, B>>:
   match xs ys:
     case Nil{} _:
@@ -1525,7 +1523,7 @@ def F.result.unwrap_err(-X: Data, -A: Data, r: Result<&2, &2, X, A>) -> Result<&
     case Fail{x}:
       Done{x}
 
-# -- Pairs --------------------------------------------------------------------
+# -- The record {key, value} --------------------------------------------------
 def F.pair.key(-A: Data, -B: Data, p: F.Pair<A, B>) -> A:
   match p:
     case F.Pair{k, v}:
@@ -1539,7 +1537,7 @@ def F.pair.value(-A: Data, -B: Data, p: F.Pair<A, B>) -> B:
 def F.pair.show(~A: Data, ~B: Data, ~fa: A -> String, ~fb: B -> String, p: F.Pair<A, B>) -> String:
   match p:
     case F.Pair{k, v}:
-      "[" ++ fa(k) ++ ", " ++ fb(v) ++ "]"
+      "{key: " ++ fa(k) ++ ", value: " ++ fb(v) ++ "}"
 
 def F.pair.eq(~A: Data, ~B: Data, ~ea: A -> A -> Bool, ~eb: B -> B -> Bool, a: F.Pair<A, B>, b: F.Pair<A, B>) -> Bool:
   match a:

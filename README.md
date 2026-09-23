@@ -88,7 +88,7 @@ match xs.first()                          # pattern matching, typed: T | nothing
 {sqrt, pi} = $math                        # modules are records:
 text = $io.read_file("data.txt") !> ""    # $math $strings $lists $io $time
 
-for i, word in 0.., ["a", "b", "c"]       # loops zip; the list ends the loop
+for i, word in 0.., ["a", "b", "c"]       # lockstep; the list ends the loop
     print("{i}: {word}")
 
 port = read_config()                      # results ride the pipeline:

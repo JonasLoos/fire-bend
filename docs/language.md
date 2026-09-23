@@ -254,11 +254,14 @@ for word in words
 counts["a"]                       # T | nothing: nothing when absent
 counts.has("a")                   # bool
 counts.keys()                     # ['a', 'b', ...] in key order
-for [k, v] in counts.entries()    # entries are [key, value] pairs
-    print("{k}: {v}")
+counts.entries()                  # [{key: 'a', value: 1}, ...]
+for {key, value} in counts        # a loop goes through the entries
+    print("{key}: {value}")
 ```
 
-`m[k] = v` creates or updates an entry. `keys()`, `values()`, `entries()`,
+`m[k] = v` creates or updates an entry. An entry is the record
+`{key, value}` (§4.5): `e.key`, `e.value`, `{key, value} = e`, and
+`{key: k, value: v}` builds one. `keys()`, `values()`, `entries()`,
 iteration and printing follow key order, not insertion order.
 
 ### 4.5 Records
@@ -313,8 +316,11 @@ targets and as match patterns:
 [first, ...rest] = [1, 2, 3]
 {name, age} = person
 {name: n} = person                 # rename
-[k, v] = entry                     # a dictionary entry
+{key: k, value: v} = entry         # a dictionary entry
 ```
+
+A list pattern takes apart a list. A list has one element type, so values
+of different types travel together in a record, never in a list.
 
 ## 7. Control flow
 
@@ -330,18 +336,21 @@ if x > 0 do print("positive")      # one-line body with `do`
 sign = if x > 0 do 1 elif x == 0 do 0 else -1   # if as an expression
 
 for i in 0..5 do print(i)          # ranges are end-exclusive
-for [a, b] in pairs do print(a + b)
-for k, v in counts.entries()       # comma targets destructure
-    print("{k}: {v}")
-for i, x in 0.., ['a', 'b']        # several iterables zip; the shortest ends it
+for [a, b] in rows do print(a + b) # a pattern takes each item apart
+for {key, value} in counts         # a dictionary's entries
+    print("{key}: {value}")
+for i, x in 0.., ['a', 'b']        # several iterables in lockstep; the shortest ends it
     print("{i}: {x}")
 for _ in 0..100                    # a bounded search: at most 100 turns
     if found() do break
 ```
 
 A `for` runs over a list, a string, a dictionary's entries or a range, and
-always ends. An open range (`0..`) has no end of its own, so it may only be
-zipped with a finite iterable. `break`, `continue` and `return` work in
+always ends. A comma in a `for` always means lockstep: one variable (or
+pattern) per iterable, all advancing together. This is how to count items
+(`for i, x in 0.., xs`) and how to walk two lists side by side
+(`for a, b in xs, ys`). An open range (`0..`) has no end of its own, so it
+may only run alongside a finite iterable. `break`, `continue` and `return` work in
 loops. Every iteration runs in a fresh scope; a closure created inside a
 loop captures that iteration's values. Reassigning an outer `var` from
 inside a loop works.
@@ -641,7 +650,7 @@ text = $io.read_file("data.txt") !> ""
 * `$math`: `pi e tau inf`, `sqrt sin cos tan asin acos atan atan2 exp
   log(x, base?) log2 log10 floor ceil abs pow min max` (all on floats).
 * `$strings`: `join(list, sep?)`, `char_code(c)`, `from_char_code(n)`.
-* `$lists`: `zip(a, b)`, `enumerate(xs)`, `flatten(xs)`, `repeat(v, n)`.
+* `$lists`: `flatten(xs)`, `repeat(v, n)`.
 * `$io`: `read_file(path)`, `write_file(path, text)`, both results.
 * `$time`: `now()`.
 
@@ -654,8 +663,8 @@ key?)`, `reversed`, `range(end)` / `range(start, end)`, `error(msg)`,
 
 **Lists**: `length map filter each reduce(f, seed?) any all find count sum
 min max join(sep) contains index_of first last reverse reversed sort(key?)
-sorted(key?) push(x, ...) pop drop_last take drop is_empty flatten enumerate
-zip(other) to_list`. Indexing: `xs[i]` (negative from the end), slices
+sorted(key?) push(x, ...) pop drop_last take drop is_empty flatten
+to_list`. Indexing: `xs[i]` (negative from the end), slices
 `xs[1..3]`, `xs[..2]`, `xs[-2..]`; strings and ranges index and slice the
 same way (`(5..10)[1..3]` is `6..8`).
 
@@ -667,7 +676,7 @@ char_code to_str`.
 **Numbers**: `abs floor ceil round(digits?) sqrt to_str to_int to_float`.
 
 **Dictionaries**: `keys values entries has(k) get(k) set(k, v) remove(k)
-length`.
+length`. `entries()` is a list of `{key, value}` records.
 
 **Ranges**: `to_list map filter each reduce sum min max length first last
 contains take drop reversed`.

@@ -26,8 +26,8 @@ for w in words
 print("distinct: {len(counts.keys())}")
 
 # sort by word first (stable), then by count descending: count wins, ties by word
-# entries() pairs are rebuilt as records so the sort keys can name the fields
-pairs = for k, v in counts.entries() do {word: k, count: v}
+# the {key, value} entries are renamed to {word, count} records
+pairs = for {key, value} in counts do {word: key, count: value}
 by_word = sorted(pairs, p => p.word)
 ranked = sorted(by_word, p => -p.count)
 

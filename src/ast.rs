@@ -32,7 +32,7 @@ pub enum Statement {
         pattern: Pattern,
         value: Expression,
     },
-    /// `a = b = expr`, `x += 1`, `[a, b] = pair`, `self.{...} = parent`, ...
+    /// `a = b = expr`, `x += 1`, `{key, value} = entry`, `self.{...} = parent`, ...
     Assignment {
         targets: Vec<(Pattern, AssignmentOp)>,
         value: Expression,
@@ -45,11 +45,12 @@ pub enum Statement {
         body: Vec<Stmt>,
     },
     For {
-        /// The loop target: an identifier, a destructuring pattern, or (for
-        /// `for a, b in ...`) a list pattern built from the comma list.
+        /// The loop target: an identifier or a destructuring pattern, or
+        /// (for `for a, b in xs, ys`) a list pattern built from the comma
+        /// list, one target per iterable.
         pattern: Pattern,
-        /// More than one iterable zips elementwise; each iteration's item is
-        /// then the list of current values, matched against `pattern`.
+        /// More than one iterable runs in lockstep; the targets take one
+        /// current value each.
         iterables: Vec<Expression>,
         body: Vec<Stmt>,
     },
@@ -605,16 +606,19 @@ fn parse_for_statement(pair: Pair<'_>) -> Result<Statement> {
 
 /// The `targets in iterables` part of a for loop / comprehension clause:
 /// consumes the target patterns (typecheck pairs), `in`, and the iterables.
-/// Comma-separated targets combine into one list pattern; the number of
-/// iterables must then be 1 (destructure each element) or match (zip).
+/// A comma always means lockstep: comma-separated targets combine into one
+/// list pattern, one target per iterable. Taking one item apart is a
+/// pattern (`for {key, value} in d`).
 fn parse_for_header<'a>(
     inner: &mut std::iter::Peekable<impl Iterator<Item = Pair<'a>>>,
 ) -> Result<(Pattern, Vec<Expression>)> {
     let mut targets = Vec::new();
+    let mut at = None;
     loop {
         match inner.peek() {
             Some(p) if p.as_rule() == Rule::typecheck => {
                 let p = inner.next().unwrap();
+                at.get_or_insert(p.line_col());
                 let expr = parse_expression(p.clone())?;
                 targets.push(expression_to_pattern(expr, &p)?);
             }
@@ -635,16 +639,22 @@ fn parse_for_header<'a>(
     if iterables.is_empty() {
         return Err(SemanticError::new("for without an iterable", None));
     }
-    if targets.len() > 1 && iterables.len() > 1 && targets.len() != iterables.len() {
+    if targets.len() > 1 && iterables.len() == 1 {
         return Err(SemanticError::new(
-            format!("{} loop variables but {} iterables — zipping needs one iterable per variable",
+            format!("{} loop variables but 1 iterable: a comma in `for` goes through several iterables in lockstep (`for i, x in 0.., xs`); to take each item apart, use a pattern (`for {{key, value}} in d`, `for [a, b] in rows`)",
+                targets.len()),
+            at));
+    }
+    if targets.len() > 1 && targets.len() != iterables.len() {
+        return Err(SemanticError::new(
+            format!("{} loop variables but {} iterables: a loop in lockstep needs one iterable per variable",
                 targets.len(), iterables.len()),
-            None));
+            at));
     }
     let pattern = if targets.len() == 1 {
         targets.pop().unwrap()
     } else {
-        // `for a, b in ...`: each item (zipped or destructured) is a list
+        // `for a, b in xs, ys`: the current items, one per iterable
         Pattern::List(targets)
     };
     Ok((pattern, iterables))

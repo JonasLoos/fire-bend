@@ -4,6 +4,9 @@
 
 use super::*;
 
+/// `[k, v]` against a dictionary entry (or any `{key, value}` record).
+pub(crate) const ENTRY_NOT_A_LIST: &str = "a dictionary entry is the record {key, value}, not a list: take it apart with `{key, value}`, or `{key: k, value: v}` to rename";
+
 impl Checker {
     /// A match-arm pattern against a subject type. Binders are declared in
     /// the current scope. `maybe_value` says the subject is `T | nothing`
@@ -105,15 +108,13 @@ impl Checker {
                 Pat::Con(tid, ci, ps)
             }
             ast::Pattern::List(items) => {
-                // a pair destructures as [key, value]
-                if let Type::Data(PAIR, args) = &st
-                    && items.len() == 2 && !items.iter().any(|i| matches!(i, ast::Pattern::Rest(_))) {
-                        let k = self.check_pattern(&items[0], &args[0].clone(), false);
-                        let v = self.check_pattern(&items[1], &args[1].clone(), false);
-                        return Pat::Con(PAIR, 0, vec![k, v]);
-                    }
                 let elem = match &st {
                     Type::List(e) => (**e).clone(),
+                    // said, and the names bound anyway
+                    Type::Data(PAIR, _) => {
+                        self.error(line, ENTRY_NOT_A_LIST);
+                        self.fresh()
+                    }
                     _ => {
                         let e = self.fresh();
                         self.unify(subject, &Type::list(e.clone()), line);
@@ -224,30 +225,12 @@ impl Checker {
                 let vt = value.ty.clone();
                 let mut out = vec![Stmt { kind: StmtKind::Let { name: tmp.clone(), value }, line }];
                 let st = self.shallow(&vt);
-                if let Type::Data(PAIR, args) = &st
-                    && items.len() == 2 {
-                        for (i, it) in items.iter().enumerate() {
-                            let tv = self.var(&tmp, vt.clone());
-                            let x = self.expr(ExprKind::Field(Box::new(tv), PAIR, i), args[i].clone());
-                            out.extend(self.bind_pattern(it, x, mutable));
-                        }
-                        return out;
-                    }
-                // [a, b] on a value not known yet: a pair or a list, decided
-                // later; each side is an indexed read
-                if let Type::Var(_) = &st
-                    && items.len() == 2 && !items.iter().any(|i| matches!(i, ast::Pattern::Rest(_))) {
-                        for (i, it) in items.iter().enumerate() {
-                            let tv = self.var(&tmp, vt.clone());
-                            let n = self.lit(Lit::Int(i as i64));
-                            let elem = self.fresh();
-                            let x = self.dict(Class::Index(Type::Int, elem.clone(), Some(i as i64)), vt.clone(), vec![tv, n], elem, line);
-                            out.extend(self.bind_pattern(it, x, mutable));
-                        }
-                        return out;
-                    }
                 let elem = match &st {
                     Type::List(e) => (**e).clone(),
+                    Type::Data(PAIR, _) => {
+                        self.error(line, ENTRY_NOT_A_LIST);
+                        self.fresh()
+                    }
                     _ => {
                         let e = self.fresh();
                         self.unify(&vt, &Type::list(e.clone()), line);

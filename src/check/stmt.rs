@@ -465,13 +465,9 @@ impl Checker {
                 let o = self.check_expr(object, None);
                 let i = self.check_expr(index, None);
                 // the element itself: a missing dictionary key aborts
-                let lit = match &i.kind {
-                    ExprKind::Lit(Lit::Int(v)) => Some(*v),
-                    _ => None,
-                };
                 let elem = self.fresh();
                 let subject = o.ty.clone();
-                let x = self.dict(Class::Index(i.ty.clone(), elem.clone(), lit), subject, vec![o, i], elem.clone(), line);
+                let x = self.dict(Class::Index(i.ty.clone(), elem.clone()), subject, vec![o, i], elem.clone(), line);
                 self.unwrap_index(x)
             }
             _ => {
@@ -619,7 +615,7 @@ impl Checker {
                         let rebuilt = self.set_field_of(inner.clone(), &name, new_value);
                         self.rebind_path(&inner, rebuilt)
                     }
-                    Class::Index(it, _, _) => {
+                    Class::Index(it, _) => {
                         let inner = args[0].clone();
                         let idx = args[1].clone();
                         let subject = inner.ty.clone();
