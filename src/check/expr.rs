@@ -1008,7 +1008,7 @@ impl Checker {
         // has) fixes a receiver whose type is not known yet
         if let Type::Var(_) = self.shallow(&recv.ty) {
             let classes: Vec<TypeId> = self.class_method_names.get(member).cloned().unwrap_or_default();
-            if classes.len() == 1 && solve::unique_receiver(&mut self.store, member).is_none() && solve::method_sig(&mut self.store, &Type::Str, member, args.len()).is_none() {
+            if classes.len() == 1 && solve::builtin_receivers(&mut self.store, member, args.len()).is_empty() {
                 let tid = classes[0];
                 if let DataKind::Class { ctor, .. } = self.types[tid].kind {
                     self.ensure_def(ctor);

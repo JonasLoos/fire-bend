@@ -186,23 +186,36 @@ pub(crate) fn replaced_by(name: &str) -> &'static str {
     }
 }
 
-/// Builtin methods that exist on exactly one builtin type, used to fix a
-/// receiver whose type is not known yet.
-pub(crate) fn unique_receiver(store: &mut TypeStore, name: &str) -> Option<Type> {
-    let str_only = ["upper", "lower", "trim", "trim_start", "trim_end", "split", "lines", "replace", "starts_with", "ends_with", "chars", "repeat", "to_int", "parse_int", "parse_float", "char_code"];
-    let list_only = ["map", "filter", "each", "reduce", "any", "all", "find", "push", "pop", "drop_last", "sort", "sorted", "flatten", "count"];
-    let map_only = ["keys", "values", "entries", "has", "set", "remove", "delete"];
-    if str_only.contains(&name) {
-        Some(Type::Str)
-    } else if list_only.contains(&name) {
-        let e = store.fresh();
-        Some(Type::list(e))
-    } else if map_only.contains(&name) {
-        let v = store.fresh();
-        Some(Type::map(v))
-    } else {
-        None
+/// The builtin types that have a method of this name taking `nargs`
+/// arguments, as `method_sig` defines them.
+pub(crate) fn builtin_receivers(store: &mut TypeStore, name: &str, nargs: usize) -> Vec<Type> {
+    let candidates = [
+        Type::Str,
+        Type::Int,
+        Type::Float,
+        Type::Bool,
+        Type::list(store.fresh()),
+        Type::range(),
+        Type::map(store.fresh()),
+    ];
+    candidates
+        .into_iter()
+        .filter(|t| method_sig(store, t, name, nargs).is_some_and(|(params, _, _)| params.len() == nargs))
+        .collect()
+}
+
+/// The builtin type that a method of this name fixes a receiver of unknown
+/// type to: the one type that has it. A method that takes a function (a
+/// list's `map`, which a range also has) is lowered with its function as
+/// code, which a generic receiver cannot pass on, so it fixes a list.
+pub(crate) fn unique_receiver(store: &mut TypeStore, name: &str, nargs: usize) -> Option<Type> {
+    let mut found = builtin_receivers(store, name, nargs);
+    if found.len() == 1 {
+        return found.pop();
     }
+    let list = found.into_iter().find(|t| matches!(t, Type::List(_)))?;
+    let (params, _, _) = method_sig(store, &list, name, nargs)?;
+    params.iter().any(|p| matches!(store.shallow(p), Type::Fn(..))).then_some(list)
 }
 
 pub fn describe_class(c: &Class) -> String {
@@ -257,10 +270,10 @@ impl Checker {
         let subject = self.shallow(&c.subject);
         if let Type::Var(_) = subject {
             // a method name that only one builtin type has fixes the receiver
-            if let Class::Method(name, _, _) = &c.class {
+            if let Class::Method(name, args, _) = &c.class {
                 let has_class_method = self.types.iter().any(|t| t.method(name).is_some());
                 if !has_class_method
-                    && let Some(t) = unique_receiver(&mut self.store, name)
+                    && let Some(t) = unique_receiver(&mut self.store, name, args.len())
                         && self.store.unify(&subject, &t).is_ok() {
                             return self.solve_one(id);
                         }
