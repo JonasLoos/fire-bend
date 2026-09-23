@@ -1110,10 +1110,17 @@ fn parse_binary_chain(pair: Pair<'_>) -> Result<Expression> {
     let mut links = Vec::new();
     while let Some(p) = inner.next() {
         if is_continuation_block(p.as_rule()) {
+            // a continuation line carries on the chain: after `x`, the line
+            // `- a + b` is `(x - a) + b`
             for line in p.into_inner() {
                 let mut parts = line.into_inner();
-                if let Some(op) = parts.next() {
-                    links.push((op, parts.next()));
+                let (Some(op), Some(chain)) = (parts.next(), parts.next()) else {
+                    continue;
+                };
+                let mut items = chain.into_inner();
+                links.push((op, items.next()));
+                while let Some(op) = items.next() {
+                    links.push((op, items.next()));
                 }
             }
         } else {
