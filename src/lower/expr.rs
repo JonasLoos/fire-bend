@@ -146,6 +146,7 @@ impl<'a> Lower<'a> {
             }
             ExprKind::Abort(msg) => {
                 let m = self.expr(ctx, msg, pre);
+                let m = if line == 0 { m } else { Term::cat(Term::Str(format!("line {}: ", line)), m) };
                 let rty = self.ty_in(ctx, &e.ty, line);
                 match ctx.mode {
                     Mode::Io => {
@@ -206,6 +207,13 @@ impl<'a> Lower<'a> {
             out.push(Term::TyArg(at));
         }
         out
+    }
+
+    /// Bind an operation that may fail right here (an index, a conversion,
+    /// an unwrap): its failure names the source line.
+    pub fn bind_failing(&mut self, ctx: &mut FnCtx, t: Term, ty: &Ty, pre: &mut Vec<ir::Stmt>, line: usize) -> Term {
+        let t = if line == 0 { t } else { Term::call("F.at", vec![Term::TyArg(ty.clone()), Term::Str(format!("line {}: ", line)), t]) };
+        self.bind_monadic(ctx, t, Mode::Result, ty, pre, line)
     }
 
     /// Bind a term of mode `mode` to a temporary when it is monadic,
@@ -654,8 +662,10 @@ impl<'a> Lower<'a> {
         if forwarded {
             let f = self.dict_term(ctx, id, line);
             let t = apply_term(f, terms);
-            let mode = if c.class.fallible() { Mode::Result } else { Mode::Pure };
-            return self.bind_monadic(ctx, t, mode, &rty, pre, line);
+            if c.class.fallible() {
+                return self.bind_failing(ctx, t, &rty, pre, line);
+            }
+            return t;
         }
         let mut mode = self.dict_mode(id);
         let t = match c.solution.clone() {
@@ -684,6 +694,11 @@ impl<'a> Lower<'a> {
                 Term::unit()
             }
         };
+        // a builtin operation that fails here (an index, a conversion); a
+        // callback that fails names its own line
+        if mode == Mode::Result && self.dict_mode(id) == Mode::Result {
+            return self.bind_failing(ctx, t, &rty, pre, line);
+        }
         self.bind_monadic(ctx, t, mode, &rty, pre, line)
     }
 
@@ -1399,7 +1414,7 @@ impl<'a> Lower<'a> {
             }
             "assert" => {
                 let t = Term::call("F.assert", vec![a(0), a(1)]);
-                self.bind_monadic(ctx, t, Mode::Result, &Ty::Unit, pre, line)
+                self.bind_failing(ctx, t, &Ty::Unit, pre, line)
             }
             "maybe.or" => {
                 let et = rty.clone();
@@ -1407,7 +1422,7 @@ impl<'a> Lower<'a> {
             }
             "maybe.unwrap" => {
                 let t = Term::call("F.maybe.unwrap", vec![Term::TyArg(rty.clone()), a(0)]);
-                self.bind_monadic(ctx, t, Mode::Result, &rty, pre, line)
+                self.bind_failing(ctx, t, &rty, pre, line)
             }
             "result.unwrap_ok" => {
                 let et = match self.store.shallow(&args[0].ty) {
@@ -1415,7 +1430,7 @@ impl<'a> Lower<'a> {
                     _ => Ty::Str,
                 };
                 let t = Term::call("F.result.unwrap_ok", vec![Term::TyArg(et), Term::TyArg(rty.clone()), a(0)]);
-                self.bind_monadic(ctx, t, Mode::Result, &rty, pre, line)
+                self.bind_failing(ctx, t, &rty, pre, line)
             }
             "result.unwrap_err" => {
                 let at = match self.store.shallow(&args[0].ty) {
@@ -1423,12 +1438,12 @@ impl<'a> Lower<'a> {
                     _ => Ty::Str,
                 };
                 let t = Term::call("F.result.unwrap_err", vec![Term::TyArg(rty.clone()), Term::TyArg(at), a(0)]);
-                self.bind_monadic(ctx, t, Mode::Result, &rty, pre, line)
+                self.bind_failing(ctx, t, &rty, pre, line)
             }
             "list.at" => {
                 let et = rty.clone();
                 let t = Term::call("F.list.index", vec![Term::TyArg(et), a(0), a(1)]);
-                self.bind_monadic(ctx, t, Mode::Result, &rty, pre, line)
+                self.bind_failing(ctx, t, &rty, pre, line)
             }
             "list.drop" => {
                 let et = match self.store.shallow(&args[0].ty) {
@@ -1444,7 +1459,7 @@ impl<'a> Lower<'a> {
                 };
                 let f = if name == "list.need_exactly" { "F.list.need_exactly" } else { "F.list.need_at_least" };
                 let t = Term::call(f, vec![Term::TyArg(et), a(0), a(1)]);
-                self.bind_monadic(ctx, t, Mode::Result, &Ty::Unit, pre, line)
+                self.bind_failing(ctx, t, &Ty::Unit, pre, line)
             }
             "float.fixed" => Term::call("F.f32.show_fixed", vec![a(0), a(1)]),
             "int.and" => Term::call("U32.and", vec![a(0), a(1)]),
@@ -1532,11 +1547,12 @@ impl<'a> Lower<'a> {
 
     /// Apply a format spec to a rendered value.
     fn format_spec(&mut self, s: Term, spec: &str, ty: &Type) -> Term {
-        // [[fill]align][width][.precision][f]
+        // [[fill]align][width][.precision][f]; the checker writes a number's
+        // zero padding as the align `=` (zeros after the sign)
         let mut chars: Vec<char> = spec.chars().collect();
         let mut fill = ' ';
         let mut align: Option<char> = None;
-        if chars.len() >= 2 && matches!(chars[1], '<' | '>' | '^') {
+        if chars.len() >= 2 && matches!(chars[1], '<' | '>' | '^' | '=') {
             fill = chars[0];
             align = Some(chars[1]);
             chars.drain(0..2);
@@ -1558,6 +1574,7 @@ impl<'a> Lower<'a> {
         let f = match align {
             '<' => "F.fmt.pad_right",
             '>' => "F.fmt.pad_left",
+            '=' => return Term::call("F.fmt.pad_zero", vec![s, Term::U32(width)]),
             _ => "F.fmt.pad_center",
         };
         Term::call(f, vec![s, Term::U32(width), Term::Chr(fill)])

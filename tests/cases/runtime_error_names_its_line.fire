@@ -1,0 +1,13 @@
+# a failure at run time names the line it happened at, not the lines of
+# the calls it passed through
+def third(xs)
+    xs[2]
+
+def total(rows)
+    var t = 0
+    for r in rows
+        t += third(r)
+    t
+
+print(total([[1, 2, 3], [4, 5, 6]]))
+print(total([[1, 2, 3], [4, 5]]))

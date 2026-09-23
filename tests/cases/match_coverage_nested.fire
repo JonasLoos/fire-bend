@@ -1,0 +1,26 @@
+# coverage looks through every field of a constructor and every cell of a
+# list pattern: these matches cover every value, so the defs cannot abort
+type Tree
+    Leaf
+    Node(left: Tree, value: int, right: Tree)
+
+def shape(t)
+    match t
+        Leaf => "leaf"
+        Node(Leaf, v, _) => "no left {v}"
+        Node(Node(_, a, _), v, _) => "left {a} under {v}"
+
+def heads(xs)
+    match xs
+        [] => "empty"
+        [[], ...rest] => "starts empty"
+        [[x, ...ys], ...rest] => "starts with {x}"
+
+def both(p)
+    match p
+        {on: true, n} => n
+        {on: false, n} => -n
+
+print(shape(Leaf), shape(Node(Leaf, 1, Leaf)), shape(Node(Node(Leaf, 2, Leaf), 3, Leaf)))
+print(heads([]), heads([[], [1]]), heads([[5], []]))
+print(both({on: true, n: 4}), both({on: false, n: 4}))

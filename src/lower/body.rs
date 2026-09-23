@@ -1085,7 +1085,7 @@ impl<'a> Lower<'a> {
     /// `sunk` are statements that precede every leaf.
     fn compile_rows(&mut self, ctx: &mut FnCtx, cols: Vec<(String, Type)>, rows: Vec<Row>, real: bool, leaf: &Leaf, sunk: &[ir::Stmt], line: usize) -> Body {
         if rows.is_empty() {
-            let msg = Term::Str("match: no arm matched".into());
+            let msg = Term::Str(if line == 0 { "no arm of the match accepts the value".into() } else { format!("line {}: no arm of the match accepts the value", line) });
             let t = match ctx.mode {
                 Mode::Io => Term::call("IO.die", vec![Term::TyArg(self.leaf_ty(ctx, leaf)), Term::U32(1), msg]),
                 Mode::Result => Term::ctor("Fail", vec![msg]),

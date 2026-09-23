@@ -389,61 +389,197 @@ impl Program {
     }
 }
 
-/// A pattern that matches every value of its type: a name, `_`, or the
-/// only constructor of its type (a pair, a record, a class) over such
-/// patterns.
-pub fn pat_total(p: &Pat, types: &[DataType]) -> bool {
-    match p {
-        Pat::Bind(_) | Pat::Wild => true,
-        Pat::Con(id, _, ps) => types[*id].ctors.len() == 1 && ps.iter().all(|q| pat_total(q, types)),
-        Pat::List(items, Some(_)) => items.is_empty(),
-        _ => false,
-    }
-}
-
 /// Whether the arms cover every value of the subject's type.
 pub fn arms_exhaustive(arms: &[Arm], types: &[DataType]) -> bool {
-    let total: Vec<&Pat> = arms.iter().filter(|a| a.guard.is_none()).map(|a| &a.pat).collect();
-    pats_exhaustive(&total, types)
+    missing_case(arms, types).is_none()
 }
 
-/// Whether the patterns together cover every value of their type.
-fn pats_exhaustive(total: &[&Pat], types: &[DataType]) -> bool {
-    if total.iter().any(|p| pat_total(p, types)) {
-        return true;
+/// A value no arm accepts (an arm with a guard may always decline),
+/// written as a pattern, or nothing when the arms cover every value. This
+/// is the usefulness check over a matrix of pattern rows: a list pattern is
+/// nil and cons cells, bools and `nothing` are constructors, and other
+/// literals never cover their type.
+pub fn missing_case(arms: &[Arm], types: &[DataType]) -> Option<String> {
+    let rows: Vec<Vec<Pat>> = arms.iter().filter(|a| a.guard.is_none()).map(|a| vec![a.pat.clone()]).collect();
+    let w = missing(&rows, 1, types)?;
+    Some(w[0].render(types))
+}
+
+/// The constructor at the head of a pattern.
+#[derive(Debug, Clone, PartialEq)]
+enum Head {
+    Con(TypeId, usize),
+    Nil,
+    Cons,
+    Bool(bool),
+    Unit,
+    Lit(Lit),
+}
+
+/// A value the rows miss: any value, a constructor over missed values, or
+/// a literal.
+#[derive(Debug, Clone)]
+enum Missed {
+    Any,
+    Con(Head, Vec<Missed>),
+    Lit(Lit),
+}
+
+/// The head constructor of a pattern and its sub-patterns; nothing for a
+/// pattern that accepts anything.
+fn head(p: &Pat) -> Option<(Head, Vec<Pat>)> {
+    match p {
+        Pat::Bind(_) | Pat::Wild => None,
+        Pat::Con(t, c, ps) => Some((Head::Con(*t, *c), ps.clone())),
+        Pat::List(items, rest) => match items.split_first() {
+            Some((x, xs)) => Some((Head::Cons, vec![x.clone(), Pat::List(xs.to_vec(), rest.clone())])),
+            None if rest.is_some() => None,
+            None => Some((Head::Nil, vec![])),
+        },
+        Pat::Lit(Lit::Bool(b)) => Some((Head::Bool(*b), vec![])),
+        Pat::Lit(Lit::Nothing) => Some((Head::Unit, vec![])),
+        Pat::Lit(l) => Some((Head::Lit(l.clone()), vec![])),
     }
-    // every constructor of one data type: one with total fields, or, for a
-    // constructor of one field, patterns that cover that field
-    // (`nothing`, `Leaf`, `Node(..)` on a `Tree | nothing`)
-    if let Some(Pat::Con(id, _, _)) = total.first() {
-        let dt = &types[*id];
-        return (0..dt.ctors.len()).all(|ci| {
-            let rows: Vec<&Vec<Pat>> = total.iter().filter_map(|p| match p {
-                Pat::Con(i, c, ps) if i == id && *c == ci => Some(ps),
-                _ => None,
-            }).collect();
-            rows.iter().any(|ps| ps.iter().all(|q| pat_total(q, types)))
-                || (dt.ctors[ci].fields.len() == 1 && !rows.is_empty() && {
-                    let firsts: Vec<&Pat> = rows.iter().map(|ps| &ps[0]).collect();
-                    pats_exhaustive(&firsts, types)
-                })
-        });
+}
+
+fn arity(h: &Head, types: &[DataType]) -> usize {
+    match h {
+        Head::Con(t, c) => types[*t].ctors[*c].fields.len(),
+        Head::Cons => 2,
+        _ => 0,
     }
-    let t = total.iter().any(|p| matches!(p, Pat::Lit(Lit::Bool(true))));
-    let f = total.iter().any(|p| matches!(p, Pat::Lit(Lit::Bool(false))));
-    if t && f {
-        return true;
+}
+
+/// Every constructor of the type a head belongs to; nothing for literals,
+/// whose values never run out.
+fn signature(h: &Head, types: &[DataType]) -> Option<Vec<Head>> {
+    match h {
+        Head::Con(t, _) => Some((0..types[*t].ctors.len()).map(|c| Head::Con(*t, c)).collect()),
+        Head::Nil | Head::Cons => Some(vec![Head::Nil, Head::Cons]),
+        Head::Bool(_) => Some(vec![Head::Bool(false), Head::Bool(true)]),
+        Head::Unit => Some(vec![Head::Unit]),
+        Head::Lit(_) => None,
     }
-    // lists: a `[a, b, ...rest]` covers every length from its own up, and
-    // exact shapes (`[]`, `[a]`) must cover each length below
-    let items_total = |items: &Vec<Pat>| items.iter().all(|q| pat_total(q, types));
-    let Some(open) = total.iter().filter_map(|p| match p {
-        Pat::List(items, Some(_)) if items_total(items) => Some(items.len()),
-        _ => None,
-    }).min() else {
-        return false;
+}
+
+/// The rows whose first pattern accepts the constructor `h`, with that
+/// pattern replaced by its `a` sub-patterns.
+fn specialize(rows: &[Vec<Pat>], h: &Head, a: usize) -> Vec<Vec<Pat>> {
+    rows.iter().filter_map(|r| {
+        let mut out = match head(&r[0]) {
+            None => vec![Pat::Wild; a],
+            Some((g, ps)) if g == *h => ps,
+            Some(_) => return None,
+        };
+        out.extend(r[1..].iter().cloned());
+        Some(out)
+    }).collect()
+}
+
+/// Values of `n` columns that no row accepts, one per column.
+fn missing(rows: &[Vec<Pat>], n: usize, types: &[DataType]) -> Option<Vec<Missed>> {
+    if n == 0 {
+        return if rows.is_empty() { Some(vec![]) } else { None };
+    }
+    let mut heads: Vec<Head> = Vec::new();
+    for r in rows {
+        if let Some((h, _)) = head(&r[0])
+            && !heads.contains(&h) {
+                heads.push(h);
+            }
+    }
+    let sig = heads.first().and_then(|h| signature(h, types));
+    // every constructor has rows: a value is missed under one of them
+    if let Some(all) = &sig
+        && all.iter().all(|h| heads.contains(h)) {
+            for h in all {
+                let a = arity(h, types);
+                if let Some(mut w) = missing(&specialize(rows, h, a), a + n - 1, types) {
+                    let rest = w.split_off(a);
+                    let mut out = vec![Missed::Con(h.clone(), w)];
+                    out.extend(rest);
+                    return Some(out);
+                }
+            }
+            return None;
+        }
+    // some constructor has none: only the rows accepting anything count
+    let others: Vec<Vec<Pat>> = rows.iter().filter(|r| head(&r[0]).is_none()).map(|r| r[1..].to_vec()).collect();
+    let mut w = missing(&others, n - 1, types)?;
+    let first = match &sig {
+        Some(all) => match all.iter().find(|h| !heads.contains(h)) {
+            Some(h) => Missed::Con(h.clone(), vec![Missed::Any; arity(h, types)]),
+            None => Missed::Any,
+        },
+        None => unnamed_literal(&heads),
     };
-    (0..open).all(|n| total.iter().any(|p| matches!(p, Pat::List(items, None) if items.len() == n && items_total(items))))
+    w.insert(0, first);
+    Some(w)
+}
+
+/// A literal of the same kind as the heads that none of them is.
+fn unnamed_literal(heads: &[Head]) -> Missed {
+    let named = |l: &Lit| heads.contains(&Head::Lit(l.clone()));
+    match heads.first() {
+        Some(Head::Lit(Lit::Int(_))) => (0..).map(Lit::Int).find(|l| !named(l)).map(Missed::Lit).unwrap_or(Missed::Any),
+        Some(Head::Lit(Lit::Str(_))) => ["", "a", "b", "c", "x", "y", "z"].iter().map(|s| Lit::Str(s.to_string())).find(|l| !named(l)).map(Missed::Lit).unwrap_or(Missed::Any),
+        _ => Missed::Any,
+    }
+}
+
+impl Missed {
+    /// Written as a Fire pattern.
+    fn render(&self, types: &[DataType]) -> String {
+        match self {
+            Missed::Any => "_".into(),
+            Missed::Lit(Lit::Int(i)) => i.to_string(),
+            Missed::Lit(Lit::Str(s)) => format!("\"{}\"", s),
+            Missed::Lit(_) => "_".into(),
+            Missed::Con(h, ws) => match h {
+                Head::Bool(b) => b.to_string(),
+                Head::Unit => "nothing".into(),
+                Head::Nil => "[]".into(),
+                Head::Cons => {
+                    // the cells of a list: `[a, b]`, or `[a, b, ...]` when the rest is any list
+                    let mut items = Vec::new();
+                    let mut cur = self;
+                    loop {
+                        match cur {
+                            Missed::Con(Head::Cons, ws) => {
+                                items.push(ws[0].render(types));
+                                cur = &ws[1];
+                            }
+                            Missed::Con(Head::Nil, _) => break,
+                            _ => {
+                                items.push("...".into());
+                                break;
+                            }
+                        }
+                    }
+                    format!("[{}]", items.join(", "))
+                }
+                Head::Lit(l) => Missed::Lit(l.clone()).render(types),
+                Head::Con(t, c) => {
+                    let parts: Vec<String> = ws.iter().map(|w| w.render(types)).collect();
+                    let dt = &types[*t];
+                    match (*t, &dt.kind) {
+                        (crate::types::MAYBE, _) => if *c == 0 { "nothing".into() } else { parts[0].clone() },
+                        (crate::types::RESULT, _) => format!("{{{}: {}}}", if *c == 1 { "ok" } else { "err" }, parts[0]),
+                        (crate::types::PAIR, _) => format!("[{}]", parts.join(", ")),
+                        (_, DataKind::Declared) => {
+                            let name = &dt.ctors[*c].name;
+                            if parts.is_empty() { name.clone() } else { format!("{}({})", name, parts.join(", ")) }
+                        }
+                        // a record or an object: the fields that matter
+                        _ => {
+                            let fields: Vec<String> = dt.ctors[0].fields.iter().zip(ws.iter()).filter(|(_, w)| !matches!(w, Missed::Any)).map(|(f, w)| format!("{}: {}", f.name, w.render(types))).collect();
+                            format!("{{{}}}", fields.join(", "))
+                        }
+                    }
+                }
+            },
+        }
+    }
 }
 
 /// Visit every expression in a block (statements first, then nested

@@ -1,0 +1,9 @@
+# a `0` before the width pads a number with zeros after its sign, as in
+# Python; a fill character before an align pads with it as given
+n = -5
+m = 7
+x = -3.14159
+print("[{n:03}] [{m:03}] [{n:05}] [{1234:03}] [{x:08.2f}] [{2.5:06.1f}]")
+print("[{n:0>4}] [{m:*^5}] [{m:<3}|]")
+for h, mi in [[9, 5], [12, 30]]
+    print("{h:02}:{mi:02}")

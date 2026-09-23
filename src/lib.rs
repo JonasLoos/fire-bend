@@ -230,6 +230,8 @@ fn humanize_parse_error(source: &str, e: pest::error::Error<Rule>) -> pest::erro
         "return" | "break" | "continue" => message.push_str(&format!(
             "\n  hint: `{}` is a statement: it goes on a line of its own, after `do` or after `=>`, not inside an expression", token)),
         "else" if source.contains("else if ") => message.push_str("\n  hint: Fire writes `elif` for `else if`"),
+        "in" => message.push_str("\n  hint: `in` belongs to `for`; a membership test is `xs.contains(x)` (a list or string) or `d.has(k)` (a dictionary)"),
+        "not" if rest[3..].trim_start_matches(' ').starts_with("in ") => message.push_str("\n  hint: `in` belongs to `for`; a membership test is `not xs.contains(x)` (a list or string) or `not d.has(k)` (a dictionary)"),
         _ => {}
     }
     let line_before = source[..pos].rsplit('\n').next().unwrap_or("");
@@ -287,18 +289,21 @@ pub struct Report {
     pub unsafe_defs: Vec<(String, usize)>,
     /// Defs that are not unsafe themselves but call unsafe code.
     pub relying: Vec<(String, usize)>,
-    /// Lines of matches whose arms cover only some values: they abort on
-    /// the rest.
-    pub partial_matches: Vec<usize>,
+    /// Matches whose arms cover only some values (they abort on the rest):
+    /// the line and a value no arm accepts.
+    pub partial_matches: Vec<(usize, String)>,
 }
 
-/// The lines of matches that do not cover every value of their subject.
-fn partial_matches(core: &core::Program) -> Vec<usize> {
-    fn visit(b: &core::Block, types: &[core::DataType], out: &mut std::collections::BTreeSet<usize>) {
+/// The matches that do not cover every value of their subject, by line,
+/// with a value they miss.
+fn partial_matches(core: &core::Program) -> Vec<(usize, String)> {
+    fn visit(b: &core::Block, types: &[core::DataType], out: &mut std::collections::BTreeMap<usize, String>) {
         for s in &b.stmts {
             match &s.kind {
-                core::StmtKind::Match { subject, arms } if !core::arms_exhaustive(arms, types) => {
-                    out.insert(subject.line);
+                core::StmtKind::Match { subject, arms } => {
+                    if let Some(m) = core::missing_case(arms, types) {
+                        out.entry(subject.line).or_insert(m);
+                    }
                 }
                 core::StmtKind::If { then, else_, .. } => {
                     visit(then, types, out);
@@ -309,8 +314,10 @@ fn partial_matches(core: &core::Program) -> Vec<usize> {
             }
             let mut blocks = Vec::new();
             core::walk_stmt(s, &mut |e: &core::Expr| match &e.kind {
-                core::ExprKind::Match(subject, arms) if !core::arms_exhaustive(arms, types) => {
-                    out.insert(subject.line);
+                core::ExprKind::Match(subject, arms) => {
+                    if let Some(m) = core::missing_case(arms, types) {
+                        out.entry(subject.line).or_insert(m);
+                    }
                 }
                 core::ExprKind::Block(b) => blocks.push(b.clone()),
                 _ => {}
@@ -320,7 +327,7 @@ fn partial_matches(core: &core::Program) -> Vec<usize> {
             }
         }
     }
-    let mut out = std::collections::BTreeSet::new();
+    let mut out = std::collections::BTreeMap::new();
     for d in &core.defs {
         if !matches!(d.kind, core::DefKind::Law) {
             visit(&d.body, &core.types, &mut out);

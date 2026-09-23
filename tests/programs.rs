@@ -98,6 +98,10 @@ fn unsupported_programs_are_rejected_with_a_message() {
         // a helper a method uses is a method: it cannot run before the object exists
         ("def G\n    def h(x)\n        x\n    x = h(1)\n    public p = () => h(x)\nprint(G().p())\n", "while the object is being built"),
         ("x = 1.5 & 2.5\n", "expected int, found float"),
+        ("def f(n: int)\n    n + 0.5\n", "convert with `float(x)`"),
+        // habits from Python get a hint
+        ("xs = [1]\nprint(2 in xs)\n", "`xs.contains(x)`"),
+        ("xs = [1]\nif 2 not in xs do print(1)\n", "`not xs.contains(x)`"),
         ("xs: [int, str] = [1]\n", "one element type"),
         // totality: every def must be seen to end, or say `unsafe def`
         ("var n = 0\nwhile n < 3 do n += 1\n", "may not terminate"),
@@ -237,5 +241,10 @@ fn check_lists_partial_matches() {
     let source = std::fs::read_to_string(repo().join("tests/cases/match_coverage_through_maybe.fire")).unwrap();
     let (_, report) = fire_bend::compile_for_check(&source).unwrap();
     // `partial` leaves out `Minus`; `name` covers every case
-    assert_eq!(report.partial_matches, vec![18]);
+    assert_eq!(report.partial_matches, vec![(18, "Minus".to_string())]);
+    // each partial match comes with a value no arm accepts
+    let src = "type Tree\n    Leaf\n    Node(left: Tree, value: int, right: Tree)\ndef t(x)\n    match x\n        Leaf => 0\n        Node(Leaf, v, Leaf) => v\ndef n(k)\n    match k\n        0 => 1\n        1 => 2\ndef l(xs: [int])\n    match xs\n        [] => 0\n        [a, b, ...r] => a\ndef r(p)\n    match p\n        {x: 0, y} => y\n        {x, y: 0} => x\n";
+    let (_, report) = fire_bend::compile_for_check(src).unwrap();
+    let missed: Vec<&str> = report.partial_matches.iter().map(|(_, m)| m.as_str()).collect();
+    assert_eq!(missed, vec!["Node(Node(_, _, _), _, _)", "2", "[_]", "{x: 1, y: 1}"]);
 }

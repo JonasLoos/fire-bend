@@ -380,7 +380,11 @@ impl Checker {
             Err(e) => {
                 let l = self.show_type(&e.left);
                 let r = self.show_type(&e.right);
-                self.error(line, format!("type mismatch: expected {}, found {}", l, r));
+                let hint = match (self.store.shallow(&e.left), self.store.shallow(&e.right)) {
+                    (Type::Int, Type::Float) | (Type::Float, Type::Int) => ": ints and floats do not mix; convert with `float(x)` or `int(x)`",
+                    _ => "",
+                };
+                self.error(line, format!("type mismatch: expected {}, found {}{}", l, r, hint));
                 false
             }
         }

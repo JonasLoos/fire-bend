@@ -187,8 +187,10 @@ fn check(file: &str, image: String, rep: &fire_bend::Report) -> i32 {
         }
     }
     if !rep.partial_matches.is_empty() {
-        let lines: Vec<String> = rep.partial_matches.iter().map(|l| l.to_string()).collect();
-        println!("matches that cover only some values, and abort on the rest: line {}", lines.join(", "));
+        println!("matches that cover only some values, and abort on the rest:");
+        for (line, missed) in &rep.partial_matches {
+            println!("  line {}: no arm accepts {}", line, missed);
+        }
     }
     if status == 0 && !open.is_empty() {
         println!("{} open law(s)", open.len());

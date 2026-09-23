@@ -38,6 +38,14 @@ def F.io_unwrap(-A: Data, r: Result<&2, &2, String, A>) -> IO(A):
     case Fail{e}:
       IO.die(A, 1, e)
 
+# A failure where it happens, with the source line before its message.
+def F.at(-A: Data, line: String, r: Result<&2, &2, String, A>) -> Result<&2, &2, String, A>:
+  match r:
+    case Done{v}:
+      Done{v}
+    case Fail{e}:
+      Fail{line ++ e}
+
 def F.assert.k(msg: String, c: Bool) -> Result<&2, &2, String, Unit>:
   match c:
     case True{}:
@@ -769,6 +777,21 @@ def F.fmt.pad_center.k(+s: String, +width: U32, +c: Char, +len: U32, short: Bool
 
 def F.fmt.pad_center(+s: String, +width: U32, +c: Char) -> String:
   F.fmt.pad_center.k(s, width, c, F.str.len(s), U32.is_lt(F.str.len(s), width))
+
+# `{n:05}`: zeros after the sign
+def F.fmt.pad_zero.k(+width: U32, h: Char, +t: String, neg: Bool) -> String:
+  match neg:
+    case True{}:
+      SCon{h, F.fmt.pad_left(t, (width - 1 : U32), '0')}
+    case False{}:
+      F.fmt.pad_left(SCon{h, t}, width, '0')
+
+def F.fmt.pad_zero(s: String, +width: U32) -> String:
+  match s:
+    case SNil{}:
+      F.fmt.pad_left(SNil{}, width, '0')
+    case SCon{+h, +t}:
+      F.fmt.pad_zero.k(width, h, t, Char.is_eq(h, '-'))
 
 # -- Ranges -------------------------------------------------------------------
 def F.range.start(r: F.Range) -> U32:

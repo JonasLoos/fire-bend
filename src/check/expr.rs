@@ -346,10 +346,18 @@ impl Checker {
                         }
                         _ => self.show(x),
                     };
-                    // numbers align right by default
+                    // numbers align right by default; a `0` before the width
+                    // pads with zeros after the sign (`{n:03}` is `-05`)
                     let spec = spec.as_ref().map(|sp| {
                         let has_align = sp.chars().take(2).any(|c| matches!(c, '<' | '>' | '^'));
-                        if numeric && !has_align && !sp.is_empty() { format!(">{}", sp) } else { sp.clone() }
+                        let zeros = sp.starts_with('0') && sp[1..].starts_with(|c: char| c.is_ascii_digit());
+                        if numeric && !has_align && zeros {
+                            format!("0={}", &sp[1..])
+                        } else if numeric && !has_align && !sp.is_empty() {
+                            format!(">{}", sp)
+                        } else {
+                            sp.clone()
+                        }
                     });
                     out.push(FPart::Expr(shown, spec));
                 }
