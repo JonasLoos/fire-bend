@@ -410,6 +410,18 @@ pub fn from_pest_pairs(mut pairs: pest::iterators::Pairs<'_, crate::Rule>) -> st
     Ok(Program { statements })
 }
 
+/// `return`, `break` or `continue` as the body of an arm or lambda.
+fn parse_control(pair: Pair<'_>) -> Result<Stmt> {
+    let line = pair.line_col().0;
+    let node = match pair.as_rule() {
+        Rule::return_stmt => parse_return_statement(pair)?,
+        Rule::break_stmt => Statement::Break,
+        Rule::continue_stmt => Statement::Continue,
+        other => return err(&pair, format!("unexpected rule {:?} as a control statement", other)),
+    };
+    Ok(Stmt { node, line })
+}
+
 fn parse_statement(pair: Pair<'_>) -> Result<Stmt> {
     let line = pair.line_col().0;
     let mut inner = pair.into_inner().peekable();
@@ -826,7 +838,8 @@ fn parse_guarded_arm(pair: Pair<'_>) -> Result<MatchArm> {
             Rule::typecheck if pattern.is_none() => {
                 pattern = Some(expression_to_pattern(parse_expression(p.clone())?, &p)?);
             }
-            Rule::lambda_expr => body = Some(parse_expression(p)?),
+            Rule::pipeline_expr if guard.is_some() => body = Some(parse_expression(p)?),
+            Rule::return_stmt | Rule::break_stmt | Rule::continue_stmt => body_stmts.push(parse_control(p)?),
             // an indented block body arrives as individual statements
             Rule::statement => body_stmts.push(parse_statement(p)?),
             _ if guard.is_none() => guard = Some(parse_expression(p)?),
@@ -1060,9 +1073,10 @@ fn parse_expression_inner(pair: Pair<'_>) -> Result<Expression> {
         Rule::pipeline_expr => parse_pipeline(pair),
         Rule::pipeline_expr_simple => {
             // A pipeline chain without a continuation block.
+            let open = open_lambdas(&pair);
             let mut links = Vec::new();
             flatten_pipeline_simple(pair, &mut links)?;
-            build_pipeline(links)
+            build_pipeline_in_lambda(links, open)
         }
         Rule::lambda_expr => parse_lambda_expression(pair),
         Rule::loop_expr => parse_loop_expression(pair),
@@ -1312,6 +1326,58 @@ fn flatten_pipeline_simple(
     Ok(())
 }
 
+/// How many lambdas, each the body of the one before, a pipeline chain
+/// starts with, written without parentheses: `x => y => ...`.
+fn open_lambdas(pair: &Pair<'_>) -> usize {
+    let mut p = pair.clone();
+    // pipeline_expr -> pipeline_expr_simple -> lambda_expr
+    while matches!(p.as_rule(), Rule::pipeline_expr | Rule::pipeline_expr_simple) {
+        match p.clone().into_inner().next() {
+            Some(first) => p = first,
+            None => return 0,
+        }
+    }
+    let mut n = 0;
+    while p.as_rule() == Rule::lambda_expr {
+        let children: Vec<Pair<'_>> = p.clone().into_inner().collect();
+        if !children.iter().any(|c| c.as_rule() == Rule::lambda_op) {
+            break;
+        }
+        n += 1;
+        match children.last() {
+            Some(body) => p = body.clone(),
+            None => break,
+        }
+    }
+    n
+}
+
+/// A chain that starts with a lambda written without parentheses belongs
+/// to the lambda's body: `x => x |> f` is `x => (x |> f)`, and a match arm
+/// `n => n |> f` pipes inside the arm. (A lambda as a pipeline stage,
+/// `xs ?> x => x > 1 |> sum`, is not the head and still ends at the next
+/// operator.)
+fn build_pipeline_in_lambda(links: Vec<(Option<PipelineOperator>, Expression)>, open: usize) -> Result<Expression> {
+    if open == 0 || links.len() < 2 {
+        return build_pipeline(links);
+    }
+    let mut iter = links.into_iter();
+    let (_, head) = iter.next().unwrap();
+    match head {
+        Expression::Lambda { params, body } => {
+            let mut inner = vec![(None, *body)];
+            inner.extend(iter);
+            let body = build_pipeline_in_lambda(inner, open - 1)?;
+            Ok(Expression::Lambda { params, body: Box::new(body) })
+        }
+        head => {
+            let mut all = vec![(None, head)];
+            all.extend(iter);
+            build_pipeline(all)
+        }
+    }
+}
+
 fn build_pipeline(links: Vec<(Option<PipelineOperator>, Expression)>) -> Result<Expression> {
     let mut iter = links.into_iter();
     let (_, mut result) = match iter.next() {
@@ -1326,6 +1392,7 @@ fn build_pipeline(links: Vec<(Option<PipelineOperator>, Expression)>) -> Result<
 }
 
 fn parse_pipeline(pair: Pair<'_>) -> Result<Expression> {
+    let open = open_lambdas(&pair);
     let mut links = Vec::new();
     for p in pair.into_inner() {
         match p.as_rule() {
@@ -1355,7 +1422,7 @@ fn parse_pipeline(pair: Pair<'_>) -> Result<Expression> {
             other => return err(&p, format!("unexpected rule {:?} in pipeline", other)),
         }
     }
-    build_pipeline(links)
+    build_pipeline_in_lambda(links, open)
 }
 
 // --- lambdas ---
@@ -1381,6 +1448,7 @@ fn parse_lambda_expression(pair: Pair<'_>) -> Result<Expression> {
             Rule::lambda_op => {}
             Rule::lambda_expr => body = Some(parse_lambda_expression(p)?),
             Rule::statement => body_stmts.push(parse_statement(p)?),
+            Rule::return_stmt | Rule::break_stmt | Rule::continue_stmt => body_stmts.push(parse_control(p)?),
             other => return err(&p, format!("unexpected rule {:?} in lambda", other)),
         }
     }
@@ -1810,6 +1878,21 @@ fn parse_fstring_parts(pair: Pair<'_>) -> Result<Vec<FStringPart>> {
                         let spec = fmt_inner.next()
                             .map(|s| s.as_str().trim_start_matches(':').to_string());
                         parts.push(FStringPart::Expression(parse_expression(expr_pair)?, spec));
+                    }
+                    Rule::fstring_split => {
+                        let mut split = inner.into_inner();
+                        let (Some(target), Some(spec)) = (split.next(), split.next()) else {
+                            return err(&p, "malformed interpolation");
+                        };
+                        let text = target.as_str();
+                        let parsed = <crate::FireParser as pest::Parser<Rule>>::parse(Rule::fstring_expression, text)
+                            .map_err(|_| SemanticError::new(format!("cannot read `{}` before the format spec `{}` as an expression", text.trim(), spec.as_str()), Some(target.line_col())))?;
+                        let expr = parsed.into_iter().next().and_then(|e| e.into_inner().find(|x| x.as_rule() == Rule::pipeline_expr));
+                        let Some(expr) = expr else {
+                            return err(&target, "empty interpolation");
+                        };
+                        let spec = spec.as_str().trim_start_matches(':').to_string();
+                        parts.push(FStringPart::Expression(parse_expression(expr)?, Some(spec)));
                     }
                     _ => parts.push(FStringPart::Expression(parse_expression(inner)?, None)),
                 }

@@ -72,8 +72,14 @@ impl Checker {
             ast::Statement::Assignment { targets, value } => self.check_assignment(targets, value),
             ast::Statement::Return(v) => {
                 let ret = self.frame_ref().ret.clone();
+                // a result not known yet guides nothing: the returns are
+                // joined at the end (`nothing` on one path lifts the others)
+                let expected = match self.shallow(&ret) {
+                    Type::Var(_) => None,
+                    _ => Some(ret),
+                };
                 let x = match v {
-                    Some(e) => self.check_expr(e, Some(&ret)),
+                    Some(e) => self.check_expr(e, expected.as_ref()),
                     None => self.lit(Lit::Nothing),
                 };
                 if let FrameKind::Ctor(_) = self.frame_ref().kind {
@@ -478,6 +484,11 @@ impl Checker {
                 let o = self.unwrap_index(o);
                 let i = self.check_expr(index, None);
                 let subject = o.ty.clone();
+                // into a list or dictionary of `T | nothing` a value lifts
+                let value = match self.shallow(&subject) {
+                    Type::List(e) | Type::Map(e) => self.fit(value, &e),
+                    _ => value,
+                };
                 let updated = self.dict(Class::IndexSet(i.ty.clone(), value.ty.clone()), subject.clone(), vec![o.clone(), i, value], subject, line);
                 self.rebind_path(&o, updated)
             }

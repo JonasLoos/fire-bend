@@ -45,6 +45,32 @@ pub enum Ty {
 }
 
 impl Ty {
+    /// The type parameters it mentions.
+    pub fn params(&self, out: &mut BTreeSet<String>) {
+        match self {
+            Ty::Param(p) => {
+                out.insert(p.clone());
+            }
+            Ty::List(t) | Ty::Maybe(t) | Ty::Map(t) | Ty::Io(t) => t.params(out),
+            Ty::Result(a, b) | Ty::Tuple(a, b) => {
+                a.params(out);
+                b.params(out);
+            }
+            Ty::Named(_, args) => {
+                for a in args {
+                    a.params(out);
+                }
+            }
+            Ty::Fn(ps, r) => {
+                for a in ps {
+                    a.params(out);
+                }
+                r.params(out);
+            }
+            _ => {}
+        }
+    }
+
     /// Replace type parameters by name.
     pub fn subst_params(&self, m: &[(String, Ty)]) -> Ty {
         match self {
@@ -407,6 +433,40 @@ impl Term {
     }
 
     /// Def names this term calls or references as templates.
+    /// The type parameters a template argument inside the term mentions:
+    /// a template argument must be closed, so each must be a template
+    /// parameter of the def.
+    pub fn template_params(&self, inside: bool, out: &mut BTreeSet<String>) {
+        match self {
+            Term::TmplTy(t) => t.params(out),
+            Term::TyArg(t) if inside => t.params(out),
+            Term::Ann(b, t) => {
+                if inside {
+                    t.params(out);
+                }
+                b.template_params(inside, out);
+            }
+            Term::TmplTerm(b) => b.template_params(true, out),
+            Term::Call(_, args) | Term::CallVar(_, args) | Term::Ctor(_, args) | Term::List(args) => {
+                for a in args {
+                    a.template_params(inside, out);
+                }
+            }
+            Term::App(f, args) => {
+                f.template_params(inside, out);
+                for a in args {
+                    a.template_params(inside, out);
+                }
+            }
+            Term::Lam(_, b) => b.template_params(inside, out),
+            Term::Op(a, _, b, _) | Term::Cat(a, b) | Term::And(a, b) | Term::Or(a, b) | Term::Cons(a, b) | Term::Tuple(a, b) => {
+                a.template_params(inside, out);
+                b.template_params(inside, out);
+            }
+            _ => {}
+        }
+    }
+
     pub fn def_refs(&self, out: &mut BTreeSet<String>) {
         match self {
             Term::Call(f, args) => {
@@ -600,6 +660,31 @@ impl Body {
         Body::Block { stmts: vec![], tail: t }
     }
 
+    /// See `Term::template_params`.
+    pub fn template_params(&self, out: &mut BTreeSet<String>) {
+        match self {
+            Body::Match { arms, .. } => {
+                for (_, b) in arms {
+                    b.template_params(out);
+                }
+            }
+            Body::Block { stmts, tail } => {
+                for s in stmts {
+                    s.template_params(out);
+                }
+                tail.template_params(false, out);
+            }
+            Body::Do { stmts, tail, .. } => {
+                for s in stmts {
+                    s.template_params(out);
+                }
+                match tail {
+                    DoTail::Return(t) | DoTail::Step(t) => t.template_params(false, out),
+                }
+            }
+        }
+    }
+
     pub fn def_refs(&self, out: &mut BTreeSet<String>) {
         match self {
             Body::Match { arms, .. } => {
@@ -771,6 +856,21 @@ impl Stmt {
             Stmt::ParLet { calls, .. } => {
                 for c in calls {
                     c.mark_reusable_lambdas();
+                }
+            }
+        }
+    }
+
+    pub fn template_params(&self, out: &mut BTreeSet<String>) {
+        match self {
+            Stmt::Let { value, .. }
+            | Stmt::Bind { value, .. }
+            | Stmt::Destructure { value, .. }
+            | Stmt::TupleLet { value, .. }
+            | Stmt::Step(value) => value.template_params(false, out),
+            Stmt::ParLet { calls, .. } => {
+                for c in calls {
+                    c.template_params(false, out);
                 }
             }
         }

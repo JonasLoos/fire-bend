@@ -1,0 +1,75 @@
+# `T | nothing`: generic returns, declared types, lists of optionals,
+# `if`/`match` values, and structured patterns beside a `nothing` arm
+def head_or_nothing(xs)
+    match xs
+        [] =>
+            return nothing
+        [x, ...rest] =>
+            return x
+def pick2(c, v)
+    if c do return nothing
+    v
+print(head_or_nothing([4, 5]), head_or_nothing(["a"]), pick2(false, 3), pick2(true, "x"))
+type Op
+    Plus
+    Minus
+    Num(v: int)
+def find(cells, ch)
+    for r in 0..len(cells)
+        for c in 0..len(cells[r])
+            if cells[r][c] == ch do return {r: r, c: c}
+    nothing
+def first_pair(xs)
+    for x in xs
+        if x > 1 do return [x, x * 10]
+    nothing
+def op_of(s)
+    if s == "+" do return Plus
+    if s == "-" do return Minus
+    if s == "7" do return Num(7)
+    nothing
+g = ["#S", ".E"] *> $.chars()
+for ch in ["S", "E", "X"]
+    match find(g, ch)
+        nothing => print("none")
+        {r, c} => print("at {r} {c}")
+for xs in [[1, 2], [0]]
+    match first_pair(xs)
+        nothing => print("none")
+        [a, b] => print("pair {a} {b}")
+        _ => print("other")
+for s in ["+", "-", "7", "?"]
+    msg = match op_of(s)
+        nothing => "unknown"
+        Plus => "plus"
+        Num(n) => "num {n}"
+        _ => "minus"
+    print(msg)
+m = {a: 1}
+for k in ["x", "a"]
+    match [5, 6].index_of(if k == "a" do 6 else 5)
+        nothing => print("absent")
+        0 => print("first")
+        i => print("at {i}")
+var parent: [int | nothing] = [nothing, nothing, nothing]
+parent[1] = 0
+parent[2] = 1
+print(parent)
+var best = {}
+best["a"] = 3
+var seen: {} = {}
+print(best["a"] or 0, best["z"] or -1)
+x = if len(parent) > 2 do nothing else 5
+y = if len(parent) > 5 do nothing else 5
+print(x or 0, y or 0)
+def pick(c)
+    if c do nothing else 5
+print(pick(true), pick(false))
+def classify(n)
+    match n
+        0 => nothing
+        k => k * 10
+print(classify(0), classify(4))
+var zs = [nothing, 5]
+zs[0] = 7
+print(zs, [[1], nothing])

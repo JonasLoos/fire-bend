@@ -108,7 +108,10 @@ and dictionaries; `body.rs` statements, branches, matches and loops;
 
 **Images.** Each def gets an image: its Bend name, its type parameters
 (erased `-A` when nothing needs them at compile time, template `~A`
-otherwise), its dictionary parameters (`~lt_0: A -> A -> Bool`), how each
+otherwise: a unit whose lowered image still passes an erased one as a
+template argument, a loop driver's state type say, is lowered again with
+template parameters, and so are its callers when that reaches them), its
+dictionary parameters (`~lt_0: A -> A -> Bool`), how each
 function-typed parameter is passed (code as a template `~f` plus an
 environment value, when the body only calls it or passes it on; a closure
 value otherwise), an environment record parameter for a def with
@@ -184,7 +187,7 @@ counting a use in each thunk and each argument handed to a `+` binder.
 | `fire p.fire` | compile, build with `bend`, run |
 | `fire p.fire -o out.bend` / `-o bin` / `-o out.js` | write the source, or build |
 | `fire p.fire --types` | every def's type, effects, termination argument and needs |
-| `fire p.fire --check` | run `bend --check-only` on the image with every law (and `p.proof.bend` appended when it exists); report proven, open and false laws and unsafe code |
+| `fire p.fire --check` | run `bend --check-only` on the image with every law (and `p.proof.bend` appended when it exists); report proven, open and false laws, unsafe code, and matches that cover only some values |
 | `fire p.fire --test` | compile the property-test image (`src/testgen.rs`): the program's types, defs and bindings, one predicate def per law, loops over generated instances; run it |
 | `fire p.fire --total` | reject a program with any `unsafe def` (combines with the others) |
 

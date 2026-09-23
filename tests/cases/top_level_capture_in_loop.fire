@@ -1,0 +1,50 @@
+# a def reading a top-level value, called where the caller builds its
+# environment inside a loop body, a branch or a match helper
+k = 10
+names = ["a", "b"]
+var total = 5
+def f(x)
+    x + k
+def inbranch(n)
+    var r = 0
+    if n > 2
+        r = f(n)
+    else
+        r = f(0) * 2
+    r
+def inmatch(xs)
+    var r = 0
+    match xs
+        [] => r = f(1)
+        [a, ...rest] => r = f(a) + len(names)
+    r
+def nested(n)
+    var t = 0
+    for i in 0..n
+        for j in 0..n
+            t += f(i * j)
+    t
+def viaLambda(xs)
+    var t = 0
+    for x in xs
+        g = y => f(y) + x
+        t += g(1)
+    t
+def mapped(xs)
+    var out = []
+    for x in xs
+        out.push(xs *> f($))
+    out
+def ref(xs)
+    var out = []
+    for x in xs
+        out.push(xs *> f)
+    out
+def early(xs)
+    for x in xs
+        if f(x) > 12 do return x
+    -1
+print(inbranch(3), inbranch(1), inmatch([]), inmatch([4]))
+print(nested(3), viaLambda([1, 2]), mapped([1, 2]), ref([3]), early([1, 2, 3, 4]))
+for i in 0..2
+    print(f(i) + total)

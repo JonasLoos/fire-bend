@@ -1,0 +1,29 @@
+# match arm bodies: a pipeline, return/break/continue on the arm's line
+def f(x)
+    match x
+        0 => 1 |> $ + 1
+        n if n > 5 => n |> $ * 2
+        n => n
+def g(x)
+    match x
+        0 => return "zero"
+        n if n < 0 => return "negative"
+        n => "other {n}"
+    "end"
+def first_even(xs)
+    var found = -1
+    for x in xs
+        match x % 2
+            0 =>
+                found = x
+                break
+            _ => continue
+    found
+double_all = xs => xs *> $ * 2
+inc = x => x + 1 |> $ * 10
+print(f(0), f(7), f(3))
+print(g(0), g(-2), g(5))
+print(first_even([1, 3, 4, 6]))
+print(double_all([1, 2]), inc(1))
+print([1, 2, 3] ?> x => x > 1 |> len)
+print((x => x * 3) |> $(2))

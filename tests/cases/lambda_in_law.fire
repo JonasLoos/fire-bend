@@ -1,0 +1,14 @@
+# lambdas inside laws: a closed law is computed, open ones are claims
+def inc(x)
+    x + 1
+def total(xs)
+    sum(xs)
+print(inc(1))
+law map_in_law
+    ([1, 2] *> $ + 1) == [2, 3]
+law filter_in_law
+    for xs: [int]
+    total(xs ?> $ > 0) <= total(xs *> abs($))
+law closure_in_law
+    for n: int
+    ([1, 2] *> inc($ + n)) == [n + 2, n + 3]

@@ -1,0 +1,29 @@
+# a generic value only stored, inside loops and closures
+def fill(csv: str, x)
+    var d = {}
+    for k in csv.split(",") do d[k] = x
+    d
+def wrap(x)
+    fill("a,b,c", [x])
+def tagged(xs: [int], label)
+    xs *> {n: $, label: label} ?> $.n > 1
+def first_big(xs: [int], v)
+    var out = [v]
+    for x in xs
+        if x > 2
+            out.push(v)
+            break
+    out
+def Item(public id: int, public tag: str)
+def Box()
+    public var items = [Item(1, "a"), Item(2, "b"), Item(3, "a")]
+    public list = tag =>
+        filtered = items ?> (tag == "" or $.tag == tag)
+        for i in filtered
+            print(i.id)
+        {ok: nothing}
+b = Box()
+b.list("a")
+print(fill("x,y", 7)["y"], len(wrap("s")), wrap(true)["c"])
+print(len(tagged([1, 2, 3], "L")), tagged([5], 2.5)[0].label)
+print(first_big([1, 5, 9], "hit"), first_big([1], nothing))

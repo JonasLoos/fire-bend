@@ -103,8 +103,15 @@ impl Checker {
                 }
             },
             ast::Expression::List(items) => {
+                // `nothing` beside values makes a list of `T | nothing`
+                let absent = items.iter().any(|i| matches!(i, ast::Expression::Nothing));
+                let present = items.iter().any(|i| !matches!(i, ast::Expression::Nothing));
                 let elem = match expected.map(|t| self.shallow(t)) {
                     Some(Type::List(e)) => *e,
+                    _ if absent && present => {
+                        let inner = self.fresh();
+                        Type::maybe(inner)
+                    }
                     _ => self.fresh(),
                 };
                 let mut out = Vec::new();
@@ -642,7 +649,8 @@ impl Checker {
         let mut block = self.check_block_stmts(stmts);
         self.pop_scope();
         let _ = expected;
-        if contains_return(&block.stmts) {
+        let returns = contains_return(&block.stmts);
+        if returns {
             self.error(line, "`return` cannot leave an `if`, `match` or block whose value is used: make it a statement that returns on every path");
         }
         let ty = match self.block_value(&mut block) {
@@ -650,7 +658,8 @@ impl Checker {
             None => {
                 let n = self.lit(Lit::Nothing);
                 block.stmts.push(Stmt { kind: StmtKind::Expr(n), line });
-                Type::Unit
+                // after the error above, a type nothing else contradicts
+                if returns { self.fresh() } else { Type::Unit }
             }
         };
         self.thread_assignments(block, ty)
@@ -793,14 +802,24 @@ impl Checker {
     /// A method of the current class called by bare name (or `self.m`).
     fn call_def_by_name(&mut self, name: &str, args: &[ast::Expression], named: &[(String, ast::Expression)], expected: Option<&Type>) -> Expr {
         let line = self.line;
-        let tid = match self.frame_ref().kind {
-            FrameKind::Ctor(t) => {
-                self.error(line, format!("the constructor cannot call the method .{}() while the object is being built", name));
-                t
-            }
-            FrameKind::Method(t) => t,
-            _ => unreachable!(),
+        // the innermost class frame: a lambda inside a method calls the
+        // method on the receiver, whose members it captures by value
+        let class_frame = self.frames.iter().enumerate().rev().find_map(|(i, f)| match f.kind {
+            FrameKind::Ctor(t) | FrameKind::Method(t) => Some((i, f.kind, t)),
+            _ => None,
+        });
+        let Some((fi, kind, tid)) = class_frame else {
+            self.error(line, format!("the method .{}() can only be called inside its class", name));
+            let t = self.fresh();
+            return self.var("__bad", t);
         };
+        if let FrameKind::Ctor(_) = kind {
+            self.error(line, format!("the constructor cannot call the method .{}() while the object is being built", name));
+        } else if fi + 1 < self.frames.len() {
+            for f in self.types[tid].ctors[0].fields.clone() {
+                self.lookup(&f.name);
+            }
+        }
         let selfe = self.expr(ExprKind::SelfValue(tid), self.class_self_type(tid));
         self.method_call_on(selfe, name, args, named, expected, line)
     }
@@ -929,6 +948,10 @@ impl Checker {
 
     pub(crate) fn method_call_on(&mut self, recv: Expr, member: &str, args: &[ast::Expression], named: &[(String, ast::Expression)], expected: Option<&Type>, line: usize) -> Expr {
         let mut recv = recv;
+        // a range sorts as the list of its numbers
+        if matches!(member, "sorted" | "sort") && matches!(self.shallow(&recv.ty), Type::Data(RANGE, _)) {
+            recv = self.method_call_on(recv, "to_list", &[], &[], None, line);
+        }
         // a method name that exactly one class declares (and no builtin type
         // has) fixes a receiver whose type is not known yet
         if let Type::Var(_) = self.shallow(&recv.ty) {
@@ -1161,25 +1184,47 @@ impl Checker {
     /// `nothing` against a value makes a `T | nothing`.
     pub(crate) fn join_branches(&mut self, a: Expr, b: Expr) -> (Expr, Expr, Type) {
         let line = self.line;
-        let an = matches!(a.kind, ExprKind::Lit(Lit::Nothing));
-        let bn = matches!(b.kind, ExprKind::Lit(Lit::Nothing));
+        let an = is_nothing_value(&a);
+        let bn = is_nothing_value(&b);
         let at = self.shallow(&a.ty);
         let bt = self.shallow(&b.ty);
         if an && !matches!(bt, Type::Unit) {
-            let inner = b.ty.clone();
+            let inner = match bt {
+                Type::Data(MAYBE, args) => args[0].clone(),
+                _ => b.ty.clone(),
+            };
             let b = self.some(b);
-            let none = self.expr(ExprKind::Con(MAYBE, 0, vec![]), Type::maybe(inner.clone()));
+            let none = self.absent(a, &Type::maybe(inner.clone()));
             return (none, b, Type::maybe(inner));
         }
         if bn && !matches!(at, Type::Unit) {
-            let inner = a.ty.clone();
+            let inner = match at {
+                Type::Data(MAYBE, args) => args[0].clone(),
+                _ => a.ty.clone(),
+            };
             let a = self.some(a);
-            let none = self.expr(ExprKind::Con(MAYBE, 0, vec![]), Type::maybe(inner.clone()));
+            let none = self.absent(b, &Type::maybe(inner.clone()));
             return (a, none, Type::maybe(inner));
         }
         self.unify(&a.ty, &b.ty, line);
         let ty = a.ty.clone();
         (a, b, ty)
+    }
+
+    /// A value that is `nothing` (see `is_nothing_value`) as the absent
+    /// value of `mt`: the literal, or a block's trailing literal, replaced.
+    pub(crate) fn absent(&mut self, e: Expr, mt: &Type) -> Expr {
+        let line = e.line;
+        match e.kind {
+            ExprKind::Block(mut b) => {
+                if let Some(Stmt { kind: StmtKind::Expr(x), line: l }) = b.stmts.pop() {
+                    let x = self.absent(x, mt);
+                    b.stmts.push(Stmt { kind: StmtKind::Expr(x), line: l });
+                }
+                Expr { kind: ExprKind::Block(b), ty: mt.clone(), line }
+            }
+            _ => Expr { kind: ExprKind::Con(MAYBE, 0, vec![]), ty: mt.clone(), line },
+        }
     }
 
     /// Lift a value into `T | nothing`, unless it already is one.
@@ -1801,7 +1846,7 @@ impl Checker {
     fn global_value(&mut self, name: &str) -> Expr {
         let line = self.line;
         let arity = match name {
-            "print" | "len" | "sum" | "abs" | "sorted" | "reversed" | "str" | "int" | "float" | "error" | "range" => 1,
+            "print" | "len" | "sum" | "min" | "max" | "round" | "abs" | "sorted" | "reversed" | "str" | "int" | "float" | "error" | "range" => 1,
             _ => {
                 self.error(line, format!("{} cannot be used as a value here; wrap it in a lambda", name));
                 return self.lit(Lit::Nothing);
@@ -2042,5 +2087,15 @@ fn pack_tails(e: Expr, outs: &[(String, Type)], packed: &Type) -> Expr {
             let v = Expr { kind, ty: e.ty, line };
             Expr { kind: ExprKind::Con(PAIR, 0, vec![v, pack_vars(outs, line)]), ty: packed.clone(), line }
         }
+    }
+}
+
+/// A branch whose value is the literal `nothing`, directly or as the last
+/// expression of its block.
+pub(crate) fn is_nothing_value(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Lit(Lit::Nothing) => true,
+        ExprKind::Block(b) => matches!(b.stmts.last(), Some(Stmt { kind: StmtKind::Expr(x), .. }) if is_nothing_value(x)),
+        _ => false,
     }
 }

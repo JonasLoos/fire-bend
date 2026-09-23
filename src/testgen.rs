@@ -6,7 +6,9 @@
 // then compiled like any program.
 
 use crate::ast::{self, Expression as E, NumberLiteral, Pattern, Statement as S, Stmt};
-use crate::core::{DataKind, Program};
+use std::collections::HashSet;
+
+use crate::core::{walk_expr, DataKind, ExprKind, Program, StmtKind};
 use crate::types::*;
 use crate::Diag;
 
@@ -18,9 +20,22 @@ pub fn test_program(program: &ast::Program, core: &Program) -> Result<ast::Progr
     let mut out: Vec<Stmt> = Vec::new();
     let mut checks: Vec<Stmt> = Vec::new();
     let mut diags = Vec::new();
+    let needed = needed_bindings(core);
     for s in &program.statements {
         match &s.node {
-            S::Def { .. } | S::TypeDecl { .. } | S::Declaration { .. } | S::Assignment { .. } | S::Documentation(_) | S::Comment(_) => out.push(s.clone()),
+            S::Def { .. } | S::TypeDecl { .. } | S::Documentation(_) | S::Comment(_) => out.push(s.clone()),
+            // a top-level binding stays when a def reads it (the statements
+            // that would complete it, loops say, are dropped)
+            S::Declaration { pattern, value, .. } => {
+                if matches!(value, E::Import(_)) || binds_any(pattern, &needed) {
+                    out.push(s.clone());
+                }
+            }
+            S::Assignment { targets, value } => {
+                if matches!(value, E::Import(_)) || targets.iter().any(|(p, _)| binds_any(p, &needed)) {
+                    out.push(s.clone());
+                }
+            }
             S::Law { name, vars, hyp, claim } => {
                 let law = match core.laws.iter().find(|l| &l.name == name) {
                     Some(l) => l.clone(),
@@ -61,6 +76,48 @@ pub fn test_program(program: &ast::Program, core: &Program) -> Result<ast::Progr
     }
     out.extend(checks);
     Ok(ast::Program { statements: out })
+}
+
+/// The top-level bindings the program's defs read: what they capture, and
+/// what the values of those bindings read in turn.
+fn needed_bindings(core: &Program) -> HashSet<String> {
+    let mut needed: HashSet<String> = HashSet::new();
+    for d in &core.defs {
+        if d.id != core.main {
+            needed.extend(d.captures.iter().map(|(n, _)| n.clone()));
+        }
+    }
+    let main = &core.defs[core.main];
+    loop {
+        let before = needed.len();
+        for st in &main.body.stmts {
+            if let StmtKind::Let { name, value } | StmtKind::Assign { name, value } = &st.kind
+                && needed.contains(name)
+            {
+                walk_expr(value, &mut |e| {
+                    if let ExprKind::Var(v) = &e.kind {
+                        needed.insert(v.clone());
+                    }
+                });
+            }
+        }
+        if needed.len() == before {
+            return needed;
+        }
+    }
+}
+
+/// Whether a binding pattern binds one of the names.
+fn binds_any(p: &Pattern, names: &HashSet<String>) -> bool {
+    match p {
+        Pattern::Identifier(n) => names.contains(n),
+        Pattern::Typed { pattern, .. } => binds_any(pattern, names),
+        Pattern::List(items) => items.iter().any(|i| binds_any(i, names)),
+        Pattern::Rest(Some(n)) => names.contains(n),
+        Pattern::Object(entries) => entries.iter().any(|(_, p)| binds_any(p, names)),
+        Pattern::Ctor(_, subs) => subs.iter().any(|i| binds_any(i, names)),
+        _ => false,
+    }
 }
 
 fn stmt(node: S, line: usize) -> Stmt {
@@ -200,7 +257,15 @@ fn instances(store: &mut TypeStore, core: &Program, t: &Type, depth: usize) -> O
             let a = xs.first().cloned()?;
             let b = xs.get(1).cloned().unwrap_or(a.clone());
             let c = xs.get(2).cloned().unwrap_or(b.clone());
-            Some(vec![E::List(vec![]), E::List(vec![a.clone()]), E::List(vec![b.clone(), a.clone()]), E::List(vec![a, c, b])])
+            // empty, one, unordered, and repeated elements
+            Some(vec![
+                E::List(vec![]),
+                E::List(vec![a.clone()]),
+                E::List(vec![b.clone(), a.clone()]),
+                E::List(vec![a.clone(), c.clone(), b.clone()]),
+                E::List(vec![a.clone(), a.clone()]),
+                E::List(vec![b.clone(), c, a, b]),
+            ])
         }
         Type::Data(tid, args) if tid >= BUILTIN_TYPES && matches!(core.types[tid].kind, DataKind::Declared) => {
             let dt = core.types[tid].clone();
@@ -211,13 +276,18 @@ fn instances(store: &mut TypeStore, core: &Program, t: &Type, depth: usize) -> O
                     out.push(E::Identifier(c.name.clone()));
                     continue;
                 }
-                if depth == 0 {
+                let field_tys: Vec<Type> = c.fields.iter().map(|f| store.substitute(&f.ty, &subst)).collect();
+                // at the last level only constructors over plain values
+                if depth == 0 && field_tys.iter().any(|ft| !plain(store, ft)) {
                     continue;
                 }
                 let mut field_pools = Vec::new();
-                for f in &c.fields {
-                    let ft = store.substitute(&f.ty, &subst);
-                    field_pools.push(instances(store, core, &ft, depth - 1)?);
+                for ft in &field_tys {
+                    field_pools.push(instances(store, core, ft, depth.saturating_sub(1))?);
+                }
+                // a field with no instances leaves the constructor out
+                if field_pools.iter().any(|p| p.is_empty()) {
+                    continue;
                 }
                 // a few combinations: the i-th instance of every field
                 let most = field_pools.iter().map(|p| p.len()).max().unwrap_or(0).min(4);
@@ -229,5 +299,14 @@ fn instances(store: &mut TypeStore, core: &Program, t: &Type, depth: usize) -> O
             Some(out)
         }
         _ => None,
+    }
+}
+
+/// A type whose instances need no further nesting: scalars and lists of them.
+fn plain(store: &mut TypeStore, t: &Type) -> bool {
+    match store.shallow(t) {
+        Type::Int | Type::Var(_) | Type::Float | Type::Str | Type::Bool | Type::Unit => true,
+        Type::List(e) => plain(store, &e),
+        _ => false,
     }
 }

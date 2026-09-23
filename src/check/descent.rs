@@ -42,7 +42,7 @@ impl Checker {
             if cu == ce && caller != callee {
                 if callee_is_unit && !matches!(self.defs[callee].kind, DefKind::Method { .. } | DefKind::Ctor(_)) && reported.insert((caller, callee)) {
                     let who = if matches!(self.defs[caller].kind, DefKind::Lambda) { "a lambda" } else { "a nested def" };
-                    self.error(line, format!("'{}' is called from {} inside its own body; recursion through a lambda or a nested def has no image in Bend: write the loop as a `for`, or the recursion directly", self.defs[callee].name, who));
+                    self.error(line, format!("'{0}' is called from {1} inside its own body; Bend has no image for recursion through a lambda or a nested def: call '{0}' directly in its own body (recursing on a piece of a matched parameter, or on an int counting down), or drop the recursion and use a `for` loop with a worklist", self.defs[callee].name, who));
                 }
                 continue;
             }
@@ -97,7 +97,7 @@ impl Checker {
             if comp.len() > 1 {
                 let names: Vec<String> = comp.iter().map(|d| self.defs[*d].name.clone()).collect();
                 let line = comp.iter().map(|d| self.defs[*d].line).min().unwrap_or(0);
-                self.error(line, format!("mutual recursion between {} is not supported (Bend has none): merge them into one def", names.join(", ")));
+                self.error(line, format!("mutual recursion between {} is not supported (Bend has none): merge them into one def, with a parameter saying which of them it is acting as", names.join(", ")));
             }
         }
     }
@@ -122,7 +122,7 @@ impl Checker {
         });
         self.collect_calls(d, &def.body, &mut Vec::new(), &mut pieces, &params, &mut calls, &mut in_loop_calls, false);
         for line in in_loop_calls {
-            self.error(line, format!("'{}' calls itself inside a loop body; a loop body is its own def in Bend and cannot reach back: write the loop as recursion, or the recursion as a loop", def.name));
+            self.error(line, format!("'{0}' calls itself inside a loop body; a loop body is its own def in Bend and cannot call the def around it: recurse over the list instead of looping (`match xs` with `[x, ...rest]`, calling '{0}' on `rest`), or drop the recursion and keep a worklist in the loop (`for _ in 0..limit` with `break` when it is empty)", def.name));
         }
         if calls.is_empty() {
             return Descent::None;
