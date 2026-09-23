@@ -318,9 +318,9 @@ in each thunk and each argument handed to a `+` binder.
 
 The runtime is plain Bend: loop drivers, eliminators, signed arithmetic,
 number formatting and parsing, strings, lists and maps. Bend has no forward
-references, so its defs are ordered callee first;
-`tools/prelude_sort.py` restores that order after an edit. `prune.rs`
-keeps only the items a program reaches.
+references, so its defs are ordered callee first: a unit test in
+`prune.rs` checks the order, and `tools/prelude_sort.py` restores it after
+an edit. `prune.rs` keeps only the items a program reaches.
 
 ## The command line (`src/main.rs`)
 

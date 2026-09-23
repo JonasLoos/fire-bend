@@ -16,7 +16,7 @@ impl Checker {
             edges[caller].insert(callee);
         }
         // function values that may be invoked, and non-exhaustive matches
-        for d in 0..n {
+        for (d, callees) in edges.iter_mut().enumerate() {
             let body = &self.defs[d].body;
             let mut invoked: Vec<Type> = Vec::new();
             let mut aborts = false;
@@ -47,7 +47,7 @@ impl Checker {
                 if let Type::Fn(_, _, c) = self.shallow(&t) {
                     for id in self.store.clos_set(c) {
                         if id < n {
-                            edges[d].insert(id);
+                            callees.insert(id);
                         }
                     }
                 }
