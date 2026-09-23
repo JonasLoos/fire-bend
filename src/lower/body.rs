@@ -48,7 +48,6 @@ pub struct LoopInfo {
 
 #[derive(Clone)]
 pub struct FnCtx {
-    pub def: DefId,
     pub self_def: DefId,
     pub name: String,
     pub mode: Mode,
@@ -68,8 +67,6 @@ pub struct FnCtx {
     pub loop_: Option<LoopInfo>,
     /// The def's result type (unwrapped).
     pub ret: Ty,
-    /// Fire types of the locals, for match compilation.
-    pub local_types: HashMap<String, Type>,
     /// A name bound to a pattern variable (`rest` for `__f36`): a match on
     /// the name is a match on the pattern variable, which Bend can inspect.
     pub aliases: HashMap<String, String>,
@@ -78,7 +75,6 @@ pub struct FnCtx {
 impl FnCtx {
     pub fn new(d: DefId, img: &Image) -> FnCtx {
         FnCtx {
-            def: d,
             self_def: d,
             name: img.name.clone(),
             mode: img.mode,
@@ -93,14 +89,12 @@ impl FnCtx {
             term_mode: false,
             loop_: None,
             ret: img.ret.clone(),
-            local_types: HashMap::new(),
             aliases: HashMap::new(),
         }
     }
 
     pub fn law(main: DefId) -> FnCtx {
         FnCtx {
-            def: main,
             self_def: usize::MAX,
             name: "law".into(),
             mode: Mode::Pure,
@@ -115,7 +109,6 @@ impl FnCtx {
             term_mode: true,
             loop_: None,
             ret: Ty::Unit,
-            local_types: HashMap::new(),
             aliases: HashMap::new(),
         }
     }
@@ -128,12 +121,9 @@ impl FnCtx {
         })
     }
 
-    pub fn bind(&mut self, name: &str, ty: Ty, fire: Option<&Type>) {
+    pub fn bind(&mut self, name: &str, ty: Ty) {
         self.scope.retain(|(n, _)| n != name);
         self.scope.push((name.to_string(), ty));
-        if let Some(t) = fire {
-            self.local_types.insert(name.to_string(), t.clone());
-        }
     }
 
     pub fn type_of(&self, name: &str) -> Option<Ty> {
@@ -200,15 +190,15 @@ impl<'a> Lower<'a> {
         // parameters in scope
         for (i, p) in def.params.iter().enumerate() {
             match &img.fnp[i] {
-                FnParamKind::Template { env, env_ty, .. } => ctx.bind(env, Ty::Param(env_ty.clone()), None),
-                _ => ctx.bind(&local_name(&p.name), img.params[i].clone(), Some(&p.ty)),
+                FnParamKind::Template { env, env_ty, .. } => ctx.bind(env, Ty::Param(env_ty.clone())),
+                _ => ctx.bind(&local_name(&p.name), img.params[i].clone()),
             }
         }
         for (n, t) in &unit_def.params.iter().zip(unit_img.fnp.iter()).filter_map(|(_, k)| match k {
             FnParamKind::Template { env, env_ty, .. } => Some((env.clone(), Ty::Param(env_ty.clone()))),
             _ => None,
         }).collect::<Vec<_>>() {
-            ctx.bind(n, t.clone(), None);
+            ctx.bind(n, t.clone());
         }
         // captures
         let mut caps = Vec::new();
@@ -217,7 +207,7 @@ impl<'a> Lower<'a> {
                 Some(FnParamKind::Template { env, env_ty, .. }) => (env, Ty::Param(env_ty)),
                 _ => (local_name(n), self.ty_in(ctx, t, line)),
             };
-            ctx.bind(&name, ty, Some(t));
+            ctx.bind(&name, ty);
             caps.push((name, false));
         }
         // members of the receiver
@@ -233,7 +223,7 @@ impl<'a> Lower<'a> {
             for f in &t.ctors[0].fields {
                 let ft = self.subst_field(*rec, &f.ty, &args);
                 let bt = self.ty_in(ctx, &ft, line);
-                ctx.bind(&local_name(&f.name), bt, Some(&ft));
+                ctx.bind(&local_name(&f.name), bt);
                 fields.push((local_name(&f.name), false));
             }
             self_ctor = self.ctor_name(*rec, 0);
@@ -296,55 +286,45 @@ impl<'a> Lower<'a> {
     pub fn lower_block_body(&mut self, ctx: &mut FnCtx, stmts: &[Stmt], leaf: Leaf) -> Body {
         let mut out = Vec::new();
         let saved_scope = ctx.scope.clone();
-        let ans = self.lower_stmts_into(ctx, stmts, &mut out, &leaf);
-        let ans = match ans {
-            Some(a) => a,
-            None => self.fall_off(ctx, &leaf, &mut out),
-        };
+        let ans = self.lower_stmts_answer(ctx, stmts, &mut out, &leaf);
         ctx.scope = saved_scope;
         self.finish_body(ctx, out, ans)
     }
 
+    /// Lower statements into `out`, and what they answer: an exit's
+    /// answer, or the leaf's when they fall off the end.
+    fn lower_stmts_answer(&mut self, ctx: &mut FnCtx, stmts: &[Stmt], out: &mut Vec<ir::Stmt>, leaf: &Leaf) -> Ans {
+        match self.lower_stmts_into(ctx, stmts, out, leaf) {
+            Some(a) => a,
+            None => self.fall_off(ctx, leaf),
+        }
+    }
+
     /// What a block answers when it ends without an exit.
-    fn fall_off(&mut self, ctx: &mut FnCtx, leaf: &Leaf, out: &mut Vec<ir::Stmt>) -> Ans {
+    fn fall_off(&mut self, ctx: &mut FnCtx, leaf: &Leaf) -> Ans {
         match leaf {
             Leaf::Result => match ctx.loop_.clone() {
                 Some(l) => {
-                    let s = self.pack_state(ctx, &l);
+                    let s = self.pack_vars(&l.state);
                     Ans::Value(Term::ctor("F.Next", vec![s]))
                 }
                 None => Ans::Value(Term::unit()),
             },
-            Leaf::Outs(vars) => {
-                let terms: Vec<Term> = vars.iter().map(|(n, _)| Term::var(n)).collect();
-                let tys: Vec<Ty> = vars.iter().map(|(_, t)| t.clone()).collect();
-                Ans::Value(self.pack(terms, &tys))
-            }
-            Leaf::Value => {
-                let _ = out;
-                Ans::Value(Term::unit())
-            }
+            Leaf::Outs(vars) => Ans::Value(self.pack_vars(vars)),
+            Leaf::Value => Ans::Value(Term::unit()),
         }
     }
 
     pub fn finish_body(&mut self, ctx: &mut FnCtx, out: Vec<ir::Stmt>, ans: Ans) -> Body {
-        match ans {
-            Ans::Whole(b) => b,
-            Ans::Value(t) => match ctx.mode {
-                Mode::Pure => Body::Block { stmts: out, tail: t },
-                _ => Body::Do { monad: ctx.wrap(self.tail_ty(ctx)), stmts: out, tail: ir::DoTail::Return(t) },
-            },
-            Ans::Monadic(t) => match ctx.mode {
-                Mode::Pure => Body::Block { stmts: out, tail: t },
-                _ => Body::Do { monad: ctx.wrap(self.tail_ty(ctx)), stmts: out, tail: ir::DoTail::Step(t) },
-            },
+        let tail = match ans {
+            Ans::Whole(b) => return b,
+            Ans::Value(t) => ir::DoTail::Return(t),
+            Ans::Monadic(t) => ir::DoTail::Step(t),
+        };
+        match (ctx.mode, tail) {
+            (Mode::Pure, ir::DoTail::Return(t) | ir::DoTail::Step(t)) => Body::Block { stmts: out, tail: t },
+            (_, tail) => Body::Do { monad: ctx.wrap(ctx.ret.clone()), stmts: out, tail },
         }
-    }
-
-    /// The inner result type of the body being lowered (the do-block's
-    /// type parameter): tracked in the context by the caller.
-    fn tail_ty(&self, ctx: &FnCtx) -> Ty {
-        ctx.ret.clone()
     }
 
     /// A block as a single term in the def's mode.
@@ -378,7 +358,7 @@ impl<'a> Lower<'a> {
             Body::Block { stmts, tail } => {
                 let mut t = tail;
                 for s in stmts.into_iter().rev() {
-                    t = self.stmt_around(ctx, s, t, ret, false);
+                    t = self.stmt_around(ctx, s, t, ret);
                 }
                 t
             }
@@ -388,7 +368,7 @@ impl<'a> Lower<'a> {
                     ir::DoTail::Step(m) => m,
                 };
                 for s in stmts.into_iter().rev() {
-                    t = self.stmt_around(ctx, s, t, ret, true);
+                    t = self.stmt_around(ctx, s, t, ret);
                 }
                 t
             }
@@ -399,21 +379,11 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn stmt_around(&mut self, ctx: &mut FnCtx, s: ir::Stmt, rest: Term, ret: &Ty, monadic: bool) -> Term {
+    fn stmt_around(&mut self, ctx: &mut FnCtx, s: ir::Stmt, rest: Term, ret: &Ty) -> Term {
         match s {
             ir::Stmt::Let { name, value, .. } => Term::App(Box::new(Term::Lam(vec![name], Box::new(rest))), vec![value]),
             ir::Stmt::Bind { name, ty, value, .. } => self.bind_term(ctx, name, ty, value, rest, ret),
-            ir::Stmt::Step(m) => {
-                let _ = monadic;
-                self.bind_term(ctx, "_".into(), Ty::Unit, m, rest, ret)
-            }
-            ir::Stmt::Destructure { ctor, fields, value } => {
-                // (K{a, b} = v; rest) as a match through a lambda is not a
-                // term; use the projections instead
-                let _ = (ctor, fields, value);
-                rest
-            }
-            ir::Stmt::TupleLet { .. } | ir::Stmt::ParLet { .. } => rest,
+            ir::Stmt::Step(m) => self.bind_term(ctx, "_".into(), Ty::Unit, m, rest, ret),
         }
     }
 
@@ -441,7 +411,7 @@ impl<'a> Lower<'a> {
                     let ty = self.ty_in(ctx, &value.ty, line);
                     let n = local_name(name);
                     out.push(ir::Stmt::Let { name: n.clone(), reusable: false, ty: Some(ty.clone()), value: t });
-                    ctx.bind(&n, ty, Some(&value.ty));
+                    ctx.bind(&n, ty);
                     // a name bound to something else is no longer a piece
                     ctx.pieces.remove(&n);
                     ctx.aliases.remove(&n);
@@ -451,7 +421,7 @@ impl<'a> Lower<'a> {
                     let t = self.expr(ctx, &e, out);
                     let ty = self.ty_in(ctx, &e.ty, line);
                     out.push(ir::Stmt::Let { name: name.clone(), reusable: false, ty: Some(ty.clone()), value: t });
-                    ctx.bind(name, ty, Some(&e.ty));
+                    ctx.bind(name, ty);
                 }
                 StmtKind::Expr(e) => {
                     // the last expression of a value leaf is the answer
@@ -466,17 +436,17 @@ impl<'a> Lower<'a> {
                 }
                 StmtKind::Break => {
                     let l = ctx.loop_.clone().expect("a loop");
-                    let s = self.pack_state(ctx, &l);
+                    let s = self.pack_vars(&l.state);
                     return Some(Ans::Value(Term::ctor("F.Break", vec![s])));
                 }
                 StmtKind::Continue => {
                     let l = ctx.loop_.clone().expect("a loop");
-                    let s = self.pack_state(ctx, &l);
+                    let s = self.pack_vars(&l.state);
                     return Some(Ans::Value(Term::ctor("F.Next", vec![s])));
                 }
                 StmtKind::If { cond, then, else_ } => {
                     ctx.structural = false;
-                    if let Some(a) = self.lower_if(ctx, cond, then, else_, rest, out, leaf, line) {
+                    if let Some(a) = self.lower_if(ctx, cond, then, else_, rest, out, leaf) {
                         return Some(a);
                     }
                 }
@@ -536,7 +506,6 @@ impl<'a> Lower<'a> {
                         && matches!(&t, Term::Var(v) if *v == name) {
                             sub.pop();
                             out.extend(sub);
-                            let _ = line;
                             return Ans::Monadic(value);
                         }
                     out.extend(sub);
@@ -583,23 +552,19 @@ impl<'a> Lower<'a> {
             out.extend(sub);
             return;
         }
-        let mut sub = Vec::new();
-        let _ = self.expr(ctx, e, &mut sub);
-        out.extend(sub);
+        self.expr(ctx, e, out);
     }
 
     // -- packing ---------------------------------------------------------------------------------
 
-    /// Several values as one: nothing, the value itself, or an out record.
-    pub fn pack(&mut self, terms: Vec<Term>, tys: &[Ty]) -> Term {
+    /// Several variables as one value: nothing, the value itself, or an
+    /// out record.
+    pub fn pack_vars(&mut self, vars: &[(String, Ty)]) -> Term {
+        let mut terms: Vec<Term> = vars.iter().map(|(n, _)| Term::var(n)).collect();
         match terms.len() {
             0 => Term::unit(),
-            1 => terms.into_iter().next().unwrap(),
-            n => {
-                let name = self.out_type(n);
-                let _ = tys;
-                Term::Ctor(name, terms)
-            }
+            1 => terms.remove(0),
+            n => Term::Ctor(self.out_type(n), terms),
         }
     }
 
@@ -627,20 +592,13 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn pack_state(&mut self, ctx: &mut FnCtx, l: &LoopInfo) -> Term {
-        let _ = ctx;
-        let terms: Vec<Term> = l.state.iter().map(|(n, _)| Term::var(n)).collect();
-        let tys: Vec<Ty> = l.state.iter().map(|(_, t)| t.clone()).collect();
-        self.pack(terms, &tys)
-    }
-
     /// Bind the values of a packed term to the variables, in `out`.
     fn unpack_into(&mut self, ctx: &mut FnCtx, packed: &str, vars: &[(String, Ty)], out: &mut Vec<ir::Stmt>) {
         let tys: Vec<Ty> = vars.iter().map(|(_, t)| t.clone()).collect();
         for (i, (n, t)) in vars.iter().enumerate() {
             let v = self.unpack(Term::var(packed), &tys, i);
             out.push(ir::Stmt::Let { name: n.clone(), reusable: false, ty: Some(t.clone()), value: v });
-            ctx.bind(n, t.clone(), None);
+            ctx.bind(n, t.clone());
         }
     }
 
@@ -785,63 +743,20 @@ impl<'a> Lower<'a> {
     pub fn emit_helper(&mut self, ctx: &FnCtx, hint: &str, params: Vec<(String, Ty)>, ret: Ty, body: Body) -> String {
         self.counter += 1;
         let name = format!("{}.F.{}{}", ctx.name, hint, self.counter);
-        let mut tmpl_types = Vec::new();
-        let mut erased = Vec::new();
-        for (_, n) in &ctx.tparams {
-            if ctx.template {
-                tmpl_types.push(n.clone());
-            } else {
-                erased.push(n.clone());
-            }
-        }
-        let mut tmpl_funcs = Vec::new();
-        for dp in &ctx.dicts {
-            tmpl_funcs.push((dp.name.clone(), dp.ty.clone()));
-        }
-        let unit_def = self.core.defs[ctx.unit].clone();
-        for (i, (_, k)) in ctx.fn_params.iter().enumerate() {
-            if let FnParamKind::Template { code, env_ty, .. } = k {
-                tmpl_types.push(env_ty.clone());
-                let fty = self.template_code_ty_pub(&unit_def.params[i].ty, env_ty, &ctx.tparams.clone(), unit_def.line);
-                tmpl_funcs.push((code.clone(), fty));
-            }
-        }
-        let mut d = IrDef {
-            name: name.clone(),
-            is_unsafe: false,
-            tmpl_types,
-            tmpl_funcs,
-            erased,
-            erased_types: vec![],
-            params: params.into_iter().map(|(n, t)| IrParam { name: n, reusable: false, ty: t }).collect(),
-            ret: ctx.wrap(ret),
-            body,
-        };
+        let params = params.into_iter().map(|(n, t)| IrParam::new(n, t)).collect();
+        let mut d = IrDef::new(name.clone(), params, ctx.wrap(ret), body);
+        let line = self.core.defs[ctx.unit].line;
+        self.unit_header(&mut d, &ctx.tparams, ctx.template, &ctx.dicts, ctx.unit, line);
         self.mark_reusable(&mut d);
         self.ir_units.insert(name.clone(), ctx.unit);
         self.defs.push(d);
         name
     }
 
-    pub fn template_code_ty_pub(&mut self, fty: &Type, env_ty: &str, names: &[(TVar, String)], line: usize) -> Ty {
-        match self.store.shallow(fty) {
-            Type::Fn(ps, r, c) => {
-                let mut params = vec![Ty::Param(env_ty.to_string())];
-                for p in &ps {
-                    params.push(self.ty(p, names, line));
-                }
-                let mode = self.closure_mode(c);
-                let r = self.ty(&r, names, line);
-                Ty::func(params, mode.wrap(r))
-            }
-            _ => Ty::Unit,
-        }
-    }
-
     /// Bind the answer of a helper call or a pick.
-    fn bind_answer(&mut self, ctx: &mut FnCtx, t: Term, ty: &Ty, monadic: bool, out: &mut Vec<ir::Stmt>) -> String {
+    fn bind_answer(&mut self, ctx: &mut FnCtx, t: Term, ty: &Ty, out: &mut Vec<ir::Stmt>) -> String {
         let r = self.fresh("r");
-        if monadic && ctx.mode != Mode::Pure {
+        if ctx.mode != Mode::Pure {
             out.push(ir::Stmt::Bind { name: r.clone(), reusable: false, ty: ty.clone(), value: t });
         } else {
             out.push(ir::Stmt::Let { name: r.clone(), reusable: false, ty: Some(ty.clone()), value: t });
@@ -850,14 +765,14 @@ impl<'a> Lower<'a> {
     }
 
     /// `Bool.pick(Unit -> M<T>, c, _ => a, _ => b)(Unit{})`.
-    fn pick_thunks(&mut self, c: Term, a: Term, b: Term, mty: Ty) -> Term {
+    pub fn pick_thunks(&mut self, c: Term, a: Term, b: Term, mty: Ty) -> Term {
         let pick = Term::call("Bool.pick", vec![Term::TyArg(Ty::func(vec![Ty::Unit], mty)), c, Term::Lam(vec!["_".into()], Box::new(a)), Term::Lam(vec!["_".into()], Box::new(b))]);
         Term::App(Box::new(pick), vec![Term::unit()])
     }
 
     // -- if -----------------------------------------------------------------------------------------
 
-    fn lower_if(&mut self, ctx: &mut FnCtx, cond: &Expr, then: &Block, else_: &Block, rest: &[Stmt], out: &mut Vec<ir::Stmt>, leaf: &Leaf, line: usize) -> Option<Ans> {
+    fn lower_if(&mut self, ctx: &mut FnCtx, cond: &Expr, then: &Block, else_: &Block, rest: &[Stmt], out: &mut Vec<ir::Stmt>, leaf: &Leaf) -> Option<Ans> {
         let c = self.expr(ctx, cond, out);
         let exits = self.block_exits(then) || self.block_exits(else_);
         if exits || matches!(leaf, Leaf::Value) && !rest.is_empty() {
@@ -908,16 +823,13 @@ impl<'a> Lower<'a> {
             args.push(c);
             Term::Call(name, args)
         };
-        let _ = line;
         if outs.is_empty() {
-            if ctx.mode == Mode::Pure {
-                // nothing to do
-            } else {
+            if ctx.mode != Mode::Pure {
                 out.push(ir::Stmt::Step(t));
             }
             return None;
         }
-        let r = self.bind_answer(ctx, t, &out_ty, true, out);
+        let r = self.bind_answer(ctx, t, &out_ty, out);
         self.unpack_into(ctx, &r, &outs, out);
         None
     }
@@ -973,13 +885,7 @@ impl<'a> Lower<'a> {
             // a real match: the statements so far are sunk into every arm,
             // and the rest of the block follows each arm
             let sunk = std::mem::take(out);
-            let rows: Vec<Row> = arms.iter().zip(arm_stmts.iter()).map(|(a, b)| {
-                let mut stmts = b.clone();
-                if !self.block_always_exits(&Block { stmts: b.clone() }) {
-                    stmts.extend(rest.iter().cloned());
-                }
-                Row { pats: vec![a.pat.clone()], guard: None, body: stmts, binds: vec![] }
-            }).collect();
+            let rows = self.rows_with_rest(arms, &arm_stmts, rest);
             // match the pattern variable the name stands for
             let sv = subject_var.unwrap();
             let sv = ctx.aliases.get(&sv).cloned().unwrap_or(sv);
@@ -990,13 +896,7 @@ impl<'a> Lower<'a> {
         let exits = arm_stmts.iter().any(|b| self.block_exits(&Block { stmts: b.clone() }));
         let value_leaf = matches!(leaf, Leaf::Value) && !rest.is_empty();
         if exits || value_leaf {
-            let rows: Vec<Row> = arms.iter().zip(arm_stmts.iter()).map(|(a, b)| {
-                let mut stmts = b.clone();
-                if !self.block_always_exits(&Block { stmts: b.clone() }) {
-                    stmts.extend(rest.iter().cloned());
-                }
-                Row { pats: vec![a.pat.clone()], guard: a.guard.clone(), body: stmts, binds: vec![] }
-            }).collect();
+            let rows = self.rows_with_rest(arms, &arm_stmts, rest);
             let ret = self.leaf_ty(ctx, leaf);
             let t = self.match_term(ctx, subject, rows, leaf, &ret, out, line);
             return Some(Ans::Monadic(t));
@@ -1019,9 +919,21 @@ impl<'a> Lower<'a> {
             }
             return None;
         }
-        let r = self.bind_answer(ctx, t, &out_ty, true, out);
+        let r = self.bind_answer(ctx, t, &out_ty, out);
         self.unpack_into(ctx, &r, &outs, out);
         None
+    }
+
+    /// One row per arm, with the rest of the block after each arm that can
+    /// fall through.
+    fn rows_with_rest(&self, arms: &[Arm], arm_stmts: &[Vec<Stmt>], rest: &[Stmt]) -> Vec<Row> {
+        arms.iter().zip(arm_stmts).map(|(a, b)| {
+            let mut stmts = b.clone();
+            if !self.block_always_exits(&Block { stmts: b.clone() }) {
+                stmts.extend(rest.iter().cloned());
+            }
+            Row { pats: vec![a.pat.clone()], guard: a.guard.clone(), body: stmts, binds: vec![] }
+        }).collect()
     }
 
     /// A match as a value.
@@ -1036,7 +948,7 @@ impl<'a> Lower<'a> {
         } else {
             self.match_helper(ctx, subject, rows, &Leaf::Value, &rty, &refs, pre, line)
         };
-        let r = self.bind_answer(ctx, t, &rty, true, pre);
+        let r = self.bind_answer(ctx, t, &rty, pre);
         Term::var(&r)
     }
 
@@ -1052,7 +964,7 @@ impl<'a> Lower<'a> {
         sub.structural = false;
         sub.ret = ret.clone();
         sub.scope = ins.clone();
-        sub.bind(&sv, sty.clone(), Some(&subject.ty));
+        sub.bind(&sv, sty.clone());
         let body = self.compile_rows(&mut sub, vec![(sv.clone(), subject.ty.clone())], rows, true, leaf, &[], line);
         let mut params = ins.clone();
         params.push((sv, sty));
@@ -1075,7 +987,7 @@ impl<'a> Lower<'a> {
         sub.term_mode = true;
         sub.structural = false;
         sub.ret = ret.clone();
-        sub.bind(&sv, sty, Some(&subject.ty));
+        sub.bind(&sv, sty);
         let body = self.compile_rows(&mut sub, vec![(sv, subject.ty.clone())], rows, false, leaf, &[], line);
         self.body_to_term(&mut sub, body, ret)
     }
@@ -1102,7 +1014,7 @@ impl<'a> Lower<'a> {
         if cols.is_empty() {
             let first = rows[0].clone();
             if let Some(g) = first.guard.clone() {
-                return self.guarded(ctx, first, g, rows[1..].to_vec(), real, leaf, sunk, line);
+                return self.guarded(ctx, first, g, rows[1..].to_vec(), leaf, sunk, line);
             }
             return self.leaf_body(ctx, first, leaf, sunk);
         }
@@ -1198,9 +1110,9 @@ impl<'a> Lower<'a> {
                         } else {
                             let head = items[0].clone();
                             let tail = Pat::List(items[1..].to_vec(), rest);
-                            let tail = match (&tail, ) {
-                                (Pat::List(is, Some(Some(n))),) if is.is_empty() => Pat::Bind(n.clone()),
-                                (Pat::List(is, Some(None)),) if is.is_empty() => Pat::Wild,
+                            let tail = match &tail {
+                                Pat::List(is, Some(Some(n))) if is.is_empty() => Pat::Bind(n.clone()),
+                                Pat::List(is, Some(None)) if is.is_empty() => Pat::Wild,
                                 _ => tail,
                             };
                             Some(vec![head, tail])
@@ -1221,7 +1133,7 @@ impl<'a> Lower<'a> {
             let mut sub = ctx.clone();
             for (b, t) in binders.iter().zip(ftys.iter()) {
                 let bt = self.ty_in(ctx, t, line);
-                sub.bind(b, bt, Some(t));
+                sub.bind(b, bt);
                 if ctx.pieces.contains(&sv) {
                     sub.pieces.insert(b.clone());
                 }
@@ -1246,10 +1158,12 @@ impl<'a> Lower<'a> {
             let et = self.ty_in(ctx, &args[0], line);
             Term::call("F.list.case", vec![Term::TyArg(et), Term::TyArg(rty), Term::var(&sv), elim_thunks[0].clone(), elim_thunks[1].clone()])
         } else if tid == usize::MAX - 1 {
-            let f = Term::Lam(vec!["_".into()], match &elim_thunks[0] { Term::Lam(_, b) => b.clone(), other => Box::new(other.clone()) });
-            let t = Term::Lam(vec!["_".into()], match &elim_thunks[1] { Term::Lam(_, b) => b.clone(), other => Box::new(other.clone()) });
-            let pick = Term::call("Bool.pick", vec![Term::TyArg(Ty::func(vec![Ty::Unit], rty)), Term::var(&sv), t, f]);
-            Term::App(Box::new(pick), vec![Term::unit()])
+            // the thunks of `False` and `True`, re-wrapped by the pick
+            let body = |t: &Term| match t {
+                Term::Lam(_, b) => (**b).clone(),
+                other => other.clone(),
+            };
+            self.pick_thunks(Term::var(&sv), body(&elim_thunks[1]), body(&elim_thunks[0]), rty)
         } else {
             let name = self.eliminator(tid);
             let mut call_args = self.type_args_of(ctx, &sty, tid, line);
@@ -1319,8 +1233,7 @@ impl<'a> Lower<'a> {
     }
 
     /// A row with a guard: pick between its body and the remaining rows.
-    fn guarded(&mut self, ctx: &mut FnCtx, mut first: Row, guard: Expr, others: Vec<Row>, real: bool, leaf: &Leaf, sunk: &[ir::Stmt], line: usize) -> Body {
-        let _ = real;
+    fn guarded(&mut self, ctx: &mut FnCtx, mut first: Row, guard: Expr, others: Vec<Row>, leaf: &Leaf, sunk: &[ir::Stmt], line: usize) -> Body {
         first.guard = None;
         let ret = self.leaf_ty(ctx, leaf);
         let rty = ctx.wrap(ret.clone());
@@ -1331,7 +1244,7 @@ impl<'a> Lower<'a> {
         for (n, from, t) in &first.binds {
             let bt = self.ty_in(&sub, t, line);
             pre.push(ir::Stmt::Let { name: n.clone(), reusable: false, ty: Some(bt.clone()), value: Term::var(from) });
-            sub.bind(n, bt, Some(t));
+            sub.bind(n, bt);
         }
         let mut gpre = Vec::new();
         let g = self.expr(&mut sub, &guard, &mut gpre);
@@ -1343,10 +1256,10 @@ impl<'a> Lower<'a> {
         // the guard's binds wrap the pick
         let mut t = pick;
         for s in gpre.into_iter().rev() {
-            t = self.stmt_around(&mut sub, s, t, &ret, true);
+            t = self.stmt_around(&mut sub, s, t, &ret);
         }
         for s in pre.into_iter().rev() {
-            t = self.stmt_around(&mut sub, s, t, &ret, true);
+            t = self.stmt_around(&mut sub, s, t, &ret);
         }
         Body::term(t)
     }
@@ -1359,19 +1272,14 @@ impl<'a> Lower<'a> {
         for (n, from, t) in &row.binds {
             let bt = self.ty_in(&sub, t, 0);
             out.push(ir::Stmt::Let { name: n.clone(), reusable: false, ty: Some(bt.clone()), value: Term::var(from) });
-            sub.bind(n, bt, Some(t));
+            sub.bind(n, bt);
             if sub.pieces.contains(from) {
                 sub.pieces.insert(n.clone());
                 let target = sub.aliases.get(from).cloned().unwrap_or_else(|| from.clone());
                 sub.aliases.insert(n.clone(), target);
             }
         }
-        let ans = self.lower_stmts_into(&mut sub, &row.body, &mut out, leaf);
-        let ans = match ans {
-            Some(a) => a,
-            None => self.fall_off(&mut sub, leaf, &mut out),
-        };
-        match ans {
+        match self.lower_stmts_answer(&mut sub, &row.body, &mut out, leaf) {
             Ans::Whole(b) => {
                 // a nested structural match already holds the sunk statements
                 b
@@ -1405,10 +1313,6 @@ impl<'a> Lower<'a> {
                             let t = self.expr(ctx, e, out);
                             return (LoopSource::Range(t), Type::Int);
                         }
-                        Type::List(_) => {
-                            let t = self.expr(ctx, e, out);
-                            return (LoopSource::List(t), elem);
-                        }
                         Type::Str => {
                             let t = self.expr(ctx, e, out);
                             return (LoopSource::List(Term::call("F.str.chars", vec![t])), elem);
@@ -1438,7 +1342,6 @@ impl<'a> Lower<'a> {
                         None => (Term::var("__counter"), Type::Int),
                         Some((prev, pt)) => {
                             let et = self.ty_in(ctx, &pt, line);
-                            let _ = s.clone();
                             (Term::call("F.list.enumerate_from", vec![Term::TyArg(et), prev, s]), Type::pair(Type::Int, pt))
                         }
                     }
@@ -1535,26 +1438,22 @@ impl<'a> Lower<'a> {
         let in_tys: Vec<Ty> = ins.iter().map(|(_, t)| t.clone()).collect();
         let env_ty = self.pack_ty(&in_tys);
         // the body def
-        let (elem_param, elem_bind): (Vec<(String, Ty)>, Vec<Stmt>) = match &kind {
-            LoopKind::For { elem_ty, .. } => {
-                let et = self.ty_in(ctx, elem_ty, line);
-                (vec![("__x".to_string(), et)], vec![])
-            }
-            LoopKind::While => (vec![], vec![]),
+        let elem_param: Vec<(String, Ty)> = match &kind {
+            LoopKind::For { elem_ty, .. } => vec![("__x".to_string(), self.ty_in(ctx, elem_ty, line))],
+            LoopKind::While => vec![],
         };
-        let _ = elem_bind;
         let mut sub = ctx.clone();
         sub.structural = false;
         sub.term_mode = false;
         sub.scope = ins.clone();
         for (n, t) in &state {
-            sub.bind(n, t.clone(), None);
+            sub.bind(n, t.clone());
         }
         sub.loop_ = Some(LoopInfo { state: state.clone(), state_ty: state_ty.clone(), ret_ty: ret_ty.clone() });
         sub.ret = ctl_ty.clone();
         let inner = match &kind {
             LoopKind::For { pat, elem_ty, .. } => {
-                sub.bind("__x", self.ty_in(ctx, elem_ty, line), Some(elem_ty));
+                sub.bind("__x", self.ty_in(ctx, elem_ty, line));
                 if let Pat::Bind(n) = pat {
                     // a plain name: rename the parameter
                     let row = Row { pats: vec![], guard: None, body: body.stmts.clone(), binds: vec![(local_name(n), "__x".into(), elem_ty.clone())] };
@@ -1588,15 +1487,9 @@ impl<'a> Lower<'a> {
             lam_params.push("__x".into());
         }
         let code = Term::Lam(lam_params, Box::new(Term::Call(body_name, call_args)));
-        let env_terms: Vec<Term> = ins.iter().map(|(n, _)| Term::var(n)).collect();
-        let env = self.pack(env_terms, &in_tys);
-        let s0_terms: Vec<Term> = state.iter().map(|(n, _)| Term::var(n)).collect();
-        let s0 = self.pack(s0_terms, &state_tys);
-        let suffix = match ctx.mode {
-            Mode::Pure => "",
-            Mode::Result => "_res",
-            Mode::Io => "_io",
-        };
+        let env = self.pack_vars(&ins);
+        let s0 = self.pack_vars(&state);
+        let suffix = ctx.mode.suffix();
         let call = match &kind {
             LoopKind::For { source: LoopSource::List(xs), elem_ty, .. } => {
                 let et = self.ty_in(ctx, elem_ty, line);
@@ -1607,7 +1500,7 @@ impl<'a> Lower<'a> {
             }
             LoopKind::While => Term::Call(format!("F.loop{}", suffix), vec![Term::TmplTy(state_ty.clone()), Term::TmplTy(ret_ty.clone()), Term::TmplTy(env_ty.clone()), tmpl_arg(code), env, Term::ctor("F.Next", vec![s0.clone()])]),
         };
-        let c = self.bind_answer(ctx, call, &ctl_ty, true, out);
+        let c = self.bind_answer(ctx, call, &ctl_ty, out);
         if returns {
             // Return{v} leaves the block; the state continues with the rest
             let ret_inner = self.leaf_ty(ctx, leaf);
@@ -1623,13 +1516,9 @@ impl<'a> Lower<'a> {
                 sub.term_mode = true;
                 sub.structural = false;
                 let mut pre = Vec::new();
-                sub.bind("__s", state_ty.clone(), None);
+                sub.bind("__s", state_ty.clone());
                 self.unpack_into(&mut sub, "__s", &state, &mut pre);
-                let ans = self.lower_stmts_into(&mut sub, rest, &mut pre, leaf);
-                let ans = match ans {
-                    Some(a) => a,
-                    None => self.fall_off(&mut sub, leaf, &mut pre),
-                };
+                let ans = self.lower_stmts_answer(&mut sub, rest, &mut pre, leaf);
                 let b = self.finish_body(&mut sub, pre, ans);
                 self.body_to_term(&mut sub, b, &ret_inner)
             };

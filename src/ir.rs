@@ -1,4 +1,4 @@
-// src/bend/ir.rs
+// src/ir.rs
 // A small AST for the subset of Bend 2 the backend emits, and its printer.
 //
 // The IR mirrors Bend's surface forms one to one (types, defs, match trees,
@@ -32,13 +32,10 @@ pub enum Ty {
     Map(Box<Ty>),
     /// A user or prelude type applied to type arguments.
     Named(String, Vec<Ty>),
-    /// Curried function type `A -> B -> R`. Empty params means `Unit -> R`
-    /// is NOT used; nullary functions are just defs.
+    /// Curried function type `A -> B -> R`.
     Fn(Vec<Ty>, Box<Ty>),
     /// `IO(T)`
     Io(Box<Ty>),
-    /// `A & B`
-    Tuple(Box<Ty>, Box<Ty>),
     /// A type parameter of a polymorphic prelude def, or the kind `Data`
     /// itself when used as an erased-argument kind.
     Param(String),
@@ -52,7 +49,7 @@ impl Ty {
                 out.insert(p.clone());
             }
             Ty::List(t) | Ty::Maybe(t) | Ty::Map(t) | Ty::Io(t) => t.params(out),
-            Ty::Result(a, b) | Ty::Tuple(a, b) => {
+            Ty::Result(a, b) => {
                 a.params(out);
                 b.params(out);
             }
@@ -82,7 +79,6 @@ impl Ty {
             Ty::Named(n, args) => Ty::Named(n.clone(), args.iter().map(|a| a.subst_params(m)).collect()),
             Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(|a| a.subst_params(m)).collect(), Box::new(r.subst_params(m))),
             Ty::Io(t) => Ty::Io(Box::new(t.subst_params(m))),
-            Ty::Tuple(a, b) => Ty::Tuple(Box::new(a.subst_params(m)), Box::new(b.subst_params(m))),
             _ => self.clone(),
         }
     }
@@ -105,15 +101,12 @@ impl Ty {
     pub fn func(params: Vec<Ty>, ret: Ty) -> Ty {
         Ty::Fn(params, Box::new(ret))
     }
-    pub fn tuple(a: Ty, b: Ty) -> Ty {
-        Ty::Tuple(Box::new(a), Box::new(b))
-    }
 
     /// Names of user types (`Named`) this type mentions, for ordering.
     pub fn named_refs(&self, out: &mut BTreeSet<String>) {
         match self {
             Ty::List(t) | Ty::Maybe(t) | Ty::Map(t) | Ty::Io(t) => t.named_refs(out),
-            Ty::Result(a, b) | Ty::Tuple(a, b) => {
+            Ty::Result(a, b) => {
                 a.named_refs(out);
                 b.named_refs(out);
             }
@@ -195,13 +188,6 @@ impl Ty {
                 t.write(out, false);
                 out.push(')');
             }
-            Ty::Tuple(a, b) => {
-                out.push('(');
-                a.write(out, true);
-                out.push_str(" & ");
-                b.write(out, true);
-                out.push(')');
-            }
             Ty::Param(p) => out.push_str(p),
         }
     }
@@ -240,12 +226,8 @@ pub enum Term {
     /// `a && b`, `a || b`
     And(Box<Term>, Box<Term>),
     Or(Box<Term>, Box<Term>),
-    /// `h <> t`
-    Cons(Box<Term>, Box<Term>),
     /// `[a, b, c]`
     List(Vec<Term>),
-    /// `(a, b)`
-    Tuple(Box<Term>, Box<Term>),
     /// `~name` — a template reference to a def.
     TmplRef(String),
     /// `~T` — a template type argument.
@@ -256,8 +238,6 @@ pub enum Term {
     App(Box<Term>, Vec<Term>),
     /// A type passed as an erased argument.
     TyArg(Ty),
-    /// `{t : T}`
-    Ann(Box<Term>, Ty),
 }
 
 impl Term {
@@ -281,6 +261,12 @@ impl Term {
     }
     pub fn boolean(b: bool) -> Term {
         Term::ctor(if b { "True" } else { "False" }, vec![])
+    }
+
+    pub fn render(&self) -> String {
+        let mut s = String::new();
+        self.write(&mut s);
+        s
     }
 
     fn write(&self, out: &mut String) {
@@ -382,24 +368,10 @@ impl Term {
                 b.write(out);
                 out.push(')');
             }
-            Term::Cons(h, t) => {
-                out.push('(');
-                h.write(out);
-                out.push_str(" <> ");
-                t.write(out);
-                out.push(')');
-            }
             Term::List(items) => {
                 out.push('[');
                 write_args(out, items);
                 out.push(']');
-            }
-            Term::Tuple(a, b) => {
-                out.push('(');
-                a.write(out);
-                out.push_str(", ");
-                b.write(out);
-                out.push(')');
             }
             Term::TmplRef(name) => {
                 out.push('~');
@@ -422,17 +394,30 @@ impl Term {
                 out.push(')');
             }
             Term::TyArg(ty) => ty.write(out, false),
-            Term::Ann(t, ty) => {
-                out.push('{');
-                t.write(out);
-                out.push_str(" : ");
-                ty.write(out, false);
-                out.push('}');
-            }
         }
     }
 
-    /// Def names this term calls or references as templates.
+    /// The direct subterms.
+    fn children(&self) -> Vec<&Term> {
+        match self {
+            Term::Ctor(_, args) | Term::Call(_, args) | Term::CallVar(_, args) | Term::List(args) => args.iter().collect(),
+            Term::App(f, args) => std::iter::once(&**f).chain(args).collect(),
+            Term::Lam(_, b) | Term::TmplTerm(b) => vec![&**b],
+            Term::Op(a, _, b, _) | Term::Cat(a, b) | Term::And(a, b) | Term::Or(a, b) => vec![&**a, &**b],
+            _ => vec![],
+        }
+    }
+
+    fn children_mut(&mut self) -> Vec<&mut Term> {
+        match self {
+            Term::Ctor(_, args) | Term::Call(_, args) | Term::CallVar(_, args) | Term::List(args) => args.iter_mut().collect(),
+            Term::App(f, args) => std::iter::once(&mut **f).chain(args).collect(),
+            Term::Lam(_, b) | Term::TmplTerm(b) => vec![&mut **b],
+            Term::Op(a, _, b, _) | Term::Cat(a, b) | Term::And(a, b) | Term::Or(a, b) => vec![&mut **a, &mut **b],
+            _ => vec![],
+        }
+    }
+
     /// The type parameters a template argument inside the term mentions:
     /// a template argument must be closed, so each must be a template
     /// parameter of the def.
@@ -440,66 +425,22 @@ impl Term {
         match self {
             Term::TmplTy(t) => t.params(out),
             Term::TyArg(t) if inside => t.params(out),
-            Term::Ann(b, t) => {
-                if inside {
-                    t.params(out);
-                }
-                b.template_params(inside, out);
-            }
             Term::TmplTerm(b) => b.template_params(true, out),
-            Term::Call(_, args) | Term::CallVar(_, args) | Term::Ctor(_, args) | Term::List(args) => {
-                for a in args {
-                    a.template_params(inside, out);
+            _ => {
+                for c in self.children() {
+                    c.template_params(inside, out);
                 }
             }
-            Term::App(f, args) => {
-                f.template_params(inside, out);
-                for a in args {
-                    a.template_params(inside, out);
-                }
-            }
-            Term::Lam(_, b) => b.template_params(inside, out),
-            Term::Op(a, _, b, _) | Term::Cat(a, b) | Term::And(a, b) | Term::Or(a, b) | Term::Cons(a, b) | Term::Tuple(a, b) => {
-                a.template_params(inside, out);
-                b.template_params(inside, out);
-            }
-            _ => {}
         }
     }
 
+    /// Def names this term calls or references as templates.
     pub fn def_refs(&self, out: &mut BTreeSet<String>) {
-        match self {
-            Term::Call(f, args) => {
-                out.insert(f.clone());
-                for a in args {
-                    a.def_refs(out);
-                }
-            }
-            Term::TmplRef(f) => {
-                out.insert(f.clone());
-            }
-            Term::CallVar(_, args) | Term::Ctor(_, args) | Term::List(args) => {
-                for a in args {
-                    a.def_refs(out);
-                }
-            }
-            Term::App(f, args) => {
-                f.def_refs(out);
-                for a in args {
-                    a.def_refs(out);
-                }
-            }
-            Term::Lam(_, b) | Term::Ann(b, _) | Term::TmplTerm(b) => b.def_refs(out),
-            Term::Op(a, _, b, _)
-            | Term::Cat(a, b)
-            | Term::And(a, b)
-            | Term::Or(a, b)
-            | Term::Cons(a, b)
-            | Term::Tuple(a, b) => {
-                a.def_refs(out);
-                b.def_refs(out);
-            }
-            _ => {}
+        if let Term::Call(f, _) | Term::TmplRef(f) = self {
+            out.insert(f.clone());
+        }
+        for c in self.children() {
+            c.def_refs(out);
         }
     }
 
@@ -507,34 +448,19 @@ impl Term {
     /// reusable (`+x`): Bend counts a variable once per use, and a variable
     /// used in two thunks of a pick is used twice.
     pub fn mark_reusable_lambdas(&mut self) {
-        match self {
-            Term::Lam(params, body) => {
-                body.mark_reusable_lambdas();
-                let mut counts = HashMap::new();
-                body.count_vars(&mut counts);
-                for p in params.iter_mut() {
-                    if p != "_" && !p.starts_with('+') && counts.get(p.as_str()).cloned().unwrap_or(0) > 1 {
-                        *p = format!("+{}", p);
-                    }
+        if let Term::Lam(params, body) = self {
+            body.mark_reusable_lambdas();
+            let mut counts = HashMap::new();
+            body.count_vars(&mut counts);
+            for p in params.iter_mut() {
+                if p != "_" && !p.starts_with('+') && counts.get(p.as_str()).cloned().unwrap_or(0) > 1 {
+                    *p = format!("+{}", p);
                 }
             }
-            Term::Call(_, args) | Term::CallVar(_, args) | Term::Ctor(_, args) | Term::List(args) => {
-                for a in args {
-                    a.mark_reusable_lambdas();
-                }
-            }
-            Term::App(f, args) => {
-                f.mark_reusable_lambdas();
-                for a in args {
-                    a.mark_reusable_lambdas();
-                }
-            }
-            Term::Ann(b, _) | Term::TmplTerm(b) => b.mark_reusable_lambdas(),
-            Term::Op(a, _, b, _) | Term::Cat(a, b) | Term::And(a, b) | Term::Or(a, b) | Term::Cons(a, b) | Term::Tuple(a, b) => {
-                a.mark_reusable_lambdas();
-                b.mark_reusable_lambdas();
-            }
-            _ => {}
+            return;
+        }
+        for c in self.children_mut() {
+            c.mark_reusable_lambdas();
         }
     }
 
@@ -542,23 +468,11 @@ impl Term {
     pub fn count_vars(&self, counts: &mut HashMap<String, usize>) {
         match self {
             Term::Var(v) => *counts.entry(v.clone()).or_insert(0) += 1,
-            Term::CallVar(f, args) => {
-                *counts.entry(f.clone()).or_insert(0) += 1;
-                for a in args {
-                    a.count_vars(counts);
-                }
-            }
-            Term::Call(_, args) | Term::Ctor(_, args) | Term::List(args) => {
-                for a in args {
-                    a.count_vars(counts);
-                }
-            }
             Term::App(f, args) => {
                 f.count_vars(counts);
-                // a variable handed to a reusable binder must be reusable itself
-                let params: Vec<String> = match &**f {
-                    Term::Lam(ps, _) => ps.clone(),
-                    _ => vec![],
+                let params: &[String] = match &**f {
+                    Term::Lam(ps, _) => ps,
+                    _ => &[],
                 };
                 for (i, a) in args.iter().enumerate() {
                     a.count_vars(counts);
@@ -569,7 +483,6 @@ impl Term {
                     }
                 }
             }
-            Term::TmplTerm(b) => b.count_vars(counts),
             Term::Lam(params, b) => {
                 let mut inner = HashMap::new();
                 b.count_vars(&mut inner);
@@ -580,17 +493,14 @@ impl Term {
                     *counts.entry(k).or_insert(0) += v;
                 }
             }
-            Term::Ann(b, _) => b.count_vars(counts),
-            Term::Op(a, _, b, _)
-            | Term::Cat(a, b)
-            | Term::And(a, b)
-            | Term::Or(a, b)
-            | Term::Cons(a, b)
-            | Term::Tuple(a, b) => {
-                a.count_vars(counts);
-                b.count_vars(counts);
+            _ => {
+                if let Term::CallVar(f, _) = self {
+                    *counts.entry(f.clone()).or_insert(0) += 1;
+                }
+                for c in self.children() {
+                    c.count_vars(counts);
+                }
             }
-            _ => {}
         }
     }
 }
@@ -615,14 +525,8 @@ pub enum Stmt {
     Let { name: String, reusable: bool, ty: Option<Ty>, value: Term },
     /// `x : T <- m` (or `+x : T <- m`) inside a do-block.
     Bind { name: String, reusable: bool, ty: Ty, value: Term },
-    /// `K{a, b} = v` — only legal when `v` is a parameter or field.
-    Destructure { ctor: String, fields: Vec<String>, value: Term },
-    /// `(a, b) = v` — only legal when `v` is a parameter or field.
-    TupleLet { a: String, b: String, value: Term },
     /// A unit step inside a do-block.
     Step(Term),
-    /// `a b = f(x) g(y)` — a parallel let.
-    ParLet { names: Vec<String>, calls: Vec<Term> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -655,120 +559,98 @@ pub enum DoTail {
     Step(Term),
 }
 
+impl DoTail {
+    fn term(&self) -> &Term {
+        match self {
+            DoTail::Return(t) | DoTail::Step(t) => t,
+        }
+    }
+
+    fn term_mut(&mut self) -> &mut Term {
+        match self {
+            DoTail::Return(t) | DoTail::Step(t) => t,
+        }
+    }
+}
+
 impl Body {
     pub fn term(t: Term) -> Body {
         Body::Block { stmts: vec![], tail: t }
     }
 
+    /// The terms of a straight body (a block or a do-block): each
+    /// statement's value, then the tail. A match has none of its own.
+    fn terms(&self) -> Vec<&Term> {
+        match self {
+            Body::Match { .. } => vec![],
+            Body::Block { stmts, tail } => stmts.iter().map(Stmt::value).chain([tail]).collect(),
+            Body::Do { stmts, tail, .. } => stmts.iter().map(Stmt::value).chain([tail.term()]).collect(),
+        }
+    }
+
+    fn terms_mut(&mut self) -> Vec<&mut Term> {
+        match self {
+            Body::Match { .. } => vec![],
+            Body::Block { stmts, tail } => stmts.iter_mut().map(Stmt::value_mut).chain([tail]).collect(),
+            Body::Do { stmts, tail, .. } => stmts.iter_mut().map(Stmt::value_mut).chain([tail.term_mut()]).collect(),
+        }
+    }
+
     /// See `Term::template_params`.
     pub fn template_params(&self, out: &mut BTreeSet<String>) {
-        match self {
-            Body::Match { arms, .. } => {
-                for (_, b) in arms {
-                    b.template_params(out);
-                }
+        if let Body::Match { arms, .. } = self {
+            for (_, b) in arms {
+                b.template_params(out);
             }
-            Body::Block { stmts, tail } => {
-                for s in stmts {
-                    s.template_params(out);
-                }
-                tail.template_params(false, out);
-            }
-            Body::Do { stmts, tail, .. } => {
-                for s in stmts {
-                    s.template_params(out);
-                }
-                match tail {
-                    DoTail::Return(t) | DoTail::Step(t) => t.template_params(false, out),
-                }
-            }
+        }
+        for t in self.terms() {
+            t.template_params(false, out);
         }
     }
 
     pub fn def_refs(&self, out: &mut BTreeSet<String>) {
-        match self {
-            Body::Match { arms, .. } => {
-                for (_, b) in arms {
-                    b.def_refs(out);
-                }
+        if let Body::Match { arms, .. } = self {
+            for (_, b) in arms {
+                b.def_refs(out);
             }
-            Body::Block { stmts, tail } => {
-                for s in stmts {
-                    s.def_refs(out);
-                }
-                tail.def_refs(out);
-            }
-            Body::Do { stmts, tail, .. } => {
-                for s in stmts {
-                    s.def_refs(out);
-                }
-                match tail {
-                    DoTail::Return(t) | DoTail::Step(t) => t.def_refs(out),
-                }
-            }
+        }
+        for t in self.terms() {
+            t.def_refs(out);
         }
     }
 
     /// Mark the lambdas of every term in the body (see
     /// `Term::mark_reusable_lambdas`).
     pub fn mark_reusable_lambdas(&mut self) {
-        match self {
-            Body::Match { arms, .. } => {
-                for (_, b) in arms {
-                    b.mark_reusable_lambdas();
-                }
+        if let Body::Match { arms, .. } = self {
+            for (_, b) in arms {
+                b.mark_reusable_lambdas();
             }
-            Body::Block { stmts, tail } => {
-                for st in stmts {
-                    st.mark_reusable_lambdas();
-                }
-                tail.mark_reusable_lambdas();
-            }
-            Body::Do { stmts, tail, .. } => {
-                for st in stmts {
-                    st.mark_reusable_lambdas();
-                }
-                match tail {
-                    DoTail::Return(t) | DoTail::Step(t) => t.mark_reusable_lambdas(),
-                }
-            }
+        }
+        for t in self.terms_mut() {
+            t.mark_reusable_lambdas();
         }
     }
 
     /// Variable use counts, taking the maximum across match arms.
     pub fn count_vars(&self, counts: &mut HashMap<String, usize>) {
-        match self {
-            Body::Match { scrutinee, arms } => {
-                *counts.entry(scrutinee.clone()).or_insert(0) += 1;
-                let mut best: HashMap<String, usize> = HashMap::new();
-                for (_, b) in arms {
-                    let mut c = HashMap::new();
-                    b.count_vars(&mut c);
-                    for (k, v) in c {
-                        let e = best.entry(k).or_insert(0);
-                        if v > *e {
-                            *e = v;
-                        }
-                    }
-                }
-                for (k, v) in best {
-                    *counts.entry(k).or_insert(0) += v;
+        if let Body::Match { scrutinee, arms } = self {
+            *counts.entry(scrutinee.clone()).or_insert(0) += 1;
+            let mut best: HashMap<String, usize> = HashMap::new();
+            for (_, b) in arms {
+                let mut c = HashMap::new();
+                b.count_vars(&mut c);
+                for (k, v) in c {
+                    let e = best.entry(k).or_insert(0);
+                    *e = (*e).max(v);
                 }
             }
-            Body::Block { stmts, tail } => {
-                for s in stmts {
-                    s.count_vars(counts);
-                }
-                tail.count_vars(counts);
+            for (k, v) in best {
+                *counts.entry(k).or_insert(0) += v;
             }
-            Body::Do { stmts, tail, .. } => {
-                for s in stmts {
-                    s.count_vars(counts);
-                }
-                match tail {
-                    DoTail::Return(t) | DoTail::Step(t) => t.count_vars(counts),
-                }
-            }
+        }
+        for t in self.terms() {
+            t.count_vars(counts);
         }
     }
 
@@ -807,7 +689,7 @@ impl Body {
             }
             Body::Block { stmts, tail } => {
                 for s in stmts {
-                    s.write(out, indent);
+                    s.write(out, indent, None);
                 }
                 out.push_str(&pad);
                 tail.write(out);
@@ -821,18 +703,11 @@ impl Body {
                         t.write(out, false);
                         out.push('>');
                     }
-                    Ty::Result(e, a) => {
-                        out.push_str("Result<&2, &2, ");
-                        e.write(out, false);
-                        out.push_str(", ");
-                        a.write(out, false);
-                        out.push('>');
-                    }
                     other => other.write(out, false),
                 }
                 out.push_str(":\n");
                 for s in stmts {
-                    s.write_in(out, indent + 1, Some(monad));
+                    s.write(out, indent + 1, Some(monad));
                 }
                 out.push_str(&pad);
                 out.push_str("  ");
@@ -850,69 +725,22 @@ impl Body {
 }
 
 impl Stmt {
-    pub fn mark_reusable_lambdas(&mut self) {
+    /// The term a statement evaluates.
+    fn value(&self) -> &Term {
         match self {
-            Stmt::Let { value, .. } | Stmt::Bind { value, .. } | Stmt::Destructure { value, .. } | Stmt::TupleLet { value, .. } | Stmt::Step(value) => value.mark_reusable_lambdas(),
-            Stmt::ParLet { calls, .. } => {
-                for c in calls {
-                    c.mark_reusable_lambdas();
-                }
-            }
+            Stmt::Let { value, .. } | Stmt::Bind { value, .. } | Stmt::Step(value) => value,
         }
     }
 
-    pub fn template_params(&self, out: &mut BTreeSet<String>) {
+    fn value_mut(&mut self) -> &mut Term {
         match self {
-            Stmt::Let { value, .. }
-            | Stmt::Bind { value, .. }
-            | Stmt::Destructure { value, .. }
-            | Stmt::TupleLet { value, .. }
-            | Stmt::Step(value) => value.template_params(false, out),
-            Stmt::ParLet { calls, .. } => {
-                for c in calls {
-                    c.template_params(false, out);
-                }
-            }
+            Stmt::Let { value, .. } | Stmt::Bind { value, .. } | Stmt::Step(value) => value,
         }
-    }
-
-    pub fn def_refs(&self, out: &mut BTreeSet<String>) {
-        match self {
-            Stmt::Let { value, .. }
-            | Stmt::Bind { value, .. }
-            | Stmt::Destructure { value, .. }
-            | Stmt::TupleLet { value, .. }
-            | Stmt::Step(value) => value.def_refs(out),
-            Stmt::ParLet { calls, .. } => {
-                for c in calls {
-                    c.def_refs(out);
-                }
-            }
-        }
-    }
-
-    pub fn count_vars(&self, counts: &mut HashMap<String, usize>) {
-        match self {
-            Stmt::Let { value, .. }
-            | Stmt::Bind { value, .. }
-            | Stmt::Destructure { value, .. }
-            | Stmt::TupleLet { value, .. }
-            | Stmt::Step(value) => value.count_vars(counts),
-            Stmt::ParLet { calls, .. } => {
-                for c in calls {
-                    c.count_vars(counts);
-                }
-            }
-        }
-    }
-
-    fn write(&self, out: &mut String, indent: usize) {
-        self.write_in(out, indent, None)
     }
 
     /// Inside a do-block (`monad` given) a reusable let has no syntax of
     /// its own: it binds the value through the monad's `pure`.
-    fn write_in(&self, out: &mut String, indent: usize, monad: Option<&Ty>) {
+    fn write(&self, out: &mut String, indent: usize, monad: Option<&Ty>) {
         let pad = "  ".repeat(indent);
         out.push_str(&pad);
         match self {
@@ -959,28 +787,7 @@ impl Stmt {
                 out.push_str(" <- ");
                 value.write(out);
             }
-            Stmt::Destructure { ctor, fields, value } => {
-                out.push_str(ctor);
-                out.push('{');
-                out.push_str(&fields.join(", "));
-                out.push_str("} = ");
-                value.write(out);
-            }
-            Stmt::TupleLet { a, b, value } => {
-                write!(out, "({}, {}) = ", a, b).unwrap();
-                value.write(out);
-            }
             Stmt::Step(t) => t.write(out),
-            Stmt::ParLet { names, calls } => {
-                out.push_str(&names.join(" "));
-                out.push_str(" = ");
-                for (i, c) in calls.iter().enumerate() {
-                    if i > 0 {
-                        out.push(' ');
-                    }
-                    c.write(out);
-                }
-            }
         }
         out.push('\n');
     }
@@ -995,6 +802,13 @@ pub struct Param {
     pub name: String,
     pub reusable: bool,
     pub ty: Ty,
+}
+
+impl Param {
+    /// A parameter, reusable once `mark_reusable` finds it used twice.
+    pub fn new(name: impl Into<String>, ty: Ty) -> Param {
+        Param { name: name.into(), reusable: false, ty }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1016,11 +830,9 @@ pub struct Def {
 }
 
 impl Def {
-    pub fn def_refs(&self) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
-        self.body.def_refs(&mut out);
-        out.remove(&self.name);
-        out
+    /// A def with value parameters only.
+    pub fn new(name: impl Into<String>, params: Vec<Param>, ret: Ty, body: Body) -> Def {
+        Def { name: name.into(), is_unsafe: false, tmpl_types: vec![], tmpl_funcs: vec![], erased: vec![], erased_types: vec![], params, ret, body }
     }
 
     fn write(&self, out: &mut String) {
@@ -1118,8 +930,21 @@ impl TypeDef {
         }
         out.push('\n');
     }
+}
 
-    fn type_refs(&self) -> BTreeSet<String> {
+/// An item placed after the items it refers to.
+trait Node {
+    fn key(&self) -> &str;
+    /// The names it refers to, other than its own.
+    fn refs(&self) -> BTreeSet<String>;
+}
+
+impl Node for TypeDef {
+    fn key(&self) -> &str {
+        &self.name
+    }
+
+    fn refs(&self) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
         for (_, fields) in &self.ctors {
             for (_, ty) in fields {
@@ -1131,13 +956,23 @@ impl TypeDef {
     }
 }
 
+impl Node for Def {
+    fn key(&self) -> &str {
+        &self.name
+    }
+
+    fn refs(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        self.body.def_refs(&mut out);
+        out.remove(&self.name);
+        out
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Program {
     pub types: Vec<TypeDef>,
     pub defs: Vec<Def>,
-    /// Verbatim Bend source placed after `import Base` and before the
-    /// generated declarations (the prelude).
-    pub raw_prelude: String,
 }
 
 impl Program {
@@ -1145,13 +980,13 @@ impl Program {
     /// the part of the prelude it uses.
     pub fn render(&self) -> String {
         let mut body = String::new();
-        for t in order_types(&self.types) {
+        for t in topo_order(&self.types) {
             t.write(&mut body);
         }
-        for d in order_defs(&self.defs) {
+        for d in topo_order(&self.defs) {
             d.write(&mut body);
         }
-        let prelude = crate::prune::prune_prelude(&self.raw_prelude, &body);
+        let prelude = crate::prune::prune_prelude(crate::lower::PRELUDE, &body);
         let mut out = String::new();
         out.push_str("import Base\n\n");
         out.push_str(&prelude);
@@ -1164,103 +999,32 @@ impl Program {
     }
 }
 
-impl Program {
-    /// Render only the defs, in source order, without prelude or imports
-    /// (used to print a term through the def printer).
-    pub fn render_defs_only(&self) -> String {
-        let mut body = String::new();
-        for d in &self.defs {
-            d.write(&mut body);
-        }
-        body
-    }
-}
-
-/// Topological order of type declarations (a type after the types its
-/// fields mention). Self-references are fine; cycles keep source order.
-fn order_types(types: &[TypeDef]) -> Vec<&TypeDef> {
-    let index: HashMap<&str, usize> = types.iter().enumerate().map(|(i, t)| (t.name.as_str(), i)).collect();
-    let mut done = vec![false; types.len()];
+/// Topological order (an item after the items it refers to). A cycle
+/// keeps source order: between types it is a recursive type, between
+/// defs Bend's checker reports it.
+fn topo_order<T: Node>(items: &[T]) -> Vec<&T> {
+    let index: HashMap<&str, usize> = items.iter().enumerate().map(|(i, t)| (t.key(), i)).collect();
+    let mut done = vec![false; items.len()];
+    let mut visiting = Vec::new();
     let mut out = Vec::new();
-    fn visit<'a>(i: usize, types: &'a [TypeDef], index: &HashMap<&str, usize>, done: &mut [bool], visiting: &mut Vec<usize>, out: &mut Vec<&'a TypeDef>) {
+    fn visit<'a, T: Node>(i: usize, items: &'a [T], index: &HashMap<&str, usize>, done: &mut [bool], visiting: &mut Vec<usize>, out: &mut Vec<&'a T>) {
         if done[i] || visiting.contains(&i) {
             return;
         }
         visiting.push(i);
-        for r in types[i].type_refs() {
+        for r in items[i].refs() {
             if let Some(&j) = index.get(r.as_str()) {
-                visit(j, types, index, done, visiting, out);
+                visit(j, items, index, done, visiting, out);
             }
         }
         visiting.pop();
         done[i] = true;
-        out.push(&types[i]);
+        out.push(&items[i]);
     }
-    for i in 0..types.len() {
-        visit(i, types, &index, &mut done, &mut Vec::new(), &mut out);
-    }
-    out
-}
-
-/// Topological order of defs (callees before callers). Self-recursion is
-/// ignored; a genuine cycle (which Bend would reject anyway) keeps source
-/// order so the error surfaces in Bend's checker.
-pub fn order_defs(defs: &[Def]) -> Vec<&Def> {
-    let index: HashMap<&str, usize> = defs.iter().enumerate().map(|(i, d)| (d.name.as_str(), i)).collect();
-    let mut done = vec![false; defs.len()];
-    let mut out = Vec::new();
-    fn visit<'a>(i: usize, defs: &'a [Def], index: &HashMap<&str, usize>, done: &mut [bool], visiting: &mut Vec<usize>, out: &mut Vec<&'a Def>) {
-        if done[i] || visiting.contains(&i) {
-            return;
-        }
-        visiting.push(i);
-        for r in defs[i].def_refs() {
-            if let Some(&j) = index.get(r.as_str()) {
-                visit(j, defs, index, done, visiting, out);
-            }
-        }
-        visiting.pop();
-        done[i] = true;
-        out.push(&defs[i]);
-    }
-    for i in 0..defs.len() {
-        visit(i, defs, &index, &mut done, &mut Vec::new(), &mut out);
+    for i in 0..items.len() {
+        visit(i, items, &index, &mut done, &mut visiting, &mut out);
     }
     out
-}
-
-/// Detect genuine call cycles between distinct defs (mutual recursion),
-/// which Bend rejects. Returns one cycle as a list of names, if any.
-pub fn find_mutual_recursion(defs: &[Def]) -> Option<Vec<String>> {
-    let index: HashMap<&str, usize> = defs.iter().enumerate().map(|(i, d)| (d.name.as_str(), i)).collect();
-    let mut state = vec![0u8; defs.len()]; // 0 new, 1 visiting, 2 done
-    let mut stack: Vec<usize> = Vec::new();
-    fn visit(i: usize, defs: &[Def], index: &HashMap<&str, usize>, state: &mut [u8], stack: &mut Vec<usize>) -> Option<Vec<String>> {
-        state[i] = 1;
-        stack.push(i);
-        for r in defs[i].def_refs() {
-            if let Some(&j) = index.get(r.as_str()) {
-                if state[j] == 1 {
-                    let pos = stack.iter().position(|&k| k == j).unwrap();
-                    return Some(stack[pos..].iter().map(|&k| defs[k].name.clone()).collect());
-                }
-                if state[j] == 0
-                    && let Some(c) = visit(j, defs, index, state, stack) {
-                        return Some(c);
-                    }
-            }
-        }
-        stack.pop();
-        state[i] = 2;
-        None
-    }
-    for i in 0..defs.len() {
-        if state[i] == 0
-            && let Some(c) = visit(i, defs, &index, &mut state, &mut stack) {
-                return Some(c);
-            }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -1269,20 +1033,11 @@ mod tests {
 
     #[test]
     fn prints_a_small_def() {
-        let d = Def {
-            name: "f.sq".into(),
-            is_unsafe: false,
-            tmpl_types: vec![],
-            tmpl_funcs: vec![],
-            erased: vec![],
-            erased_types: vec![],
-            params: vec![Param { name: "x".into(), reusable: false, ty: Ty::U32 }],
-            ret: Ty::U32,
-            body: Body::Block {
-                stmts: vec![Stmt::Let { name: "y".into(), reusable: true, ty: None, value: Term::var("x") }],
-                tail: Term::op(Term::var("y"), "*", Term::var("y"), Ty::U32),
-            },
+        let body = Body::Block {
+            stmts: vec![Stmt::Let { name: "y".into(), reusable: true, ty: None, value: Term::var("x") }],
+            tail: Term::op(Term::var("y"), "*", Term::var("y"), Ty::U32),
         };
+        let d = Def::new("f.sq", vec![Param::new("x", Ty::U32)], Ty::U32, body);
         let mut s = String::new();
         d.write(&mut s);
         assert_eq!(s, "def f.sq(x: U32) -> U32:\n  +y = x\n  (y * y : U32)\n\n");
@@ -1290,22 +1045,9 @@ mod tests {
 
     #[test]
     fn orders_helpers_before_callers() {
-        let mk = |name: &str, calls: &[&str]| Def {
-            name: name.into(),
-            is_unsafe: false,
-            tmpl_types: vec![],
-            tmpl_funcs: vec![],
-            erased: vec![],
-            erased_types: vec![],
-            params: vec![],
-            ret: Ty::U32,
-            body: Body::term(Term::List(calls.iter().map(|c| Term::call(c, vec![])).collect())),
-        };
+        let mk = |name: &str, calls: &[&str]| Def::new(name, vec![], Ty::U32, Body::term(Term::List(calls.iter().map(|c| Term::call(c, vec![])).collect())));
         let defs = vec![mk("a", &["b", "a"]), mk("b", &["c"]), mk("c", &[])];
-        let names: Vec<&str> = order_defs(&defs).iter().map(|d| d.name.as_str()).collect();
+        let names: Vec<&str> = topo_order(&defs).iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, vec!["c", "b", "a"]);
-        assert!(find_mutual_recursion(&defs).is_none());
-        let cyc = vec![mk("a", &["b"]), mk("b", &["a"])];
-        assert!(find_mutual_recursion(&cyc).is_some());
     }
 }
