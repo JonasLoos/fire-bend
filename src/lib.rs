@@ -41,63 +41,54 @@ impl std::fmt::Display for Diag {
 pub struct FireParser;
 
 /// Parses a Fire source string into a Pest result.
-pub fn parse_source(source: &str) -> Result<pest::iterators::Pairs<'_, Rule>, Box<pest::error::Error<Rule>>> {
+fn parse_source(source: &str) -> Result<pest::iterators::Pairs<'_, Rule>, Box<pest::error::Error<Rule>>> {
     // pest's generated parser recurses through the whole precedence tower per
     // nesting level with no stack guard of its own (so no chance to grow
     // mid-parse); run it on a dedicated large stack segment up front.
-    #[cfg(not(target_arch = "wasm32"))]
-    let parsed = stacker::grow(32 * 1024 * 1024, || {
-        FireParser::parse(Rule::program, source).map_err(Box::new)
-    })
-    .map_err(|e| *e);
-    #[cfg(target_arch = "wasm32")]
-    let parsed = FireParser::parse(Rule::program, source);
-    parsed.map_err(|e| Box::new(humanize_parse_error(source, e)))
+    stacker::grow(32 * 1024 * 1024, || FireParser::parse(Rule::program, source))
+        .map_err(|e| Box::new(humanize_parse_error(source, e)))
 }
 
 /// What a grammar rule means to someone reading an error message. Many rules
 /// collapse onto the same phrase on purpose: "expected an expression" beats
-/// pest's raw dump of every alternative that can start one.
+/// pest's raw dump of every alternative that can start one. Silent rules
+/// (`_{ ... }`) never appear in an error, so they have no entry.
 fn rule_description(rule: Rule) -> String {
     use Rule::*;
     let text = match rule {
         EOI => "end of input",
-        nl | nls | block_nl => "a newline",
-        indentation => "matching indentation",
-        block | do_or_block => "'do' or an indented block",
-        statement | statement_raw => "a statement",
-        expression_big | expression_small | atom | paren_expr
+        statement => "a statement",
+        paren_expr
         | pipeline_expr | pipeline_expr_simple | lambda_expr | loop_expr | if_expr
         | assignment_expr | logic_or | logic_or_simple | logic_and | logic_and_simple
-        | logic_not | comparison | comparison_simple | type_or | type_or_simple
-        | xor | xor_simple | type_and | type_and_simple | range | shift | shift_simple
+        | logic_not | comparison | comparison_simple | bit_or | bit_or_simple
+        | xor | xor_simple | bit_and | bit_and_simple | range | shift | shift_simple
         | additive | additive_simple
         | multiplicative | multiplicative_simple | unary
         | power | typecheck | call_or_access | call_or_access_simple => "an expression",
         pipeline_block | pipeline_block_line | logic_or_block | logic_or_block_line
         | logic_and_block | logic_and_block_line | comparison_block | comparison_block_line
-        | type_or_block | type_or_block_line | xor_block | xor_block_line
-        | type_and_block | type_and_block_line | shift_block | shift_block_line
+        | bit_or_block | bit_or_block_line | xor_block | xor_block_line
+        | bit_and_block | bit_and_block_line | shift_block | shift_block_line
         | additive_block | additive_block_line | multiplicative_block
         | multiplicative_block_line | access_block | access_block_line
-        | bracket_block | list_block | object_block | call_block | call_line
             => "a continuation line starting with an operator",
         function_call_args => "call arguments '(...)'",
         list_access_args => "an index '[...]'",
-        call_arg_list | call_arg | named_arg => "an argument",
+        named_arg => "an argument",
         pipeline_op => "a pipeline operator ('|>', '*>', '?>', '!>')",
         lambda_op => "'=>'",
         assignment_op => "an assignment operator",
         comparison_op => "a comparison operator",
         add_op | mul_op | power_op => "an arithmetic operator",
         xor_op | shift_op => "a bitwise operator",
-        unary_op => "'-' or 'not'",
+        unary_op => "'+', '-' or '...'",
         range_op => "'..'",
         typecheck_op => "':' (type annotation)",
         member_access_op => "'.'",
-        type_or_op => "'|'",
-        type_and_op => "'&'",
-        identifier | id_chars => "a name",
+        bit_or_op => "'|'",
+        bit_and_op => "'&'",
+        identifier => "a name",
         number | hex_number | bin_number | scientific_number
         | decimal_number => "a number",
         string | fstring | tstring => "a string",
@@ -106,8 +97,8 @@ fn rule_description(rule: Rule) -> String {
         fstring_escape | fstring_text => "string text",
         boolean | kw_true | kw_false => "'true' or 'false'",
         nothing_lit | kw_nothing => "'nothing'",
-        list | list_entries | list_entry => "a list",
-        object | object_entries | object_entry => "an object entry",
+        list | list_entry => "a list",
+        object | object_entry => "an object entry",
         ellipsis => "'...'",
         previous_result => "'$'",
         import => "a '$module' import",
@@ -124,8 +115,8 @@ fn rule_description(rule: Rule) -> String {
         kw_elif => "'elif'",
         match_stmt | kw_match => "'match'",
         guarded_arm => "a match arm",
-        method_stmt | method_args => "a method call",
-        loop_clause => "'for' or 'while'",
+        def_stmt => "a def",
+        def_params => "parameters",
         kw_def => "'def'",
         kw_public => "'public'",
         kw_in => "'in'",
@@ -137,7 +128,6 @@ fn rule_description(rule: Rule) -> String {
         law_stmt | law_for | kw_law => "'law'",
         kw_unsafe => "'unsafe'",
         keyword => "a keyword",
-        w => "whitespace",
         other => return format!("{:?}", other),
     };
     text.to_string()
@@ -162,15 +152,15 @@ fn humanize_parse_error(source: &str, e: pest::error::Error<Rule>) -> pest::erro
         use Rule::*;
         matches!(rule,
             pipeline_op | lambda_op | assignment_op | comparison_op | add_op | mul_op
-            | power_op | range_op | typecheck_op | member_access_op | type_or_op
-            | type_and_op | xor_op | shift_op | function_call_args | list_access_args
+            | power_op | range_op | typecheck_op | member_access_op | bit_or_op
+            | bit_and_op | xor_op | shift_op | function_call_args | list_access_args
             | pipeline_block | pipeline_block_line | logic_or_block | logic_or_block_line
             | logic_and_block | logic_and_block_line | comparison_block
-            | comparison_block_line | type_or_block | type_or_block_line
+            | comparison_block_line | bit_or_block | bit_or_block_line
             | xor_block | xor_block_line | shift_block | shift_block_line
-            | type_and_block | type_and_block_line | additive_block | additive_block_line
+            | bit_and_block | bit_and_block_line | additive_block | additive_block_line
             | multiplicative_block | multiplicative_block_line | access_block
-            | access_block_line | bracket_block | list_block | object_block | call_block | call_line)
+            | access_block_line)
     }
 
     let collapse = positives.iter().filter(|r| continues_expression(**r)).count() >= 4;
@@ -253,29 +243,22 @@ fn humanize_parse_error(source: &str, e: pest::error::Error<Rule>) -> pest::erro
     rebuilt.unwrap_or(e)
 }
 
-/// Parses pest pairs into an AST.
-pub fn parse_to_ast(pairs: pest::iterators::Pairs<'_, Rule>) -> Result<ast::Program, Box<dyn std::error::Error>> {
-    ast::from_pest_pairs(pairs)
-}
-
 /// Parse a source string all the way to an AST.
 pub fn parse_program(source: &str) -> Result<ast::Program, Box<dyn std::error::Error>> {
-    let pairs = parse_source(source)?;
-    parse_to_ast(pairs)
+    ast::from_pest_pairs(parse_source(source)?)
 }
 
-fn parse_diag(source: &str) -> Result<ast::Program, Vec<Diag>> {
-    parse_program(source).map_err(|e| vec![Diag { line: 0, message: format!("{}", e) }])
+/// Parse and check a program.
+fn check_source(source: &str) -> Result<(ast::Program, core::Program), Vec<Diag>> {
+    let program = parse_program(source).map_err(|e| vec![Diag { line: 0, message: format!("{}", e) }])?;
+    let core = check::check_program(&program)?;
+    Ok((program, core))
 }
 
 /// Compile a Fire program to Bend source: a runnable image, carrying the
 /// laws the compiler proves (a false one fails Bend's check).
 pub fn compile(source: &str) -> Result<String, Vec<Diag>> {
-    let program = parse_diag(source)?;
-    let core = check::check_program(&program)?;
-    if std::env::var("FIRE_DUMP_CORE").is_ok() {
-        eprintln!("{:#?}", core.defs);
-    }
+    let (_, core) = check_source(source)?;
     let ir = lower::lower_program(&core, lower::Laws::Proven)?;
     Ok(ir.render())
 }
@@ -339,8 +322,7 @@ fn partial_matches(core: &core::Program) -> Vec<(usize, String)> {
 /// The image `fire --check` hands to Bend (every law, the open ones as
 /// claims), and the report of laws and unsafe code.
 pub fn compile_for_check(source: &str) -> Result<(String, Report), Vec<Diag>> {
-    let program = parse_diag(source)?;
-    let core = check::check_program(&program)?;
+    let (_, core) = check_source(source)?;
     let ir = lower::lower_program(&core, lower::Laws::All)?;
     let mut report = Report::default();
     for l in &core.laws {
@@ -364,8 +346,7 @@ pub fn compile_for_check(source: &str) -> Result<(String, Report), Vec<Diag>> {
 /// The property-test image of a program (`fire --test`): its definitions
 /// and bindings, and every law checked on generated instances.
 pub fn compile_tests(source: &str) -> Result<String, Vec<Diag>> {
-    let program = parse_diag(source)?;
-    let core = check::check_program(&program)?;
+    let (program, core) = check_source(source)?;
     let tests = testgen::test_program(&program, &core)?;
     let core2 = check::check_program(&tests)?;
     let ir = lower::lower_program(&core2, lower::Laws::Proven)?;
@@ -375,8 +356,7 @@ pub fn compile_tests(source: &str) -> Result<String, Vec<Diag>> {
 /// Parse and check a program, returning one line per def with its resolved
 /// type, effect and descent, then one per data type (`fire --types`).
 pub fn describe_types(source: &str) -> Result<String, Vec<Diag>> {
-    let program = parse_program(source).map_err(|e| vec![Diag { line: 0, message: format!("{}", e) }])?;
-    let core = check::check_program(&program)?;
+    let (_, core) = check_source(source)?;
     let names = |id: types::TypeId| core.types[id].name.clone();
     let mut out = String::new();
     for d in &core.defs {
@@ -457,33 +437,42 @@ impl Lane {
 /// Build `src` with the `bend` binary into `out` (a native binary, or a
 /// `.js` file on the JavaScript lane). Returns the lane actually used.
 pub fn build_with_bend(src: &std::path::Path, out: &std::path::Path, lane: Lane) -> Result<Lane, String> {
-    use std::process::Command;
-    let bend = |out: &std::path::Path| {
-        Command::new("bend")
-            .arg(src)
-            .arg("-o")
-            .arg(out)
-            .env("BEND_NO_TELEMETRY", "1")
-            .output()
-            .map_err(|e| format!("cannot run `bend` ({}); is it installed and on PATH?", e))
-    };
+    let build_to = |target: &std::path::Path| bend(&[src.as_os_str(), "-o".as_ref(), target.as_os_str()]);
     let mut lane = lane;
-    let mut target = lane_output(out, lane);
-    let mut build = bend(&target)?;
+    let mut build = build_to(&lane_output(out, lane))?;
     if !build.status.success() && lane == Lane::Native && native_codegen_crashed(&build) {
         lane = Lane::Js;
-        target = lane_output(out, lane);
-        build = bend(&target)?;
+        build = build_to(&lane_output(out, lane))?;
     }
     if !build.status.success() {
-        return Err(format!(
-            "bend failed on {}:\n{}{}",
-            src.display(),
-            String::from_utf8_lossy(&build.stdout),
-            String::from_utf8_lossy(&build.stderr)
-        ));
+        return Err(format!("bend failed on {}:\n{}", src.display(), output_text(&build)));
     }
     Ok(lane)
+}
+
+/// Run the `bend` binary with these arguments, capturing its output.
+pub fn bend(args: &[&std::ffi::OsStr]) -> Result<std::process::Output, String> {
+    std::process::Command::new("bend")
+        .args(args)
+        .env("BEND_NO_TELEMETRY", "1")
+        .output()
+        .map_err(|e| format!("cannot run `bend` ({}); is it installed and on PATH?", e))
+}
+
+/// What a process printed: its stdout, then its stderr.
+pub fn output_text(output: &std::process::Output) -> String {
+    format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
+}
+
+/// Write a Bend source for the Fire program `origin` to
+/// `<tmp>/<prefix>-<stem>-<pid>/<stem>.bend`, and answer that path.
+pub fn write_temp_source(prefix: &str, origin: &str, bend_source: &str) -> Result<std::path::PathBuf, String> {
+    let stem = std::path::Path::new(origin).file_stem().and_then(|s| s.to_str()).unwrap_or("program");
+    let dir = std::env::temp_dir().join(format!("{}-{}-{}", prefix, stem, std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {}", dir.display(), e))?;
+    let src = dir.join(format!("{}.bend", stem));
+    std::fs::write(&src, bend_source).map_err(|e| format!("cannot write {}: {}", src.display(), e))?;
+    Ok(src)
 }
 
 /// The output path for a lane: `.js` is appended on the JavaScript lane.
@@ -511,12 +500,8 @@ pub fn run_built(out: &std::path::Path, lane: Lane) -> Result<i32, String> {
 /// Write the Bend source to a temporary directory, build it, run it, and
 /// stream its output. Returns the program's exit status.
 pub fn run_with_bend(bend_source: &str, origin: &str) -> Result<i32, String> {
-    let stem = std::path::Path::new(origin).file_stem().and_then(|s| s.to_str()).unwrap_or("program").to_string();
-    let dir = std::env::temp_dir().join(format!("fire-{}-{}", stem, std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {}", dir.display(), e))?;
-    let src = dir.join(format!("{}.bend", stem));
-    std::fs::write(&src, bend_source).map_err(|e| format!("cannot write {}: {}", src.display(), e))?;
-    let out = dir.join(&stem);
+    let src = write_temp_source("fire", origin, bend_source)?;
+    let out = src.with_extension("");
     let lane = build_with_bend(&src, &out, Lane::from_env())?;
     run_built(&out, lane)
 }
@@ -524,6 +509,6 @@ pub fn run_with_bend(bend_source: &str, origin: &str) -> Result<i32, String> {
 /// A build that passed Bend's checker but died inside its native code
 /// generator (an internal `TypeError`), as opposed to a rejected program.
 pub fn native_codegen_crashed(build: &std::process::Output) -> bool {
-    let text = format!("{}{}", String::from_utf8_lossy(&build.stdout), String::from_utf8_lossy(&build.stderr));
+    let text = output_text(build);
     text.contains("All terms check") && text.contains("TypeError")
 }

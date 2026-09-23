@@ -377,34 +377,17 @@ impl Checker {
             let rhs = value_expr.clone();
             let rhs = match op {
                 ast::AssignmentOp::Assign => rhs,
-                other => {
+                ast::AssignmentOp::Compound(bop) => {
                     // compound: read the target, combine, write back
                     let cur = self.read_target(target);
                     let rhs = self.float_literal_if(rhs, matches!(self.shallow(&cur.ty), Type::Float));
                     self.unify(&cur.ty, &rhs.ty, line);
                     let t = cur.ty.clone();
-                    let name = match other {
-                        ast::AssignmentOp::AddAssign => Some(ArithOp::Add),
-                        ast::AssignmentOp::SubAssign => Some(ArithOp::Sub),
-                        ast::AssignmentOp::MulAssign => Some(ArithOp::Mul),
-                        ast::AssignmentOp::DivAssign => Some(ArithOp::Div),
-                        ast::AssignmentOp::ModAssign => Some(ArithOp::Mod),
-                        ast::AssignmentOp::PowAssign => Some(ArithOp::Pow),
-                        _ => None,
-                    };
-                    match name {
+                    match expr::arith_op(*bop) {
                         Some(aop) => self.dict(Class::Arith(aop), t.clone(), vec![cur, rhs], t, line),
                         None => {
                             self.unify(&Type::Int, &t, line);
-                            let b = match other {
-                                ast::AssignmentOp::BitAndAssign => "int.and",
-                                ast::AssignmentOp::BitOrAssign => "int.or",
-                                ast::AssignmentOp::BitXorAssign => "int.xor",
-                                ast::AssignmentOp::ShlAssign => "int.shl",
-                                ast::AssignmentOp::ShrAssign => "int.shr",
-                                _ => "int.ushr",
-                            };
-                            self.expr(ExprKind::Builtin(b.into(), vec![cur, rhs]), Type::Int)
+                            self.expr(ExprKind::Builtin(expr::int_builtin(*bop).into(), vec![cur, rhs]), Type::Int)
                         }
                     }
                 }

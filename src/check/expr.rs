@@ -37,10 +37,7 @@ impl Checker {
     }
 
     pub(crate) fn check_expr(&mut self, e: &ast::Expression, expected: Option<&Type>) -> Expr {
-        #[cfg(not(target_arch = "wasm32"))]
         let x = stacker::maybe_grow(64 * 1024, 1024 * 1024, || self.check_expr_inner(e, expected));
-        #[cfg(target_arch = "wasm32")]
-        let x = self.check_expr_inner(e, expected);
         match expected {
             Some(t) => self.fit(x, t),
             None => x,
@@ -171,7 +168,7 @@ impl Checker {
             ast::Expression::IfExpr { condition, then_branch, elif_branches, else_branch } => {
                 self.check_if_expr(condition, then_branch, elif_branches, else_branch.as_deref(), expected)
             }
-            ast::Expression::Comprehension { clauses, body } => self.check_comprehension(clauses, body),
+            ast::Expression::Comprehension { pattern, iterables, body } => self.check_comprehension(pattern, iterables, body),
             ast::Expression::TypeCheck { expression, type_expr } => {
                 let t = self.annotation(type_expr, line);
                 let x = self.check_expr(expression, Some(&t));
@@ -562,14 +559,7 @@ impl Checker {
             }
             B::Add | B::Sub | B::Mul | B::Div | B::Mod | B::Pow => {
                 let a = self.check_expr(left, expected);
-                let aop = match op {
-                    B::Add => ArithOp::Add,
-                    B::Sub => ArithOp::Sub,
-                    B::Mul => ArithOp::Mul,
-                    B::Div => ArithOp::Div,
-                    B::Mod => ArithOp::Mod,
-                    _ => ArithOp::Pow,
-                };
+                let aop = arith_op(op).unwrap();
                 // an operator a class defines: a method call, the right operand free
                 if let Type::Data(tid, _) = self.shallow(&a.ty)
                     && !matches!(self.types[tid].kind, DataKind::Builtin)
@@ -583,20 +573,12 @@ impl Checker {
                 let t = a.ty.clone();
                 self.dict(Class::Arith(aop), t.clone(), vec![a, b], t, line)
             }
-            B::TypeOr | B::TypeAnd | B::BitXor | B::Shl | B::Shr | B::UShr => {
+            B::TypeOr | B::BitAnd | B::BitXor | B::Shl | B::Shr | B::UShr => {
                 let a = self.check_expr(left, Some(&Type::Int));
                 let b = self.check_expr(right, Some(&Type::Int));
                 self.unify(&Type::Int, &a.ty, line);
                 self.unify(&Type::Int, &b.ty, line);
-                let name = match op {
-                    B::TypeOr => "int.or",
-                    B::TypeAnd => "int.and",
-                    B::BitXor => "int.xor",
-                    B::Shl => "int.shl",
-                    B::Shr => "int.shr",
-                    _ => "int.ushr",
-                };
-                self.expr(ExprKind::Builtin(name.into(), vec![a, b]), Type::Int)
+                self.expr(ExprKind::Builtin(int_builtin(op).into(), vec![a, b]), Type::Int)
             }
         }
     }
@@ -1323,29 +1305,21 @@ impl Checker {
 
     /// `for x in xs [if cond] do body` as a value: a block that pushes onto
     /// an accumulator.
-    fn check_comprehension(&mut self, clauses: &[ast::CompClause], body: &ast::Expression) -> Expr {
+    fn check_comprehension(&mut self, pattern: &ast::Pattern, iterables: &[ast::Expression], body: &ast::Expression) -> Expr {
         let line = self.line;
         let acc = self.temp("acc");
         let elem = self.fresh();
         let empty = self.expr(ExprKind::List(vec![]), Type::list(elem.clone()));
         let mut stmts = vec![Stmt { kind: StmtKind::Let { name: acc.clone(), value: empty }, line }];
-        // the innermost loop pushes; an if without else filters
+        // the loop pushes; an if without else filters
         let (filter, value): (Option<&ast::Expression>, &ast::Expression) = match body {
             ast::Expression::IfExpr { condition, then_branch, elif_branches, else_branch: None } if elif_branches.is_empty() => (Some(condition), then_branch),
             other => (None, other),
         };
-        let mut loops: Vec<(Vec<Pat>, Vec<Iter>)> = Vec::new();
         self.push_scope();
-        for c in clauses {
-            match c {
-                ast::CompClause::For { pattern, iterables } => {
-                    let (pats, iters) = self.check_for_header(pattern, iterables);
-                    loops.push((pats, iters));
-                }
-            }
-        }
+        let (patterns, iters) = self.check_for_header(pattern, iterables);
         // the body and the filter run on every pass: calls hoisted out of
-        // them go in the innermost loop, not in front of the statement
+        // them go in the loop, not in front of the statement
         let mut inner = Vec::new();
         let (v, mut then) = self.check_lazy(value, Some(&elem));
         self.unify(&elem, &v.ty, line);
@@ -1364,11 +1338,7 @@ impl Checker {
             None => inner.extend(then),
         }
         self.pop_scope();
-        let mut body_block = Block { stmts: inner };
-        for (pats, iters) in loops.into_iter().rev() {
-            body_block = Block { stmts: vec![Stmt { kind: StmtKind::For { patterns: pats, iters, body: body_block }, line }] };
-        }
-        stmts.extend(body_block.stmts);
+        stmts.push(Stmt { kind: StmtKind::For { patterns, iters, body: Block { stmts: inner } }, line });
         let result = self.var(&acc, Type::list(elem.clone()));
         stmts.push(Stmt { kind: StmtKind::Expr(result), line });
         let block = Block { stmts };
@@ -1837,7 +1807,7 @@ impl Checker {
 
     /// `(__g0, ..) => function(__g0, ..)` over `arity` parameters.
     fn forwarding_lambda(&mut self, arity: usize, function: ast::Expression) -> Expr {
-        let params: Vec<ast::Param> = (0..arity).map(|i| ast::Param { is_public: false, is_var: false, pattern: ast::Pattern::Identifier(format!("__g{}", i)), default: None }).collect();
+        let params: Vec<ast::Param> = (0..arity).map(|i| ast::Param::plain(ast::Pattern::Identifier(format!("__g{}", i)), None)).collect();
         let args: Vec<ast::Expression> = (0..arity).map(|i| ast::Expression::Identifier(format!("__g{}", i))).collect();
         let body = ast::Expression::Call { function: Box::new(function), args, named_args: vec![] };
         self.check_lambda(&params, &body)
@@ -1912,6 +1882,33 @@ impl Checker {
     }
 }
 
+/// The arithmetic operator a binary operator is, if it is one.
+pub(crate) fn arith_op(op: ast::BinaryOperator) -> Option<ArithOp> {
+    use ast::BinaryOperator as B;
+    Some(match op {
+        B::Add => ArithOp::Add,
+        B::Sub => ArithOp::Sub,
+        B::Mul => ArithOp::Mul,
+        B::Div => ArithOp::Div,
+        B::Mod => ArithOp::Mod,
+        B::Pow => ArithOp::Pow,
+        _ => return None,
+    })
+}
+
+/// The prelude builtin of a bitwise operator on ints.
+pub(crate) fn int_builtin(op: ast::BinaryOperator) -> &'static str {
+    use ast::BinaryOperator as B;
+    match op {
+        B::TypeOr => "int.or",
+        B::BitAnd => "int.and",
+        B::BitXor => "int.xor",
+        B::Shl => "int.shl",
+        B::Shr => "int.shr",
+        _ => "int.ushr",
+    }
+}
+
 /// Whether an expression mentions `$` outside a nested lambda.
 pub(crate) fn mentions_dollar(e: &ast::Expression) -> bool {
     use ast::Expression as E;
@@ -1931,11 +1928,7 @@ pub(crate) fn mentions_dollar(e: &ast::Expression) -> bool {
         E::IfExpr { condition, then_branch, elif_branches, else_branch } => {
             mentions_dollar(condition) || mentions_dollar(then_branch) || elif_branches.iter().any(|(c, b)| mentions_dollar(c) || mentions_dollar(b)) || else_branch.as_ref().is_some_and(|b| mentions_dollar(b))
         }
-        E::Comprehension { clauses, body } => {
-            clauses.iter().any(|c| match c {
-                ast::CompClause::For { iterables, .. } => iterables.iter().any(mentions_dollar),
-            }) || mentions_dollar(body)
-        }
+        E::Comprehension { iterables, body, .. } => iterables.iter().any(mentions_dollar) || mentions_dollar(body),
         E::TypeCheck { expression, .. } => mentions_dollar(expression),
         E::Range { start, end } => start.as_ref().is_some_and(|s| mentions_dollar(s)) || end.as_ref().is_some_and(|e| mentions_dollar(e)),
         E::Pipeline { left, .. } => mentions_dollar(left),

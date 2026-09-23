@@ -118,12 +118,19 @@ pub struct Param {
     pub default: Option<Expression>,
 }
 
+impl Param {
+    /// A parameter that is neither `public` nor `var`.
+    pub fn plain(pattern: Pattern, default: Option<Expression>) -> Param {
+        Param { is_public: false, is_var: false, pattern, default }
+    }
+}
+
 /// Patterns: the left-hand side of `=`, function parameters, and match arms.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     /// `x` — binds (always matches)
     Identifier(String),
-    /// `pattern: type` — runtime type check
+    /// `pattern: type` — an annotated pattern
     Typed {
         pattern: Box<Pattern>,
         type_expr: Expression,
@@ -154,43 +161,12 @@ pub enum Pattern {
     SpreadInto { object: Expression },
 }
 
-/// Assignment operators
+/// Assignment operators: `=`, or a binary operator applied in place
+/// (`+=`, `<<=`, ...).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AssignmentOp {
     Assign,
-    AddAssign,
-    SubAssign,
-    MulAssign,
-    DivAssign,
-    ModAssign,
-    PowAssign,
-    BitAndAssign,
-    BitOrAssign,
-    BitXorAssign,
-    ShlAssign,
-    ShrAssign,
-    UShrAssign,
-}
-
-impl AssignmentOp {
-    pub fn from_str(s: &str) -> Option<AssignmentOp> {
-        Some(match s {
-            "=" => AssignmentOp::Assign,
-            "+=" => AssignmentOp::AddAssign,
-            "-=" => AssignmentOp::SubAssign,
-            "*=" => AssignmentOp::MulAssign,
-            "/=" => AssignmentOp::DivAssign,
-            "%=" => AssignmentOp::ModAssign,
-            "**=" => AssignmentOp::PowAssign,
-            "&=" => AssignmentOp::BitAndAssign,
-            "|=" => AssignmentOp::BitOrAssign,
-            "^=" => AssignmentOp::BitXorAssign,
-            "<<=" => AssignmentOp::ShlAssign,
-            ">>=" => AssignmentOp::ShrAssign,
-            ">>>=" => AssignmentOp::UShrAssign,
-            _ => return None,
-        })
-    }
+    Compound(BinaryOperator),
 }
 
 /// Expressions in the Fire language
@@ -258,10 +234,12 @@ pub enum Expression {
         elif_branches: Vec<(Expression, Expression)>,
         else_branch: Option<Box<Expression>>,
     },
-    /// `for x in xs do expr` / `while cond do expr` used as an expression;
-    /// produces the list of body values (an `if` body without `else` filters).
+    /// `for x in xs do expr` used as an expression: the list of the body's
+    /// values (an `if` body without `else` filters). The loop target and
+    /// iterables are as in a `for` statement.
     Comprehension {
-        clauses: Vec<CompClause>,
+        pattern: Box<Pattern>,
+        iterables: Vec<Expression>,
         body: Box<Expression>,
     },
 
@@ -281,12 +259,6 @@ pub enum Expression {
         op: PipelineOperator,
         right: Box<Expression>,
     },
-}
-
-/// A clause of a comprehension expression.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CompClause {
-    For { pattern: Pattern, iterables: Vec<Expression> },
 }
 
 /// Parts of an f-string
@@ -349,7 +321,7 @@ pub enum ObjectEntry {
     Spread,
 }
 
-/// Number literal types (kept as source text; converted by the interpreter)
+/// Number literals, kept as source text (the checker converts them)
 #[derive(Debug, Clone, PartialEq)]
 pub enum NumberLiteral {
     Decimal(String),
@@ -364,10 +336,39 @@ pub enum BinaryOperator {
     Add, Sub, Mul, Div, Mod, Pow,
     Eq, Ne, Lt, Le, Gt, Ge,
     And, Or,
-    /// `|` and `&`: a union / intersection in a type, bitwise or / and on ints
-    TypeOr, TypeAnd,
+    /// `|`: a union in a type, bitwise or on ints; `&`: bitwise and
+    TypeOr, BitAnd,
     /// `>>` keeps the sign, `>>>` shifts in zeros
     BitXor, Shl, Shr, UShr,
+}
+
+impl BinaryOperator {
+    pub fn from_symbol(s: &str) -> Option<BinaryOperator> {
+        use BinaryOperator::*;
+        Some(match s {
+            "+" => Add,
+            "-" => Sub,
+            "*" => Mul,
+            "/" => Div,
+            "%" => Mod,
+            "**" => Pow,
+            "==" => Eq,
+            "!=" => Ne,
+            "<" => Lt,
+            "<=" => Le,
+            ">" => Gt,
+            ">=" => Ge,
+            "and" => And,
+            "or" => Or,
+            "|" => TypeOr,
+            "&" => BitAnd,
+            "^" => BitXor,
+            "<<" => Shl,
+            ">>" => Shr,
+            ">>>" => UShr,
+            _ => return None,
+        })
+    }
 }
 
 /// Unary operators
@@ -468,7 +469,7 @@ fn parse_control(pair: Pair<'_>) -> Result<Stmt> {
 
 fn parse_statement(pair: Pair<'_>) -> Result<Stmt> {
     let line = pair.line_col().0;
-    let mut inner = pair.into_inner().peekable();
+    let mut inner = pair.into_inner();
     let first = match inner.next() {
         Some(p) => p,
         None => return Ok(Stmt { node: Statement::Comment(String::new()), line }),
@@ -483,9 +484,7 @@ fn parse_statement(pair: Pair<'_>) -> Result<Stmt> {
         }
         Rule::variable_declaration => parse_variable_declaration(first)?,
         Rule::assignment_stmt => parse_assignment_statement(first)?,
-        Rule::return_stmt => parse_return_statement(first)?,
-        Rule::break_stmt => Statement::Break,
-        Rule::continue_stmt => Statement::Continue,
+        Rule::return_stmt | Rule::break_stmt | Rule::continue_stmt => return parse_control(first),
         Rule::while_stmt => parse_while_statement(first)?,
         Rule::for_stmt => parse_for_statement(first)?,
         Rule::if_stmt => parse_if_statement(first)?,
@@ -493,7 +492,7 @@ fn parse_statement(pair: Pair<'_>) -> Result<Stmt> {
         Rule::guarded_arm => {
             return err(&first, "`pattern if condition => ...` is only valid as a match arm");
         }
-        Rule::method_stmt => parse_def_statement(first)?,
+        Rule::def_stmt => parse_def_statement(first)?,
         Rule::type_stmt => parse_type_statement(first)?,
         Rule::law_stmt => parse_law_statement(first)?,
         Rule::pipeline_expr => Statement::Expression(parse_expression(first)?),
@@ -524,10 +523,16 @@ fn parse_value_or_block<'a>(pairs: impl Iterator<Item = Pair<'a>>) -> Result<Exp
             other => return err(&p, format!("unexpected rule {:?} in value position", other)),
         }
     }
-    match (expr, stmts.is_empty()) {
-        (Some(e), _) => Ok(e),
-        (None, false) => Ok(Expression::Block(stmts)),
-        (None, true) => Ok(Expression::Nothing),
+    Ok(body_or_block(expr, stmts).unwrap_or(Expression::Nothing))
+}
+
+/// A body given as an expression, or else as the statements of a block;
+/// nothing when it has neither.
+fn body_or_block(expr: Option<Expression>, stmts: Vec<Stmt>) -> Option<Expression> {
+    match expr {
+        Some(e) => Some(e),
+        None if !stmts.is_empty() => Some(Expression::Block(stmts)),
+        None => None,
     }
 }
 
@@ -555,38 +560,29 @@ fn parse_variable_declaration(pair: Pair<'_>) -> Result<Statement> {
 }
 
 fn parse_assignment_statement(pair: Pair<'_>) -> Result<Statement> {
-    let mut targets: Vec<(Pattern, AssignmentOp)> = Vec::new();
-    let mut pending: Option<Pattern> = None;
-    let mut rest = Vec::new();
-
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::typecheck if rest.is_empty() => {
-                if let Some(p) = pending.take() {
-                    // shouldn't happen (op always follows target), but be safe
-                    targets.push((p, AssignmentOp::Assign));
-                }
-                pending = Some(expression_to_pattern(parse_expression(inner.clone())?, &inner)?);
-            }
-            Rule::assignment_op => {
-                let op = match AssignmentOp::from_str(inner.as_str()) {
-                    Some(op) => op,
-                    None => return err(&inner, format!("unknown assignment operator '{}'", inner.as_str())),
-                };
-                match pending.take() {
-                    Some(p) => targets.push((p, op)),
-                    None => return err(&inner, "assignment operator without target"),
-                }
-            }
-            _ => rest.push(inner),
-        }
+    // `target op` pairs (`a = b = ...`), then the value
+    let mut inner = pair.into_inner().peekable();
+    let mut targets = Vec::new();
+    while let Some(target) = inner.next_if(|p| p.as_rule() == Rule::typecheck) {
+        let op = expect_rule(&mut inner, Rule::assignment_op)?;
+        targets.push(parse_assignment_target(target, &op)?);
     }
-    if let Some(p) = pending {
-        targets.push((p, AssignmentOp::Assign));
-    }
-
-    let value = parse_value_or_block(rest.into_iter())?;
+    let value = parse_value_or_block(inner)?;
     Ok(Statement::Assignment { targets, value })
+}
+
+/// One `target op` of an assignment: the target as a pattern, and the operator.
+fn parse_assignment_target(target: Pair<'_>, op: &Pair<'_>) -> Result<(Pattern, AssignmentOp)> {
+    let pattern = expression_to_pattern(parse_expression(target.clone())?, &target)?;
+    let op = match op.as_str().strip_suffix('=') {
+        Some("") => AssignmentOp::Assign,
+        Some(symbol) => match BinaryOperator::from_symbol(symbol) {
+            Some(b) => AssignmentOp::Compound(b),
+            None => return err(op, format!("unknown assignment operator '{}'", op.as_str())),
+        },
+        None => return err(op, format!("unknown assignment operator '{}'", op.as_str())),
+    };
+    Ok((pattern, op))
 }
 
 fn parse_return_statement(pair: Pair<'_>) -> Result<Statement> {
@@ -598,44 +594,32 @@ fn parse_return_statement(pair: Pair<'_>) -> Result<Statement> {
     }
 }
 
-/// Collect a `do`-expression or inlined block statements from the tail of a
-/// while/for statement.
-fn parse_loop_tail<'a>(pairs: impl Iterator<Item = Pair<'a>>) -> Result<Vec<Stmt>> {
-    let mut body = Vec::new();
-    let mut saw_do = false;
-
-    for p in pairs {
-        match p.as_rule() {
-            Rule::kw_do => saw_do = true,
-            Rule::assignment_expr | Rule::pipeline_expr_simple if saw_do => {
-                let line = p.line_col().0;
-                body.push(Stmt { node: Statement::Expression(parse_expression(p)?), line });
-            }
-            Rule::break_stmt if saw_do => {
-                body.push(Stmt { node: Statement::Break, line: p.line_col().0 });
-            }
-            Rule::continue_stmt if saw_do => {
-                body.push(Stmt { node: Statement::Continue, line: p.line_col().0 });
-            }
-            Rule::return_stmt if saw_do => {
-                let line = p.line_col().0;
-                body.push(Stmt { node: parse_return_statement(p)?, line });
-            }
-            Rule::statement => body.push(parse_statement(p)?),
-            other => return err(&p, format!("unexpected rule {:?} in loop body", other)),
+/// One item of a `do_or_block` body: the expression or control statement
+/// after `do`, or a statement of the indented block.
+fn parse_body_item(p: Pair<'_>) -> Result<Stmt> {
+    match p.as_rule() {
+        Rule::statement => parse_statement(p),
+        Rule::pipeline_expr_simple => {
+            let line = p.line_col().0;
+            Ok(Stmt { node: Statement::Expression(parse_expression(p)?), line })
         }
+        _ => parse_control(p),
     }
+}
 
-    Ok(body)
+/// The body of a while/for statement or an `else`: a `do` item or the
+/// statements of a block.
+fn parse_body<'a>(pairs: impl Iterator<Item = Pair<'a>>) -> Result<Vec<Stmt>> {
+    pairs.filter(|p| !matches!(p.as_rule(), Rule::kw_do | Rule::kw_else)).map(parse_body_item).collect()
 }
 
 fn parse_while_statement(pair: Pair<'_>) -> Result<Statement> {
-    let mut inner = pair.into_inner().peekable();
-    // kw_while, condition, then tail
+    let mut inner = pair.into_inner();
+    // kw_while, condition, then the body
     expect_rule(&mut inner, Rule::kw_while)?;
     let cond_pair = inner.next().ok_or_else(|| SemanticError::new("while without condition", None))?;
     let condition = parse_expression(cond_pair)?;
-    let body = parse_loop_tail(inner)?;
+    let body = parse_body(inner)?;
     Ok(Statement::While { condition, body })
 }
 
@@ -643,7 +627,7 @@ fn parse_for_statement(pair: Pair<'_>) -> Result<Statement> {
     let mut inner = pair.into_inner().peekable();
     expect_rule(&mut inner, Rule::kw_for)?;
     let (pattern, iterables) = parse_for_header(&mut inner)?;
-    let body = parse_loop_tail(inner)?;
+    let body = parse_body(inner)?;
     Ok(Statement::For { pattern, iterables, body })
 }
 
@@ -703,10 +687,7 @@ fn parse_for_header<'a>(
     Ok((pattern, iterables))
 }
 
-fn expect_rule<'a>(
-    iter: &mut std::iter::Peekable<impl Iterator<Item = Pair<'a>>>,
-    rule: Rule,
-) -> Result<Pair<'a>> {
+fn expect_rule<'a>(iter: &mut impl Iterator<Item = Pair<'a>>, rule: Rule) -> Result<Pair<'a>> {
     match iter.next() {
         Some(p) if p.as_rule() == rule => Ok(p),
         Some(p) => err(&p, format!("expected {:?}, found {:?}", rule, p.as_rule())),
@@ -715,117 +696,24 @@ fn expect_rule<'a>(
 }
 
 fn parse_if_statement(pair: Pair<'_>) -> Result<Statement> {
-    let mut condition = None;
-    let mut body = Vec::new();
-    let mut elif_branches: Vec<(Expression, Vec<Stmt>)> = Vec::new();
+    // `if` and each `elif` open a branch with their condition; the body
+    // items after it belong to that branch
+    let mut branches: Vec<(Expression, Vec<Stmt>)> = Vec::new();
     let mut else_body = None;
-
-    // Sections: 0 = if, 1.. = elif. Keywords are visible, so track the section.
-    enum Section { If, Elif }
-    let mut section = Section::If;
-    let mut saw_do = false;
-    let mut current_cond: Option<Expression> = None;
-    let mut current_body: Vec<Stmt> = Vec::new();
-
     for p in pair.into_inner() {
         match p.as_rule() {
-            Rule::kw_if => {}
-            Rule::kw_elif => {
-                match section {
-                    Section::If => {
-                        body = std::mem::take(&mut current_body);
-                    }
-                    Section::Elif => {
-                        let cond = current_cond.take()
-                            .ok_or_else(|| SemanticError::new("elif without condition", Some(p.line_col())))?;
-                        elif_branches.push((cond, std::mem::take(&mut current_body)));
-                    }
-                }
-                section = Section::Elif;
-                saw_do = false;
-            }
-            Rule::kw_do => saw_do = true,
-            Rule::pipeline_expr_simple => {
-                let line = p.line_col().0;
-                current_body.push(Stmt { node: Statement::Expression(parse_expression(p)?), line });
-            }
-            Rule::assignment_expr => {
-                let needs_cond = match section {
-                    Section::If => condition.is_none(),
-                    Section::Elif => current_cond.is_none(),
-                };
-                if needs_cond && !saw_do {
-                    let cond = parse_expression(p)?;
-                    match section {
-                        Section::If => condition = Some(cond),
-                        Section::Elif => current_cond = Some(cond),
-                    }
-                } else {
-                    let line = p.line_col().0;
-                    current_body.push(Stmt { node: Statement::Expression(parse_expression(p)?), line });
-                }
-            }
-            Rule::break_stmt if saw_do => {
-                current_body.push(Stmt { node: Statement::Break, line: p.line_col().0 });
-            }
-            Rule::continue_stmt if saw_do => {
-                current_body.push(Stmt { node: Statement::Continue, line: p.line_col().0 });
-            }
-            Rule::return_stmt if saw_do => {
-                let line = p.line_col().0;
-                current_body.push(Stmt { node: parse_return_statement(p)?, line });
-            }
-            Rule::statement => current_body.push(parse_statement(p)?),
-            Rule::r#else => {
-                match section {
-                    Section::If => body = std::mem::take(&mut current_body),
-                    Section::Elif => {
-                        let cond = current_cond.take()
-                            .ok_or_else(|| SemanticError::new("elif without condition", Some(p.line_col())))?;
-                        elif_branches.push((cond, std::mem::take(&mut current_body)));
-                    }
-                }
-                section = Section::If; // avoid double-flush below
-                else_body = Some(parse_else_clause(p)?);
-            }
-            other => return err(&p, format!("unexpected rule {:?} in if statement", other)),
+            Rule::kw_if | Rule::kw_elif | Rule::kw_do => {}
+            Rule::assignment_expr => branches.push((parse_expression(p)?, Vec::new())),
+            Rule::r#else => else_body = Some(parse_body(p.into_inner())?),
+            _ => match branches.last_mut() {
+                Some((_, body)) => body.push(parse_body_item(p)?),
+                None => return err(&p, "if without condition"),
+            },
         }
     }
-
-    // Flush the last section.
-    if !current_body.is_empty() || matches!(section, Section::Elif) {
-        match section {
-            Section::If => {
-                if body.is_empty() {
-                    body = current_body;
-                }
-            }
-            Section::Elif => {
-                if let Some(cond) = current_cond.take() {
-                    elif_branches.push((cond, current_body));
-                }
-            }
-        }
-    }
-
-    let condition = condition.ok_or_else(|| SemanticError::new("if without condition", None))?;
-    Ok(Statement::If { condition, body, elif_branches, else_body })
-}
-
-fn parse_else_clause(pair: Pair<'_>) -> Result<Vec<Stmt>> {
-    let mut statements = Vec::new();
-    for p in pair.into_inner() {
-        match p.as_rule() {
-            Rule::kw_else => {}
-            Rule::assignment_expr | Rule::pipeline_expr_simple => {
-                let line = p.line_col().0;
-                statements.push(Stmt { node: Statement::Expression(parse_expression(p)?), line });
-            }
-            Rule::statement => statements.push(parse_statement(p)?),
-            other => return err(&p, format!("unexpected rule {:?} in else clause", other)),
-        }
-    }
-    Ok(statements)
+    let mut branches = branches.into_iter();
+    let (condition, body) = branches.next().ok_or_else(|| SemanticError::new("if without condition", None))?;
+    Ok(Statement::If { condition, body, elif_branches: branches.collect(), else_body })
 }
 
 fn parse_match_statement(pair: Pair<'_>) -> Result<Statement> {
@@ -901,10 +789,8 @@ fn parse_guarded_arm(pair: Pair<'_>) -> Result<MatchArm> {
             }
         }
     }
-    let body = match (body, body_stmts.is_empty()) {
-        (Some(b), _) => b,
-        (None, false) => Expression::Block(body_stmts),
-        (None, true) => return err(&src, "guarded match arm without a body"),
+    let Some(body) = body_or_block(body, body_stmts) else {
+        return err(&src, "guarded match arm without a body");
     };
     match (pattern, guard) {
         (Some(pattern), Some(cond)) => Ok(MatchArm { pattern, guard: Some(cond), body, line }),
@@ -938,13 +824,9 @@ fn parse_type_statement(pair: Pair<'_>) -> Result<Statement> {
                         }
                         let mut fields = Vec::new();
                         for a in args {
-                            match a {
-                                Expression::Identifier(f) => fields.push((f, None)),
-                                Expression::TypeCheck { expression, type_expr } => match *expression {
-                                    Expression::Identifier(f) => fields.push((f, Some(*type_expr))),
-                                    _ => return err(&line, "a constructor field is a name, optionally with a type"),
-                                },
-                                _ => return err(&line, "a constructor field is a name, optionally with a type"),
+                            match name_and_type(a) {
+                                Some(field) => fields.push(field),
+                                None => return err(&line, "a constructor field is a name, optionally with a type"),
                             }
                         }
                         ctors.push(CtorDecl { name: c, fields });
@@ -959,6 +841,19 @@ fn parse_type_statement(pair: Pair<'_>) -> Result<Statement> {
         return err(&src, "a type needs at least one constructor");
     }
     Ok(Statement::TypeDecl { name, ctors })
+}
+
+/// `name` or `name: type`, as a constructor field or a law variable
+/// declares one.
+fn name_and_type(e: Expression) -> Option<(String, Option<Expression>)> {
+    match e {
+        Expression::Identifier(n) => Some((n, None)),
+        Expression::TypeCheck { expression, type_expr } => match *expression {
+            Expression::Identifier(n) => Some((n, Some(*type_expr))),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// `law name`, then optionally `for x: int, t: Tree if cond`, then the claim.
@@ -978,11 +873,10 @@ fn parse_law_statement(pair: Pair<'_>) -> Result<Statement> {
                         Rule::kw_for | Rule::kw_if => {}
                         Rule::typecheck => {
                             let e = parse_expression(q.clone())?;
-                            match e {
-                                Expression::TypeCheck { expression, type_expr } => match *expression {
-                                    Expression::Identifier(v) => vars.push((v, *type_expr)),
-                                    _ => return err(&q, "a law variable is `name: type`"),
-                                },
+                            let typed = matches!(e, Expression::TypeCheck { .. });
+                            match name_and_type(e) {
+                                Some((v, Some(t))) => vars.push((v, t)),
+                                _ if typed => return err(&q, "a law variable is `name: type`"),
                                 _ => return err(&q, "a law variable needs a type: `for x: int`"),
                             }
                         }
@@ -1012,7 +906,7 @@ fn parse_def_statement(pair: Pair<'_>) -> Result<Statement> {
             Rule::kw_unsafe => is_unsafe = true,
             Rule::kw_def => {}
             Rule::identifier if name.is_empty() => name = p.as_str().to_string(),
-            Rule::method_args => params = parse_def_params(p)?,
+            Rule::def_params => params = parse_def_params(p)?,
             Rule::typecheck_op => saw_type_op = true,
             Rule::logic_or if saw_type_op && return_type.is_none() => {
                 return_type = Some(parse_expression(p)?);
@@ -1068,7 +962,7 @@ fn parse_param_from_assignment_expr(pair: Pair<'_>) -> Result<Param> {
 
     let expr = parse_expression(pattern_pair.clone())?;
     let pattern = expression_to_pattern(expr, &pattern_pair)?;
-    Ok(Param { is_public: false, is_var: false, pattern, default })
+    Ok(Param::plain(pattern, default))
 }
 
 // ---------------------------------------------------------------------------
@@ -1077,16 +971,8 @@ fn parse_param_from_assignment_expr(pair: Pair<'_>) -> Result<Param> {
 
 fn parse_expression(pair: Pair<'_>) -> Result<Expression> {
     // The precedence tower costs ~30 native frames per source nesting level;
-    // grow the stack on demand so deeply nested expressions can't overflow it
-    // (same guard as call_function in the interpreter).
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        stacker::maybe_grow(64 * 1024, 1024 * 1024, || parse_expression_inner(pair))
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        parse_expression_inner(pair)
-    }
+    // grow the stack on demand so deeply nested expressions can't overflow it.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || parse_expression_inner(pair))
 }
 
 fn parse_expression_inner(pair: Pair<'_>) -> Result<Expression> {
@@ -1123,51 +1009,37 @@ fn parse_expression_inner(pair: Pair<'_>) -> Result<Expression> {
         }
 
         // --- expression chain ---
-        Rule::pipeline_expr => parse_pipeline(pair),
-        Rule::pipeline_expr_simple => {
-            // A pipeline chain without a continuation block.
+        Rule::pipeline_expr | Rule::pipeline_expr_simple => {
             let open = open_lambdas(&pair);
             let mut links = Vec::new();
-            flatten_pipeline_simple(pair, &mut links)?;
+            flatten_pipeline(pair, &mut None, &mut links)?;
             build_pipeline_in_lambda(links, open)
         }
         Rule::lambda_expr => parse_lambda_expression(pair),
         Rule::loop_expr => parse_loop_expression(pair),
         Rule::if_expr => parse_if_expression(pair),
         Rule::assignment_expr => {
-            let src = pair.clone();
-            let line = src.line_col().0;
-            let mut children: Vec<_> = pair.into_inner().collect();
+            let line = pair.line_col().0;
+            let mut children: Vec<_> = pair.clone().into_inner().collect();
             if children.len() == 1 {
-                parse_expression(children.into_iter().next().unwrap())
-            } else {
-                // An assignment used in expression position (e.g. a lambda body
-                // `() => count += 1`) is sugar for a one-statement block.
-                if children.len() % 2 == 0 {
-                    return err(&src, "malformed assignment expression");
-                }
-                let value_pair = children.pop().unwrap();
-                let value = parse_expression(value_pair)?;
-                let mut targets = Vec::new();
-                let mut iter = children.into_iter();
-                while let (Some(target_pair), Some(op_pair)) = (iter.next(), iter.next()) {
-                    let target = expression_to_pattern(parse_expression(target_pair.clone())?, &target_pair)?;
-                    let op = match AssignmentOp::from_str(op_pair.as_str()) {
-                        Some(op) => op,
-                        None => return err(&op_pair, format!("unknown assignment operator '{}'", op_pair.as_str())),
-                    };
-                    targets.push((target, op));
-                }
-                Ok(Expression::Block(vec![Stmt {
-                    node: Statement::Assignment { targets, value },
-                    line,
-                }]))
+                return parse_expression(children.pop().unwrap());
             }
+            // An assignment used in expression position (e.g. a lambda body
+            // `() => count += 1`) is sugar for a one-statement block.
+            if children.len() % 2 == 0 {
+                return err(&pair, "malformed assignment expression");
+            }
+            let value = parse_expression(children.pop().unwrap())?;
+            let targets = children.chunks(2)
+                .map(|c| parse_assignment_target(c[0].clone(), &c[1]))
+                .collect::<Result<_>>()?;
+            Ok(Expression::Block(vec![Stmt { node: Statement::Assignment { targets, value }, line }]))
         }
-        Rule::logic_or => parse_binary_with_block(pair, Rule::logic_or_block),
-        Rule::logic_or_simple => parse_binary_chain(pair, &[Rule::kw_or]),
-        Rule::logic_and => parse_binary_with_block(pair, Rule::logic_and_block),
-        Rule::logic_and_simple => parse_binary_chain(pair, &[Rule::kw_and]),
+        Rule::logic_or | Rule::logic_or_simple | Rule::logic_and | Rule::logic_and_simple
+        | Rule::comparison | Rule::comparison_simple | Rule::bit_or | Rule::bit_or_simple
+        | Rule::xor | Rule::xor_simple | Rule::bit_and | Rule::bit_and_simple
+        | Rule::shift | Rule::shift_simple | Rule::additive | Rule::additive_simple
+        | Rule::multiplicative | Rule::multiplicative_simple | Rule::power => parse_binary_chain(pair),
         Rule::logic_not => {
             let src = pair.clone();
             let mut negated = false;
@@ -1185,21 +1057,7 @@ fn parse_expression_inner(pair: Pair<'_>) -> Result<Expression> {
                 expr
             })
         }
-        Rule::comparison => parse_binary_with_block(pair, Rule::comparison_block),
-        Rule::comparison_simple => parse_binary_chain(pair, &[Rule::comparison_op]),
-        Rule::type_or => parse_binary_with_block(pair, Rule::type_or_block),
-        Rule::type_or_simple => parse_binary_chain(pair, &[Rule::type_or_op]),
-        Rule::xor => parse_binary_with_block(pair, Rule::xor_block),
-        Rule::xor_simple => parse_binary_chain(pair, &[Rule::xor_op]),
-        Rule::type_and => parse_binary_with_block(pair, Rule::type_and_block),
-        Rule::type_and_simple => parse_binary_chain(pair, &[Rule::type_and_op]),
         Rule::range => parse_range_expression(pair),
-        Rule::shift => parse_binary_with_block(pair, Rule::shift_block),
-        Rule::shift_simple => parse_binary_chain(pair, &[Rule::shift_op]),
-        Rule::additive => parse_binary_with_block(pair, Rule::additive_block),
-        Rule::additive_simple => parse_binary_chain(pair, &[Rule::add_op]),
-        Rule::multiplicative => parse_binary_with_block(pair, Rule::multiplicative_block),
-        Rule::multiplicative_simple => parse_binary_chain(pair, &[Rule::mul_op]),
         Rule::unary => {
             let src = pair.clone();
             let mut op = None;
@@ -1223,24 +1081,6 @@ fn parse_expression_inner(pair: Pair<'_>) -> Result<Expression> {
                 None => operand,
             })
         }
-        Rule::power => {
-            let src = pair.clone();
-            let mut children: Vec<_> = pair.into_inner().collect();
-            match children.len() {
-                1 => parse_expression(children.remove(0)),
-                3 => {
-                    let right = parse_expression(children.pop().unwrap())?;
-                    children.pop(); // power_op
-                    let left = parse_expression(children.remove(0))?;
-                    Ok(Expression::BinaryOp {
-                        left: Box::new(left),
-                        op: BinaryOperator::Pow,
-                        right: Box::new(right),
-                    })
-                }
-                _ => err(&src, "malformed power expression"),
-            }
-        }
         Rule::typecheck => parse_typecheck_expression(pair),
         Rule::call_or_access => {
             let mut inner = pair.into_inner();
@@ -1258,83 +1098,47 @@ fn parse_expression_inner(pair: Pair<'_>) -> Result<Expression> {
     }
 }
 
-/// Generic lowering for left-associative binary chains: children alternate
-/// operand, operator, operand, ...
-fn parse_binary_chain(pair: Pair<'_>, op_rules: &[Rule]) -> Result<Expression> {
-    let src = pair.clone();
-    let children: Vec<_> = pair.into_inner().collect();
-    if children.is_empty() {
-        return err(&src, "empty expression");
-    }
-
-    let mut result = parse_expression(children[0].clone())?;
-    let mut i = 1;
-    while i + 1 < children.len() || (i < children.len() && op_rules.contains(&children[i].as_rule())) {
-        let op_pair = &children[i];
-        if !op_rules.contains(&op_pair.as_rule()) {
-            return err(op_pair, format!("expected operator, found {:?}", op_pair.as_rule()));
-        }
-        let right_pair = children.get(i + 1)
-            .ok_or_else(|| SemanticError::new("operator without right operand", Some(op_pair.line_col())))?;
-        let op = binary_op_from_str(op_pair)?;
-        let right = parse_expression(right_pair.clone())?;
-        result = Expression::BinaryOp { left: Box::new(result), op, right: Box::new(right) };
-        i += 2;
-    }
-    Ok(result)
-}
-
-/// Lowering for `X = { X_simple ~ X_block? }` rules: parse the simple chain,
-/// then fold each continuation-block line onto it.
-fn parse_binary_with_block(pair: Pair<'_>, block_rule: Rule) -> Result<Expression> {
+/// A left-associative chain `a op b op c`. At a level with a continuation
+/// block (`X = { X_simple ~ X_block? }`), each line of the block,
+/// `op ~ X_simple`, continues the chain.
+fn parse_binary_chain(pair: Pair<'_>) -> Result<Expression> {
     let src = pair.clone();
     let mut inner = pair.into_inner();
-    let simple = inner.next().ok_or_else(|| SemanticError::new("empty expression", Some(src.line_col())))?;
-    let mut result = parse_expression(simple)?;
-
-    if let Some(block) = inner.next() {
-        if block.as_rule() != block_rule {
-            return err(&block, format!("expected {:?}, found {:?}", block_rule, block.as_rule()));
+    let first = inner.next().ok_or_else(|| SemanticError::new("empty expression", Some(src.line_col())))?;
+    let mut result = parse_expression(first)?;
+    // (operator, right operand) in order
+    let mut links = Vec::new();
+    while let Some(p) = inner.next() {
+        if is_continuation_block(p.as_rule()) {
+            for line in p.into_inner() {
+                let mut parts = line.into_inner();
+                if let Some(op) = parts.next() {
+                    links.push((op, parts.next()));
+                }
+            }
+        } else {
+            let right = inner.next();
+            links.push((p, right));
         }
-        for line in block.into_inner() {
-            // each line: op ~ X_simple
-            let mut line_inner = line.into_inner();
-            let op_pair = line_inner.next()
-                .ok_or_else(|| SemanticError::new("empty continuation line", None))?;
-            let operand_pair = line_inner.next()
-                .ok_or_else(|| SemanticError::new("continuation line without operand", Some(op_pair.line_col())))?;
-            let op = binary_op_from_str(&op_pair)?;
-            let right = parse_expression(operand_pair)?;
-            result = Expression::BinaryOp { left: Box::new(result), op, right: Box::new(right) };
-        }
+    }
+    for (op_pair, right) in links {
+        let right = right
+            .ok_or_else(|| SemanticError::new("operator without right operand", Some(op_pair.line_col())))?;
+        let op = match BinaryOperator::from_symbol(op_pair.as_str()) {
+            Some(op) => op,
+            None => return err(&op_pair, format!("unknown binary operator '{}'", op_pair.as_str())),
+        };
+        let right = parse_expression(right)?;
+        result = Expression::BinaryOp { left: Box::new(result), op, right: Box::new(right) };
     }
     Ok(result)
 }
 
-fn binary_op_from_str(pair: &Pair<'_>) -> Result<BinaryOperator> {
-    Ok(match pair.as_str().trim() {
-        "+" => BinaryOperator::Add,
-        "-" => BinaryOperator::Sub,
-        "*" => BinaryOperator::Mul,
-        "/" => BinaryOperator::Div,
-        "%" => BinaryOperator::Mod,
-        "**" => BinaryOperator::Pow,
-        "==" => BinaryOperator::Eq,
-        "!=" => BinaryOperator::Ne,
-        "<" => BinaryOperator::Lt,
-        "<=" => BinaryOperator::Le,
-        ">" => BinaryOperator::Gt,
-        ">=" => BinaryOperator::Ge,
-        "and" => BinaryOperator::And,
-        "or" => BinaryOperator::Or,
-        "|" => BinaryOperator::TypeOr,
-        "&" => BinaryOperator::TypeAnd,
-        "^" => BinaryOperator::BitXor,
-        "<<" => BinaryOperator::Shl,
-        ">>" => BinaryOperator::Shr,
-        ">>>" => BinaryOperator::UShr,
-        other => return err(pair, format!("unknown binary operator '{}'", other)),
-    })
+fn is_continuation_block(rule: Rule) -> bool {
+    matches!(rule,
+        Rule::logic_or_block | Rule::logic_and_block | Rule::comparison_block | Rule::bit_or_block
+        | Rule::xor_block | Rule::bit_and_block | Rule::shift_block | Rule::additive_block
+        | Rule::multiplicative_block)
 }
 
 // --- pipelines ---
@@ -1349,30 +1153,23 @@ fn pipeline_op_from_str(pair: &Pair<'_>) -> Result<PipelineOperator> {
     })
 }
 
-/// Flatten the right-nested `pipeline_expr_simple` into (op, expr) links.
-/// The first link has op = None.
-fn flatten_pipeline_simple(
+/// Flatten a pipeline (`pipeline_expr`, the right-nested
+/// `pipeline_expr_simple`, and the lines of a `pipeline_block`) into
+/// (op, expr) links; `op` is the operator waiting for the next stage, and
+/// the first link has none.
+fn flatten_pipeline(
     pair: Pair<'_>,
+    op: &mut Option<PipelineOperator>,
     links: &mut Vec<(Option<PipelineOperator>, Expression)>,
 ) -> Result<()> {
-    let mut op = None;
     for p in pair.into_inner() {
         match p.as_rule() {
-            Rule::lambda_expr => {
-                let expr = parse_expression(p)?;
-                links.push((op.take(), expr));
+            Rule::lambda_expr => links.push((op.take(), parse_expression(p)?)),
+            Rule::pipeline_op => *op = Some(pipeline_op_from_str(&p)?),
+            Rule::pipeline_expr_simple | Rule::pipeline_block | Rule::pipeline_block_line => {
+                flatten_pipeline(p, op, links)?
             }
-            Rule::pipeline_op => op = Some(pipeline_op_from_str(&p)?),
-            Rule::pipeline_expr_simple => {
-                // nested tail: its first link carries the pending op
-                let mut tail = Vec::new();
-                flatten_pipeline_simple(p, &mut tail)?;
-                if let Some((first_op, first_expr)) = tail.first().cloned() {
-                    debug_assert!(first_op.is_none());
-                    links.push((op.take(), first_expr));
-                    links.extend(tail.into_iter().skip(1));
-                }
-            }
+            Rule::comment => {}
             other => return err(&p, format!("unexpected rule {:?} in pipeline", other)),
         }
     }
@@ -1444,40 +1241,6 @@ fn build_pipeline(links: Vec<(Option<PipelineOperator>, Expression)>) -> Result<
     Ok(result)
 }
 
-fn parse_pipeline(pair: Pair<'_>) -> Result<Expression> {
-    let open = open_lambdas(&pair);
-    let mut links = Vec::new();
-    for p in pair.into_inner() {
-        match p.as_rule() {
-            Rule::pipeline_expr_simple => flatten_pipeline_simple(p, &mut links)?,
-            Rule::pipeline_block => {
-                for line in p.into_inner() {
-                    // pipeline_block_line: pipeline_op ~ pipeline_expr_simple
-                    let mut op = None;
-                    for lp in line.into_inner() {
-                        match lp.as_rule() {
-                            Rule::pipeline_op => op = Some(pipeline_op_from_str(&lp)?),
-                            Rule::pipeline_expr_simple => {
-                                let mut tail = Vec::new();
-                                flatten_pipeline_simple(lp, &mut tail)?;
-                                if let Some((first_op, first_expr)) = tail.first().cloned() {
-                                    debug_assert!(first_op.is_none());
-                                    links.push((op.take(), first_expr));
-                                    links.extend(tail.into_iter().skip(1));
-                                }
-                            }
-                            Rule::comment => {}
-                            other => return err(&lp, format!("unexpected rule {:?} in pipeline line", other)),
-                        }
-                    }
-                }
-            }
-            other => return err(&p, format!("unexpected rule {:?} in pipeline", other)),
-        }
-    }
-    build_pipeline_in_lambda(links, open)
-}
-
 // --- lambdas ---
 
 fn parse_lambda_expression(pair: Pair<'_>) -> Result<Expression> {
@@ -1506,10 +1269,8 @@ fn parse_lambda_expression(pair: Pair<'_>) -> Result<Expression> {
         }
     }
 
-    let body = match (body, body_stmts.is_empty()) {
-        (Some(b), _) => b,
-        (None, false) => Expression::Block(body_stmts),
-        (None, true) => return Err(SemanticError::new("lambda without body", None)),
+    let Some(body) = body_or_block(body, body_stmts) else {
+        return Err(SemanticError::new("lambda without body", None));
     };
 
     Ok(Expression::Lambda { params, body: Box::new(body) })
@@ -1519,16 +1280,9 @@ fn parse_lambda_expression(pair: Pair<'_>) -> Result<Expression> {
 /// parameter list: `x`, `x: int`, `()`, `(a, b = 1)`, `{age}`, `[a, b]`, `0`.
 fn params_from_prefix(prefix: &Pair<'_>) -> Result<Vec<Param>> {
     // Walk down the single-child precedence chain to the typecheck level,
-    // where parenthesized parameter lists and plain patterns live.
-    let mut p = prefix.clone();
-    while p.as_rule() != Rule::typecheck {
-        let mut inner = p.clone().into_inner();
-        match (inner.next(), inner.next()) {
-            (Some(only), None) => p = only,
-            _ => break, // multi-child level (e.g. `a = 1`, `-1`): handled below
-        }
-    }
-    if p.as_rule() == Rule::typecheck {
+    // where parenthesized parameter lists and plain patterns live; a level
+    // with several children (`a = 1`, `-1`) is handled below.
+    if let Some(p) = descend_to(prefix, Rule::typecheck) {
         return params_from_typecheck_pair(p);
     }
 
@@ -1537,15 +1291,10 @@ fn params_from_prefix(prefix: &Pair<'_>) -> Result<Vec<Param>> {
     if let Expression::Block(ref stmts) = expr
         && let [Stmt { node: Statement::Assignment { targets, value }, .. }] = stmts.as_slice()
             && let [(pattern, AssignmentOp::Assign)] = targets.as_slice() {
-                return Ok(vec![Param {
-                    is_public: false,
-                    is_var: false,
-                    pattern: pattern.clone(),
-                    default: Some(value.clone()),
-                }]);
+                return Ok(vec![Param::plain(pattern.clone(), Some(value.clone()))]);
             }
     let pattern = expression_to_pattern(expr, prefix)?;
-    Ok(vec![Param { is_public: false, is_var: false, pattern, default: None }])
+    Ok(vec![Param::plain(pattern, None)])
 }
 
 /// A single-token lambda parameter comes in as a `typecheck` pair. It may be:
@@ -1555,91 +1304,69 @@ fn params_from_prefix(prefix: &Pair<'_>) -> Result<Vec<Param>> {
 fn params_from_typecheck_pair(pair: Pair<'_>) -> Result<Vec<Param>> {
     // Check for the parenthesized case: typecheck -> call_or_access ->
     // call_or_access_simple -> paren_expr (with no postfix operations).
-    let mut probe = pair.clone().into_inner();
-    if let (Some(call_or_access), None) = (probe.next(), probe.next()) {
-        let mut inner = call_or_access.clone().into_inner();
-        if let (Some(simple), None) = (inner.next(), inner.next())
-            && simple.as_rule() == Rule::call_or_access_simple {
-                let parts: Vec<_> = simple.into_inner().collect();
-                if parts.len() == 1 && parts[0].as_rule() == Rule::paren_expr {
-                    return parts[0].clone().into_inner()
-                        .map(|elem| param_from_paren_element(elem))
-                        .collect();
-                }
-            }
+    if let Some(simple) = descend_to(&pair, Rule::call_or_access_simple) {
+        let mut parts = simple.into_inner();
+        if let (Some(paren), None) = (parts.next(), parts.next())
+            && paren.as_rule() == Rule::paren_expr
+        {
+            return paren.into_inner().map(param_from_paren_element).collect();
+        }
     }
 
     let expr = parse_expression(pair.clone())?;
     let pattern = expression_to_pattern(expr, &pair)?;
-    Ok(vec![Param { is_public: false, is_var: false, pattern, default: None }])
+    Ok(vec![Param::plain(pattern, None)])
 }
 
 /// One comma-separated element of a parenthesized parameter list. The grammar
 /// parses it as a full expression; parameters live at the assignment level
 /// (`pattern` or `pattern = default`), so descend the single-child chain.
 fn param_from_paren_element(pair: Pair<'_>) -> Result<Param> {
+    match descend_to(&pair, Rule::assignment_expr) {
+        Some(p) => parse_param_from_assignment_expr(p),
+        None => err(&pair, "invalid parameter"),
+    }
+}
+
+/// Walk down a chain of pairs with one child each to the first pair of
+/// `rule`; nothing when a pair on the way has none or several.
+fn descend_to<'a>(pair: &Pair<'a>, rule: Rule) -> Option<Pair<'a>> {
     let mut p = pair.clone();
-    while p.as_rule() != Rule::assignment_expr {
-        let mut inner = p.clone().into_inner();
+    while p.as_rule() != rule {
+        let mut inner = p.into_inner();
         match (inner.next(), inner.next()) {
             (Some(only), None) => p = only,
-            _ => return err(&pair, "invalid parameter"),
+            _ => return None,
         }
     }
-    parse_param_from_assignment_expr(p)
+    Some(p)
 }
 
 // --- loop / if expressions ---
 
 fn parse_loop_expression(pair: Pair<'_>) -> Result<Expression> {
-    let children: Vec<_> = pair.into_inner().collect();
-
-    // Alternative: plain expression_small (assignment_expr) or if_expr only
-    if children.len() == 1 {
-        return parse_expression(children[0].clone());
+    let src = pair.clone();
+    let mut inner = pair.into_inner().peekable();
+    if inner.next_if(|p| p.as_rule() == Rule::kw_for).is_none() {
+        // an if expression or a plain expression
+        let only = inner.next().ok_or_else(|| SemanticError::new("empty expression", Some(src.line_col())))?;
+        return parse_expression(only);
     }
-
-    let mut clauses: Vec<CompClause> = Vec::new();
-    let mut body: Option<Expression> = None;
-    let mut body_stmts: Vec<Stmt> = Vec::new();
-    let mut iter = children.into_iter().peekable();
-
-    while let Some(p) = iter.peek().cloned() {
+    let (pattern, iterables) = parse_for_header(&mut inner)?;
+    let mut body = None;
+    let mut body_stmts = Vec::new();
+    for p in inner {
         match p.as_rule() {
-            Rule::kw_for => {
-                iter.next();
-                let (pattern, iterables) = parse_for_header(&mut iter)?;
-                clauses.push(CompClause::For { pattern, iterables });
-            }
-            Rule::kw_do => {
-                iter.next();
-            }
-            Rule::if_expr => {
-                iter.next();
-                body = Some(parse_if_expression(p)?);
-            }
-            Rule::assignment_expr | Rule::pipeline_expr_simple => {
-                iter.next();
-                body = Some(parse_expression(p)?);
-            }
-            Rule::statement => {
-                iter.next();
-                body_stmts.push(parse_statement(p)?);
-            }
+            Rule::kw_do => {}
+            Rule::if_expr | Rule::pipeline_expr_simple => body = Some(parse_expression(p)?),
+            Rule::statement => body_stmts.push(parse_statement(p)?),
             other => return err(&p, format!("unexpected rule {:?} in loop expression", other)),
         }
     }
-
-    let body = match (body, body_stmts.is_empty()) {
-        (Some(b), _) => b,
-        (None, false) => Expression::Block(body_stmts),
-        (None, true) => return Err(SemanticError::new("loop expression without body", None)),
+    let Some(body) = body_or_block(body, body_stmts) else {
+        return Err(SemanticError::new("loop expression without body", None));
     };
-
-    if clauses.is_empty() {
-        return Ok(body);
-    }
-    Ok(Expression::Comprehension { clauses, body: Box::new(body) })
+    Ok(Expression::Comprehension { pattern: Box::new(pattern), iterables, body: Box::new(body) })
 }
 
 fn parse_if_expression(pair: Pair<'_>) -> Result<Expression> {
@@ -1687,10 +1414,8 @@ fn parse_if_expression(pair: Pair<'_>) -> Result<Expression> {
     }
 
     let condition = condition.ok_or_else(|| SemanticError::new("if expression without condition", None))?;
-    let then_branch = match (then_branch, then_stmts.is_empty()) {
-        (Some(b), _) => b,
-        (None, false) => Expression::Block(then_stmts),
-        (None, true) => return Err(SemanticError::new("if expression without body", None)),
+    let Some(then_branch) = body_or_block(then_branch, then_stmts) else {
+        return Err(SemanticError::new("if expression without body", None));
     };
 
     Ok(Expression::IfExpr {
@@ -2025,7 +1750,7 @@ fn parse_object_literal(pair: Pair<'_>) -> Result<Expression> {
 // ---------------------------------------------------------------------------
 
 /// Operator symbols that objects may define via `` `+` = (other) => ... ``.
-pub const OPERATOR_SYMBOLS: &[&str] = &["+", "-", "*", "/", "%", "**"];
+const OPERATOR_SYMBOLS: &[&str] = &["+", "-", "*", "/", "%", "**"];
 
 pub fn expression_to_pattern(expr: Expression, src: &Pair<'_>) -> Result<Pattern> {
     match expr {
@@ -2043,30 +1768,20 @@ pub fn expression_to_pattern(expr: Expression, src: &Pair<'_>) -> Result<Pattern
         Expression::UnaryOp { op: UnaryOperator::Minus, ref operand }
             if matches!(**operand, Expression::Number(_)) => Ok(Pattern::Literal(expr)),
         Expression::FString(parts) => {
-            if parts.iter().any(|p| matches!(p, FStringPart::Expression(..))) {
-                // every interpolated expression must itself be a bindable pattern
-                let mut checked = Vec::new();
-                for part in parts {
-                    match part {
-                        FStringPart::Text(t) => checked.push(FStringPart::Text(t)),
-                        // format specs are ignored in pattern (reverse) mode
-                        FStringPart::Expression(e, spec) => {
-                            match &e {
-                                Expression::Identifier(_) => checked.push(FStringPart::Expression(e, spec)),
-                                _ => return err(src, "only plain names can be captured in an f-string pattern"),
-                            }
-                        }
+            let mut text = String::new();
+            let mut captures = false;
+            for part in &parts {
+                match part {
+                    FStringPart::Text(t) => text.push_str(t),
+                    // format specs are ignored in pattern (reverse) mode
+                    FStringPart::Expression(Expression::Identifier(_), _) => captures = true,
+                    FStringPart::Expression(..) => {
+                        return err(src, "only plain names can be captured in an f-string pattern");
                     }
                 }
-                Ok(Pattern::FString(checked))
-            } else {
-                // no interpolation: a literal string pattern
-                let text = parts.iter().map(|p| match p {
-                    FStringPart::Text(t) => t.as_str(),
-                    FStringPart::Expression(..) => unreachable!(),
-                }).collect::<String>();
-                Ok(Pattern::Literal(Expression::Str(text)))
             }
+            // without interpolation, a literal string pattern
+            Ok(if captures { Pattern::FString(parts) } else { Pattern::Literal(Expression::Str(text)) })
         }
         Expression::List(entries) => {
             let mut patterns = Vec::new();
@@ -2125,455 +1840,6 @@ pub fn expression_to_pattern(expr: Expression, src: &Pair<'_>) -> Result<Pattern
             Ok(Pattern::Index { object: *object, index: *index })
         }
         Expression::SpreadMember { object } => Ok(Pattern::SpreadInto { object: *object }),
-        other => err(src, format!("invalid assignment target / pattern: {}", other)),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Pretty printing
-// ---------------------------------------------------------------------------
-
-impl fmt::Display for Program {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, stmt) in self.statements.iter().enumerate() {
-            if i > 0 {
-                writeln!(f)?;
-            }
-            write!(f, "{}", stmt.node.to_string_with_indent(0))?;
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Display for Stmt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.node.to_string_with_indent(0))
-    }
-}
-
-impl fmt::Display for Statement {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_string_with_indent(0))
-    }
-}
-
-fn write_body(out: &mut String, body: &[Stmt], indent_level: usize) {
-    for stmt in body {
-        out.push_str(&stmt.node.to_string_with_indent(indent_level));
-        out.push('\n');
-    }
-}
-
-impl Statement {
-    fn to_string_with_indent(&self, level: usize) -> String {
-        let indent = "    ".repeat(level);
-        match self {
-            Statement::Documentation(content) => format!("{}## {}", indent, content),
-            Statement::Comment(content) => format!("{}# {}", indent, content),
-            Statement::Declaration { is_public, is_mutable, pattern, value } => {
-                let mut out = indent.clone();
-                if *is_public { out.push_str("public "); }
-                if *is_mutable { out.push_str("var "); }
-                out.push_str(&format!("{} = {}", pattern, value.to_string_with_indent(level)));
-                out
-            }
-            Statement::Assignment { targets, value } => {
-                let mut out = indent.clone();
-                for (target, op) in targets {
-                    out.push_str(&format!("{} {} ", target, op));
-                }
-                out.push_str(&value.to_string_with_indent(level));
-                out
-            }
-            Statement::Return(Some(expr)) => format!("{}return {}", indent, expr.to_string_with_indent(level)),
-            Statement::Return(None) => format!("{}return", indent),
-            Statement::Break => format!("{}break", indent),
-            Statement::Continue => format!("{}continue", indent),
-            Statement::While { condition, body } => {
-                let mut out = format!("{}while {}\n", indent, condition);
-                write_body(&mut out, body, level + 1);
-                out.trim_end().to_string()
-            }
-            Statement::For { pattern, iterables, body } => {
-                let iters = iterables.iter().map(|e| e.to_string())
-                    .collect::<Vec<_>>().join(", ");
-                let mut out = format!("{}for {} in {}\n", indent, pattern, iters);
-                write_body(&mut out, body, level + 1);
-                out.trim_end().to_string()
-            }
-            Statement::If { condition, body, elif_branches, else_body } => {
-                let mut out = format!("{}if {}\n", indent, condition);
-                write_body(&mut out, body, level + 1);
-                for (cond, stmts) in elif_branches {
-                    out.push_str(&format!("{}elif {}\n", indent, cond));
-                    write_body(&mut out, stmts, level + 1);
-                }
-                if let Some(else_stmts) = else_body {
-                    out.push_str(&format!("{}else\n", indent));
-                    write_body(&mut out, else_stmts, level + 1);
-                }
-                out.trim_end().to_string()
-            }
-            Statement::Match { subject, arms } => {
-                let mut out = format!("{}match {}\n", indent, subject);
-                let arm_indent = "    ".repeat(level + 1);
-                for arm in arms {
-                    let guard = match &arm.guard {
-                        Some(cond) => format!(" if {}", cond),
-                        None => String::new(),
-                    };
-                    out.push_str(&format!("{}{}{} => {}\n", arm_indent, arm.pattern, guard,
-                        arm.body.to_string_with_indent(level + 1)));
-                }
-                out.trim_end().to_string()
-            }
-            Statement::TypeDecl { name, ctors } => {
-                let mut out = format!("{}type {}\n", indent, name);
-                for c in ctors {
-                    out.push_str(&format!("{}    {}", indent, c.name));
-                    if !c.fields.is_empty() {
-                        let fs: Vec<String> = c.fields.iter().map(|(n, t)| match t {
-                            Some(t) => format!("{}: {}", n, t),
-                            None => n.clone(),
-                        }).collect();
-                        out.push_str(&format!("({})", fs.join(", ")));
-                    }
-                    out.push('\n');
-                }
-                out.trim_end().to_string()
-            }
-            Statement::Law { name, vars, hyp, claim } => {
-                let mut out = format!("{}law {}\n", indent, name);
-                if !vars.is_empty() {
-                    let vs: Vec<String> = vars.iter().map(|(n, t)| format!("{}: {}", n, t)).collect();
-                    out.push_str(&format!("{}    for {}", indent, vs.join(", ")));
-                    if let Some(h) = hyp {
-                        out.push_str(&format!(" if {}", h));
-                    }
-                    out.push('\n');
-                }
-                out.push_str(&format!("{}    {}", indent, claim));
-                out
-            }
-            Statement::Def { is_public, is_unsafe, name, params, return_type, body } => {
-                let mut out = indent.clone();
-                if *is_public { out.push_str("public "); }
-                if *is_unsafe { out.push_str("unsafe "); }
-                out.push_str(&format!("def {}(", name));
-                for (i, param) in params.iter().enumerate() {
-                    if i > 0 { out.push_str(", "); }
-                    out.push_str(&param.to_string());
-                }
-                out.push(')');
-                if let Some(ret) = return_type {
-                    out.push_str(&format!(": {}", ret));
-                }
-                out.push('\n');
-                write_body(&mut out, body, level + 1);
-                out.trim_end().to_string()
-            }
-            Statement::Expression(expr) => format!("{}{}", indent, expr.to_string_with_indent(level)),
-        }
-    }
-}
-
-impl fmt::Display for Param {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_public {
-            write!(f, "public ")?;
-        }
-        write!(f, "{}", self.pattern)?;
-        if let Some(default) = &self.default {
-            write!(f, " = {}", default)?;
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Display for Pattern {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Pattern::Identifier(name) => write!(f, "{}", name),
-            Pattern::Typed { pattern, type_expr } => write!(f, "{}: {}", pattern, type_expr),
-            Pattern::Literal(expr) => write!(f, "{}", expr),
-            Pattern::List(items) => {
-                write!(f, "[")?;
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
-                    write!(f, "{}", item)?;
-                }
-                write!(f, "]")
-            }
-            Pattern::Rest(Some(name)) => write!(f, "...{}", name),
-            Pattern::Rest(None) => write!(f, "..."),
-            Pattern::Object(entries) => {
-                write!(f, "{{")?;
-                for (i, (key, pattern)) in entries.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
-                    match pattern {
-                        Pattern::Identifier(name) if name == key => write!(f, "{}", key)?,
-                        _ => write!(f, "{}: {}", key, pattern)?,
-                    }
-                }
-                write!(f, "}}")
-            }
-            Pattern::FString(parts) => {
-                write!(f, "\"")?;
-                for part in parts {
-                    write!(f, "{}", part)?;
-                }
-                write!(f, "\"")
-            }
-            Pattern::Ctor(name, subs) => {
-                write!(f, "{}(", name)?;
-                for (i, item) in subs.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
-                    write!(f, "{}", item)?;
-                }
-                write!(f, ")")
-            }
-            Pattern::Member { object, member } => write!(f, "{}.{}", object, member),
-            Pattern::Index { object, index } => write!(f, "{}[{}]", object, index),
-            Pattern::SpreadInto { object } => write!(f, "{}.{{...}}", object),
-        }
-    }
-}
-
-impl fmt::Display for AssignmentOp {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            AssignmentOp::Assign => "=",
-            AssignmentOp::AddAssign => "+=",
-            AssignmentOp::SubAssign => "-=",
-            AssignmentOp::MulAssign => "*=",
-            AssignmentOp::DivAssign => "/=",
-            AssignmentOp::ModAssign => "%=",
-            AssignmentOp::PowAssign => "**=",
-            AssignmentOp::BitAndAssign => "&=",
-            AssignmentOp::BitOrAssign => "|=",
-            AssignmentOp::BitXorAssign => "^=",
-            AssignmentOp::ShlAssign => "<<=",
-            AssignmentOp::ShrAssign => ">>=",
-            AssignmentOp::UShrAssign => ">>>=",
-        };
-        write!(f, "{}", s)
-    }
-}
-
-impl Expression {
-    fn to_string_with_indent(&self, level: usize) -> String {
-        match self {
-            Expression::Block(stmts) => {
-                let mut out = String::new();
-                for stmt in stmts {
-                    out.push('\n');
-                    out.push_str(&stmt.node.to_string_with_indent(level + 1));
-                }
-                out
-            }
-            Expression::Lambda { params, body } => {
-                let params_str = format_lambda_params(params);
-                format!("{} => {}", params_str, body.to_string_with_indent(level))
-            }
-            Expression::IfExpr { condition, then_branch, elif_branches, else_branch } => {
-                let mut out = format!("if {} do {}", condition, then_branch.to_string_with_indent(level));
-                for (cond, branch) in elif_branches {
-                    out.push_str(&format!(" elif {} do {}", cond, branch.to_string_with_indent(level)));
-                }
-                if let Some(e) = else_branch {
-                    out.push_str(&format!(" else {}", e.to_string_with_indent(level)));
-                }
-                out
-            }
-            _ => format!("{}", self),
-        }
-    }
-}
-
-fn format_lambda_params(params: &[Param]) -> String {
-    if params.len() == 1 && params[0].default.is_none() && !params[0].is_public {
-        format!("{}", params[0].pattern)
-    } else {
-        let inner = params.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
-        format!("({})", inner)
-    }
-}
-
-impl fmt::Display for Expression {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Expression::Identifier(name) => write!(f, "{}", name),
-            Expression::Import(module) => write!(f, "${}", module),
-            Expression::Number(lit) => write!(f, "{}", lit),
-            Expression::Str(content) => write!(f, "'{}'", content),
-            Expression::FString(parts) => {
-                write!(f, "\"")?;
-                for part in parts {
-                    write!(f, "{}", part)?;
-                }
-                write!(f, "\"")
-            }
-            Expression::TString(content) => write!(f, "`{}`", content),
-            Expression::Boolean(value) => write!(f, "{}", value),
-            Expression::Nothing => write!(f, "nothing"),
-            Expression::Ellipsis => write!(f, "..."),
-            Expression::PreviousResult => write!(f, "$"),
-            Expression::List(entries) => {
-                write!(f, "[")?;
-                for (i, entry) in entries.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
-                    write!(f, "{}", entry)?;
-                }
-                write!(f, "]")
-            }
-            Expression::Object(entries) => {
-                write!(f, "{{")?;
-                for (i, entry) in entries.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
-                    write!(f, "{}", entry)?;
-                }
-                write!(f, "}}")
-            }
-            Expression::BinaryOp { left, op, right } => write!(f, "({} {} {})", left, op, right),
-            Expression::UnaryOp { op, operand } => match op {
-                UnaryOperator::Plus => write!(f, "+{}", operand),
-                UnaryOperator::Minus => write!(f, "-{}", operand),
-                UnaryOperator::Not => write!(f, "not {}", operand),
-                UnaryOperator::Spread => write!(f, "...{}", operand),
-            },
-            Expression::Lambda { params, body } => {
-                write!(f, "{} => {}", format_lambda_params(params), body)
-            }
-            Expression::Block(stmts) => {
-                write!(f, "(block:")?;
-                for stmt in stmts {
-                    write!(f, " {};", stmt.node)?;
-                }
-                write!(f, ")")
-            }
-            Expression::Call { function, args, named_args } => {
-                write!(f, "{}(", function)?;
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
-                    write!(f, "{}", arg)?;
-                }
-                for (i, (name, value)) in named_args.iter().enumerate() {
-                    if i > 0 || !args.is_empty() { write!(f, ", ")?; }
-                    write!(f, "{} = {}", name, value)?;
-                }
-                write!(f, ")")
-            }
-            Expression::MemberAccess { object, member } => {
-                write!(f, "{}.{}", object, member)
-            }
-            Expression::SpreadMember { object } => write!(f, "{}.{{...}}", object),
-            Expression::Index { object, index } => write!(f, "{}[{}]", object, index),
-            Expression::IfExpr { condition, then_branch, elif_branches, else_branch } => {
-                write!(f, "if {} do {}", condition, then_branch)?;
-                for (cond, branch) in elif_branches {
-                    write!(f, " elif {} do {}", cond, branch)?;
-                }
-                if let Some(e) = else_branch {
-                    write!(f, " else {}", e)?;
-                }
-                Ok(())
-            }
-            Expression::Comprehension { clauses, body } => {
-                for clause in clauses {
-                    match clause {
-                        CompClause::For { pattern, iterables } => {
-                            let iters = iterables.iter().map(|e| e.to_string())
-                                .collect::<Vec<_>>().join(", ");
-                            write!(f, "for {} in {} ", pattern, iters)?;
-                        }
-                    }
-                }
-                write!(f, "do {}", body)
-            }
-            Expression::TypeCheck { expression, type_expr } => {
-                write!(f, "{}: {}", expression, type_expr)
-            }
-            Expression::Range { start, end } => {
-                match (start, end) {
-                    (Some(s), Some(e)) => write!(f, "{}..{}", s, e),
-                    (Some(s), None) => write!(f, "{}..", s),
-                    (None, Some(e)) => write!(f, "..{}", e),
-                    (None, None) => write!(f, ".."),
-                }
-            }
-            Expression::Pipeline { left, op, right } => {
-                write!(f, "{} {} {}", left, op, right)
-            }
-        }
-    }
-}
-
-impl fmt::Display for PipelineOperator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            PipelineOperator::Pipe => "|>",
-            PipelineOperator::Map => "*>",
-            PipelineOperator::Filter => "?>",
-            PipelineOperator::Handle => "!>",
-        };
-        write!(f, "{}", s)
-    }
-}
-
-impl fmt::Display for NumberLiteral {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            NumberLiteral::Decimal(v) | NumberLiteral::Hex(v) | NumberLiteral::Binary(v)
-            | NumberLiteral::Scientific(v) => v,
-        };
-        write!(f, "{}", s)
-    }
-}
-
-impl fmt::Display for FStringPart {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FStringPart::Text(content) => write!(f, "{}", content),
-            FStringPart::Expression(expr, None) => write!(f, "{{{}}}", expr),
-            FStringPart::Expression(expr, Some(spec)) => write!(f, "{{{}:{}}}", expr, spec),
-        }
-    }
-}
-
-impl fmt::Display for ObjectEntry {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ObjectEntry::KeyValue { key, value } => write!(f, "{}: {}", key, value),
-            ObjectEntry::Shorthand(name) => write!(f, "{}", name),
-            ObjectEntry::Spread => write!(f, "..."),
-        }
-    }
-}
-
-impl fmt::Display for BinaryOperator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            BinaryOperator::Add => "+",
-            BinaryOperator::Sub => "-",
-            BinaryOperator::Mul => "*",
-            BinaryOperator::Div => "/",
-            BinaryOperator::Mod => "%",
-            BinaryOperator::Pow => "**",
-            BinaryOperator::Eq => "==",
-            BinaryOperator::Ne => "!=",
-            BinaryOperator::Lt => "<",
-            BinaryOperator::Le => "<=",
-            BinaryOperator::Gt => ">",
-            BinaryOperator::Ge => ">=",
-            BinaryOperator::And => "and",
-            BinaryOperator::Or => "or",
-            BinaryOperator::TypeOr => "|",
-            BinaryOperator::TypeAnd => "&",
-            BinaryOperator::BitXor => "^",
-            BinaryOperator::Shl => "<<",
-            BinaryOperator::Shr => ">>",
-            BinaryOperator::UShr => ">>>",
-        };
-        write!(f, "{}", s)
+        _ => err(src, format!("invalid assignment target / pattern: {}", src.as_str().trim())),
     }
 }
