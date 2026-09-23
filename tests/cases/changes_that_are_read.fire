@@ -1,0 +1,31 @@
+# a change is allowed when something reads the binding afterwards: the
+# list through its index, a parameter that is returned, a loop's copy that
+# is kept, a `var` that is printed; a change nothing reads is an error
+def Pt(public var x = 0)
+    public var y = 0
+    public shift = () => x += 1
+def add(xs, v)
+    xs.push(v)
+    xs
+def take_last(xs)
+    x = xs.pop()
+    [x, len(xs)]
+extend = ys => ys.push(9)
+var pts = [Pt(1), Pt(2)]
+for i in 0..len(pts)
+    pts[i].x = 10
+var seen = []
+for w in ["a", "b", "a"]
+    if not seen.contains(w) do seen.push(w)
+print(seen, pts, add([1], 2), take_last([1, 2]), extend([1]))
+var c = Pt()
+c.shift()
+c.shift()
+print(c.x)
+def bump_all(ps)
+    var out = []
+    for p in ps
+        p.x += 1
+        out.push(p)
+    out
+print(bump_all([Pt(3)]))

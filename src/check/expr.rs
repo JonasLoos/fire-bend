@@ -663,17 +663,17 @@ impl Checker {
         let mut block = self.check_block_stmts(stmts);
         self.pop_scope();
         let _ = expected;
-        let returns = contains_return(&block.stmts);
-        if returns {
-            self.error(line, "`return` cannot leave an `if`, `match` or block whose value is used: make it a statement that returns on every path");
-        }
-        let ty = match self.block_value(&mut block) {
+        // a branch may leave (`{err} => return ..`): the branches that fall
+        // through make the value, and binding it becomes a statement
+        // (`lift_exits`); anywhere else such a value is reported there
+        let exits = contains_exit(&block.stmts);
+        let ty = match self.block_value(&mut block, exits) {
             Some(t) => t,
+            None if exits && always_exits(&block.stmts) => self.fresh(),
             None => {
                 let n = self.lit(Lit::Nothing);
                 block.stmts.push(Stmt { kind: StmtKind::Expr(n), line });
-                // after the error above, a type nothing else contradicts
-                if returns { self.fresh() } else { Type::Unit }
+                Type::Unit
             }
         };
         self.thread_assignments(block, ty)
@@ -1101,7 +1101,8 @@ impl Checker {
         } else {
             self.var(&tmp, ret.clone())
         };
-        let rebinds = self.rebind_receiver(&recv_expr, new_obj, tid, m);
+        // a method that answers nothing only changes its receiver
+        let rebinds = if returns_value { self.rebind_receiver(&recv_expr, new_obj, tid, m) } else { self.rebind_change(&recv_expr, new_obj) };
         self.pending.extend(rebinds);
         if returns_value {
             let vt = match self.shallow(&ret) {

@@ -1,0 +1,94 @@
+# an arm of a bound match may leave with `return`, `break` or `continue`:
+# the arms that fall through give the value, and the rest of the block
+# runs after them
+def parse_all(xs)
+    var total = 0
+    for x in xs
+        n = match x.parse_int()
+            {ok} => ok
+            {err} => return {err: "bad: {x}"}
+        total += n
+    {ok: total}
+print(parse_all(["1", "2"]), parse_all(["1", "q"]))
+
+def first_even(xs)
+    var found = -1
+    for x in xs
+        v = match x % 2
+            0 => x
+            _ => continue
+        found = v
+        break
+    found
+print(first_even([3, 5, 8, 10]), first_even([1]))
+
+# a `var`, a destructuring, a `T | nothing`, a block value, a `return`
+def classify(s)
+    var r = "none"
+    r = match s
+        "a" => "letter a"
+        "" => return "empty"
+        other => "other {other}"
+    r + "!"
+print(classify("a"), classify(""), classify("zz"))
+
+def nested(xs)
+    [a, b] = match xs
+        [] => return "empty"
+        [x] => [x, x]
+        [x, y, ...rest] =>
+            if x > y do return "down"
+            [x, y]
+    "{a}-{b}"
+print(nested([]), nested([4]), nested([1, 2, 9]), nested([5, 1]))
+
+def lookup(d, k)
+    v = match d[k]
+        nothing => return 0
+        n => n
+    v * 2
+var dd = {}
+dd["a"] = 3
+print(lookup(dd, "a"), lookup(dd, "b"))
+
+def block_value(xs)
+    n =
+        var s = 0
+        for x in xs
+            if x < 0 do return -1
+            s += x
+        s
+    n * 10
+print(block_value([1, 2]), block_value([1, -2]))
+
+def pick(m, fallback)
+    return match m
+        nothing => return fallback
+        v => v * 2
+print(pick(nothing, 7), pick(4, 7))
+
+# arms that leave may change variables first
+def count_ok(xs)
+    var bad = 0
+    var total = 0
+    for x in xs
+        n = match x.parse_int()
+            {ok} => ok
+            {err} =>
+                bad += 1
+                if bad > 1 do return -1
+                continue
+        total += n
+    total
+print(count_ok(["1", "x", "3"]), count_ok(["x", "y", "1"]))
+
+def Counter()
+    public var n = 0
+    public step = (x: int) =>
+        d = match x
+            0 => return 0
+            v => v
+        n += d
+        n
+var c = Counter()
+print(c.step(3), c.step(0), c.step(4))

@@ -119,8 +119,11 @@ fn unsupported_programs_are_rejected_with_a_message() {
         // a lambda cannot change what it captured; the change would be lost
         ("def C()\n    public var n = 0\n    public bump = k =>\n        n += k\n        {ok: n}\nvar c = C()\nr = {ok: 1} |> x => c.bump(x)\n", "a lambda or nested def captures it by value"),
         ("def C()\n    public var n = 0\n    public bump = k => n += k\nvar c = C()\nxs = [1] *> c.bump($)\n", "a lambda or nested def captures it by value"),
-        // a `return` cannot leave a match whose value is bound
-        ("def g(xs: [int])\n    y = match xs\n        [] => 0\n        [a, ...rest] =>\n            if a > 5 do return 1\n            a\n    y\n", "`return` cannot leave"),
+        // a change nothing reads: values are copied, so it reaches nothing
+        ("def P(public var x = 0)\n    public var y = 0\nvar ps = [P(1)]\nfor p in ps\n    p.x = 10\nprint(ps)\n", "the loop's copy of an element"),
+        ("def P(public var x = 0)\n    public var y = 0\ndef bump(q)\n    q.x += 1\nvar r = P()\nbump(r)\nprint(r)\n", "a copy of what the caller passed"),
+        ("def fill(xs)\n    xs.push(1)\nprint(fill([]))\n", "a copy of what the caller passed"),
+        ("var a = [1]\nb = a\nb.push(2)\nprint(a)\n", "nothing reads 'b' afterwards"),
     ];
     for (src, fragment) in cases {
         match fire_bend::compile(src) {

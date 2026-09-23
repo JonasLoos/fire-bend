@@ -18,11 +18,12 @@ mod descent;
 mod effects;
 mod expr;
 mod laws;
+mod lost;
 mod pattern;
 mod solve;
 mod stmt;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast;
 use crate::core::*;
@@ -163,6 +164,11 @@ pub(crate) struct Checker {
     pub solving: bool,
     /// Which classes declare a method of each name.
     pub class_method_names: HashMap<String, Vec<TypeId>>,
+    /// Rebindings whose only effect is a change (`p.x = 1`, `xs.push(v)`):
+    /// def, line and name. One nothing reads afterwards is an error.
+    pub changes: HashSet<(DefId, usize, String)>,
+    /// Whether the rebinding being made is such a change.
+    pub noting_change: bool,
 }
 
 pub use solve::describe_class;
@@ -202,6 +208,8 @@ impl Checker {
             descent_final: Vec::new(),
             solving: false,
             class_method_names: HashMap::new(),
+            changes: HashSet::new(),
+            noting_change: false,
         };
         ck.builtin_types();
         ck
@@ -553,6 +561,7 @@ impl Checker {
         self.infer_effects();
         self.check_descent();
         self.check_law_subjects();
+        self.check_lost_changes();
     }
 
     /// Declare the defs of a block in the current scope so they can be
@@ -773,10 +782,14 @@ impl Checker {
     /// or `match` statement whose branches all end in a value (rewritten
     /// into an expression). Answers the value's type, or None when the
     /// block ends otherwise (a return, a loop, a statement without value).
-    pub(crate) fn block_value(&mut self, body: &mut Block) -> Option<Type> {
+    /// With `exits`, a branch that always leaves (`return`, `break`,
+    /// `continue`) has no value to give, and the others make the value; the
+    /// binding of such a value becomes a statement (`lift_exits`).
+    pub(crate) fn block_value(&mut self, body: &mut Block, exits: bool) -> Option<Type> {
         // a trailing `if` or `match` with an early `return` stays a statement:
         // as an expression its returns would no longer leave the def
-        if matches!(body.stmts.last(), Some(Stmt { kind: StmtKind::If { .. } | StmtKind::Match { .. }, .. }))
+        if !exits
+            && matches!(body.stmts.last(), Some(Stmt { kind: StmtKind::If { .. } | StmtKind::Match { .. }, .. }))
             && contains_return(std::slice::from_ref(body.stmts.last().unwrap())) {
             return None;
         }
@@ -784,8 +797,26 @@ impl Checker {
             Some(Stmt { kind: StmtKind::Expr(e), .. }) => Some(e.ty.clone()),
             Some(Stmt { kind: StmtKind::If { else_, .. }, .. }) if !else_.stmts.is_empty() => {
                 let Some(Stmt { kind: StmtKind::If { cond, mut then, mut else_ }, line }) = body.stmts.pop() else { unreachable!() };
-                let (t1, t2) = (self.block_value(&mut then), self.block_value(&mut else_));
+                let (leave1, leave2) = (exits && always_exits(&then.stmts), exits && always_exits(&else_.stmts));
+                let t1 = if leave1 { None } else { self.block_value(&mut then, exits) };
+                let t2 = if leave2 { None } else { self.block_value(&mut else_, exits) };
+                // a branch that leaves takes the other's type
+                let (t1, t2) = match (t1, t2) {
+                    (None, Some(b)) if leave1 => (Some(b.clone()), Some(b)),
+                    (Some(a), None) if leave2 => (Some(a.clone()), Some(a)),
+                    (None, None) if leave1 && leave2 => {
+                        let t = self.fresh();
+                        (Some(t.clone()), Some(t))
+                    }
+                    other => other,
+                };
                 match (t1, t2) {
+                    (Some(a), Some(b)) if leave1 || leave2 => {
+                        let ta = Expr { kind: ExprKind::Block(then), ty: a.clone(), line };
+                        let tb = Expr { kind: ExprKind::Block(else_), ty: b, line };
+                        body.stmts.push(Stmt { kind: StmtKind::Expr(Expr { kind: ExprKind::If(Box::new(cond), Box::new(ta), Box::new(tb)), ty: a.clone(), line }), line });
+                        Some(a)
+                    }
                     (Some(a), Some(b)) => {
                         let ta = Expr { kind: ExprKind::Block(then), ty: a, line };
                         let tb = Expr { kind: ExprKind::Block(else_), ty: b, line };
@@ -804,10 +835,12 @@ impl Checker {
                 let Some(Stmt { kind: StmtKind::Match { subject, mut arms }, line }) = body.stmts.pop() else { unreachable!() };
                 let mut tys = Vec::new();
                 let mut ok = true;
-                for a in arms.iter_mut() {
+                // an arm that always leaves has no value to give
+                let leaves: Vec<bool> = arms.iter().map(|a| exits && matches!(&a.body.kind, ExprKind::Block(b) if always_exits(&b.stmts))).collect();
+                for (a, _) in arms.iter_mut().zip(&leaves).filter(|(_, l)| !**l) {
                     let t = match &mut a.body.kind {
                         ExprKind::Block(b) => {
-                            let t = self.block_value(b);
+                            let t = self.block_value(b, exits);
                             if let Some(t) = &t {
                                 a.body.ty = t.clone();
                             }
@@ -820,19 +853,19 @@ impl Checker {
                         None => ok = false,
                     }
                 }
-                if ok && !tys.is_empty() {
+                if ok && (!tys.is_empty() || exits) {
                     // `nothing` arms lift the others into a maybe
-                    let mut ty = tys[0].clone();
-                    let nothing_arm = arms.iter().any(|a| expr::is_nothing_value(&a.body));
-                    let value_arm = arms.iter().any(|a| !matches!(self.shallow(&a.body.ty), Type::Unit));
+                    let mut ty = tys.first().cloned().unwrap_or_else(|| self.fresh());
+                    let nothing_arm = arms.iter().zip(&leaves).any(|(a, l)| !l && expr::is_nothing_value(&a.body));
+                    let value_arm = arms.iter().zip(&leaves).any(|(a, l)| !l && !matches!(self.shallow(&a.body.ty), Type::Unit));
                     if nothing_arm && value_arm {
-                        let inner = arms.iter().find(|a| !matches!(self.shallow(&a.body.ty), Type::Unit)).map(|a| a.body.ty.clone()).unwrap();
+                        let inner = arms.iter().zip(&leaves).find(|(a, l)| !**l && !matches!(self.shallow(&a.body.ty), Type::Unit)).map(|(a, _)| a.body.ty.clone()).unwrap();
                         let inner = match self.shallow(&inner) {
                             Type::Data(MAYBE, args) => args[0].clone(),
                             _ => inner,
                         };
                         ty = Type::maybe(inner.clone());
-                        for a in arms.iter_mut() {
+                        for (a, _) in arms.iter_mut().zip(&leaves).filter(|(_, l)| !**l) {
                             if expr::is_nothing_value(&a.body) {
                                 let b = std::mem::replace(&mut a.body, Expr { kind: ExprKind::Lit(Lit::Nothing), ty: Type::Unit, line: a.line });
                                 a.body = self.absent(b, &ty);
@@ -842,8 +875,12 @@ impl Checker {
                             }
                         }
                     }
-                    for a in &arms {
-                        self.unify(&ty, &a.body.ty, a.line);
+                    for (a, l) in arms.iter_mut().zip(&leaves) {
+                        if *l {
+                            a.body.ty = ty.clone();
+                        } else {
+                            self.unify(&ty, &a.body.ty, a.line);
+                        }
                     }
                     body.stmts.push(Stmt { kind: StmtKind::Expr(Expr { kind: ExprKind::Match(Box::new(subject), arms), ty: ty.clone(), line }), line });
                     Some(ty)
@@ -876,7 +913,7 @@ impl Checker {
             }
             _ => false,
         };
-        if assigns || self.block_value(body).is_none() {
+        if assigns || self.block_value(body, false).is_none() {
             // a trailing `if`/`match` kept as a statement: its branch values
             // are the def's answers
             tail_returns(body);
@@ -1155,6 +1192,60 @@ pub(crate) fn contains_return(stmts: &[Stmt]) -> bool {
         StmtKind::For { body, .. } | StmtKind::While { body, .. } => contains_return(&body.stmts),
         _ => false,
     })
+}
+
+/// Does control leave a block by `return`, `break` or `continue`? A
+/// `break` or `continue` inside a loop of the block stays in that loop.
+pub(crate) fn contains_exit(stmts: &[Stmt]) -> bool {
+    stmts_exit(stmts, false)
+}
+
+/// Whether evaluating a value may leave by `return`, `break` or `continue`
+/// (through a block inside it).
+pub(crate) fn value_exits(e: &Expr) -> bool {
+    expr_exits(e, false)
+}
+
+fn stmts_exit(stmts: &[Stmt], in_loop: bool) -> bool {
+    stmts.iter().any(|s| match &s.kind {
+        StmtKind::Return(_) => true,
+        StmtKind::Break | StmtKind::Continue => !in_loop,
+        StmtKind::Let { value, .. } | StmtKind::Assign { value, .. } | StmtKind::Expr(value) => expr_exits(value, in_loop),
+        StmtKind::If { cond, then, else_ } => expr_exits(cond, in_loop) || stmts_exit(&then.stmts, in_loop) || stmts_exit(&else_.stmts, in_loop),
+        StmtKind::Match { subject, arms } => expr_exits(subject, in_loop) || arms.iter().any(|a| a.guard.as_ref().is_some_and(|g| expr_exits(g, in_loop)) || expr_exits(&a.body, in_loop)),
+        StmtKind::For { iters, body, .. } => iters.iter().any(|it| match it {
+            Iter::Items(e, _) | Iter::Counter(e) => expr_exits(e, in_loop),
+        }) || stmts_exit(&body.stmts, true),
+        StmtKind::While { cond, body } => expr_exits(cond, true) || stmts_exit(&body.stmts, true),
+        StmtKind::Bind { .. } => false,
+    })
+}
+
+fn expr_exits(e: &Expr, in_loop: bool) -> bool {
+    let sub = |x: &Expr| expr_exits(x, in_loop);
+    match &e.kind {
+        ExprKind::Block(b) => stmts_exit(&b.stmts, in_loop),
+        // a lambda is a def of its own
+        ExprKind::Var(_) | ExprKind::Lit(_) | ExprKind::EmptyMap | ExprKind::Lambda(_) | ExprKind::DefRef { .. } | ExprKind::SelfValue(_) => false,
+        ExprKind::List(items) | ExprKind::Con(_, _, items) | ExprKind::Builtin(_, items) => items.iter().any(sub),
+        ExprKind::Call { args, .. } | ExprKind::Dict { args, .. } => args.iter().any(sub),
+        ExprKind::Field(o, _, _) | ExprKind::Not(o) | ExprKind::Abort(o) => sub(o),
+        ExprKind::SetField(a, _, _, b) | ExprKind::And(a, b) | ExprKind::Or(a, b) => sub(a) || sub(b),
+        ExprKind::CallClosure(f, args) => sub(f) || args.iter().any(sub),
+        ExprKind::If(c, t, el) => sub(c) || sub(t) || sub(el),
+        ExprKind::Match(s, arms) => sub(s) || arms.iter().any(|a| a.guard.as_ref().is_some_and(sub) || sub(&a.body)),
+        ExprKind::FString(parts) => parts.iter().any(|p| matches!(p, FPart::Expr(x, _) if sub(x))),
+    }
+}
+
+/// Does a block always leave by `return`, `break` or `continue`?
+pub(crate) fn always_exits(stmts: &[Stmt]) -> bool {
+    match stmts.last().map(|s| &s.kind) {
+        Some(StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue) => true,
+        Some(StmtKind::If { then, else_, .. }) => !else_.stmts.is_empty() && always_exits(&then.stmts) && always_exits(&else_.stmts),
+        Some(StmtKind::Match { arms, .. }) => !arms.is_empty() && arms.iter().all(|a| matches!(&a.body.kind, ExprKind::Block(b) if always_exits(&b.stmts))),
+        _ => false,
+    }
 }
 
 /// Turn the value a block ends on into a `return`, through a trailing

@@ -13,13 +13,47 @@ impl Checker {
             let checked = self.check_stmt(s);
             // mutating calls hoisted out of the statement's expressions come first
             let pending = std::mem::take(&mut self.pending);
-            out.extend(pending);
-            for st in checked {
-                flatten_into(st, &mut out);
+            for st in pending.into_iter().chain(checked) {
+                for st in self.lift_exits(st) {
+                    flatten_into(st, &mut out);
+                }
             }
             self.solve_pending();
         }
         Block { stmts: out }
+    }
+
+    /// `n = match x` with an arm that leaves (`{err} => return e`) becomes
+    /// the statement `match x` whose other arms bind `n`; the lowering moves
+    /// the rest of the block into them. A value that may leave anywhere
+    /// else (inside a call, an operator) is an error.
+    fn lift_exits(&mut self, s: Stmt) -> Vec<Stmt> {
+        let line = s.line;
+        let out = match s.kind {
+            StmtKind::Let { name, value } if value_exits(&value) => exit_binding(&Sink::Let(name), value, line),
+            StmtKind::Assign { name, value } if value_exits(&value) => exit_binding(&Sink::Assign(name), value, line),
+            StmtKind::Return(value) if value_exits(&value) => exit_binding(&Sink::Return, value, line),
+            kind => vec![Stmt { kind, line }],
+        };
+        for st in &out {
+            let exprs: Vec<&Expr> = match &st.kind {
+                StmtKind::Let { value, .. } | StmtKind::Assign { value, .. } | StmtKind::Expr(value) | StmtKind::Return(value) => vec![value],
+                StmtKind::If { cond, .. } => vec![cond],
+                StmtKind::Match { subject, .. } => vec![subject],
+                StmtKind::While { cond, .. } => vec![cond],
+                StmtKind::For { iters, .. } => iters.iter().map(|it| match it {
+                    Iter::Items(e, _) | Iter::Counter(e) => e,
+                }).collect(),
+                StmtKind::Break | StmtKind::Continue | StmtKind::Bind { .. } => vec![],
+            };
+            // an expression statement that is a block is its statements
+            let in_value = |e: &Expr| if let (StmtKind::Expr(_), ExprKind::Block(b)) = (&st.kind, &e.kind) { b.stmts.iter().any(stmt_value_exits) } else { value_exits(e) };
+            if exprs.into_iter().any(in_value) {
+                self.error(line, "`return`, `break` and `continue` can leave a `match` or `if` whose value is bound (`n = match x`), not one used inside a larger expression: bind the value first");
+                break;
+            }
+        }
+        out
     }
 
     fn stmt(&mut self, kind: StmtKind) -> Stmt {
@@ -173,7 +207,7 @@ impl Checker {
                             && let ExprKind::Dict { id, args } = &x.kind
                                 && matches!(&self.store.constraints[*id].class, Class::Method(..)) && self.is_path(&args[0]) {
                                     let recv = args[0].clone();
-                                    return self.rebind_path(&recv, x);
+                                    return self.rebind_change(&recv, x);
                                 }
                 vec![self.stmt(StmtKind::Expr(x))]
             }
@@ -477,7 +511,7 @@ impl Checker {
                 let o = self.check_expr(object, None);
                 let o = self.unwrap_index(o);
                 let updated = self.set_field_of(o.clone(), member, value);
-                self.rebind_path(&o, updated)
+                self.rebind_change(&o, updated)
             }
             ast::Pattern::Index { object, index } => {
                 let o = self.check_expr(object, None);
@@ -490,7 +524,7 @@ impl Checker {
                     _ => value,
                 };
                 let updated = self.dict(Class::IndexSet(i.ty.clone(), value.ty.clone()), subject.clone(), vec![o.clone(), i, value], subject, line);
-                self.rebind_path(&o, updated)
+                self.rebind_change(&o, updated)
             }
             ast::Pattern::List(_) | ast::Pattern::Object(_) => self.bind_pattern(target, value, false),
             _ => {
@@ -533,6 +567,15 @@ impl Checker {
         }
     }
 
+    /// A rebinding whose only effect is the change: nothing may read the
+    /// value it computes but the binding (see `lost.rs`).
+    pub(crate) fn rebind_change(&mut self, path: &Expr, new_value: Expr) -> Vec<Stmt> {
+        let was = std::mem::replace(&mut self.noting_change, true);
+        let out = self.rebind_path(path, new_value);
+        self.noting_change = was;
+        out
+    }
+
     /// Rebind the variable at the root of an expression path (`x`,
     /// `x.a`, `x[i].b`, ...) to a rebuilt value. Any binding may be rebound
     /// by a mutation of its contents; a temporary is dropped.
@@ -550,6 +593,10 @@ impl Checker {
                             self.error(line, format!("cannot modify '{}' here: a lambda or nested def captures it by value", name));
                         }
                         self.unify(&ty, &new_value.ty, line);
+                        if self.noting_change {
+                            let d = self.current_def();
+                            self.changes.insert((d, line, name.clone()));
+                        }
                         vec![self.stmt(StmtKind::Assign { name, value: new_value })]
                     }
                     Some(b @ Binding::Member { .. }) => self.assign_member(&b, new_value),
@@ -660,6 +707,61 @@ impl Checker {
             }
         };
         (pats, iters)
+    }
+}
+
+/// Whether a statement's own expressions (not its blocks) may leave.
+fn stmt_value_exits(s: &Stmt) -> bool {
+    match &s.kind {
+        StmtKind::Let { value, .. } | StmtKind::Assign { value, .. } | StmtKind::Expr(value) | StmtKind::Return(value) => value_exits(value),
+        StmtKind::If { cond, .. } | StmtKind::While { cond, .. } => value_exits(cond),
+        StmtKind::Match { subject, .. } => value_exits(subject),
+        _ => false,
+    }
+}
+
+/// Where a value some branches of which leave goes.
+enum Sink {
+    Let(String),
+    Assign(String),
+    Return,
+}
+
+/// Bind (or return) a value some branches of which leave: the branches
+/// that fall through bind it, the others keep their exits.
+fn exit_binding(sink: &Sink, v: Expr, line: usize) -> Vec<Stmt> {
+    let bind = |v: Expr| {
+        let kind = match sink {
+            Sink::Let(name) => StmtKind::Let { name: name.clone(), value: v },
+            Sink::Assign(name) => StmtKind::Assign { name: name.clone(), value: v },
+            Sink::Return => StmtKind::Return(v),
+        };
+        vec![Stmt { kind, line }]
+    };
+    let branch = |v: Expr| -> Block {
+        match v.kind {
+            ExprKind::Block(b) if always_exits(&b.stmts) => b,
+            kind => Block { stmts: exit_binding(sink, Expr { kind, ty: v.ty, line: v.line }, line) },
+        }
+    };
+    match v.kind {
+        ExprKind::Block(b) if contains_exit(&b.stmts) => {
+            let mut stmts = b.stmts;
+            match stmts.pop() {
+                Some(Stmt { kind: StmtKind::Expr(last), .. }) => stmts.extend(exit_binding(sink, last, line)),
+                Some(other) => stmts.push(other),
+                None => {}
+            }
+            stmts
+        }
+        ExprKind::If(c, t, e) if value_exits(&t) || value_exits(&e) => {
+            vec![Stmt { kind: StmtKind::If { cond: *c, then: branch(*t), else_: branch(*e) }, line }]
+        }
+        ExprKind::Match(s, arms) if arms.iter().any(|a| value_exits(&a.body)) => {
+            let arms = arms.into_iter().map(|a| Arm { body: Expr { kind: ExprKind::Block(branch(a.body)), ty: Type::Unit, line: a.line }, ..a }).collect();
+            vec![Stmt { kind: StmtKind::Match { subject: *s, arms }, line }]
+        }
+        kind => bind(Expr { kind, ty: v.ty, line: v.line }),
     }
 }
 
