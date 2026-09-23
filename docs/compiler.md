@@ -61,7 +61,10 @@ keyword arguments and defaults, f-strings (with numbers aligned right),
 returns the rebuilt object, and its value when it has one), `self` and
 members as locals, adoption, destructuring, and returns: the values a body
 returns are joined, and `nothing` on some paths lifts the others into
-`T | nothing`.
+`T | nothing`. A bound value with a branch that leaves (`n = match x` with
+`{err} => return e`, or `continue`) becomes a statement `match` whose other
+branches bind `n` (`lift_exits`); the lowering moves the rest of the block
+into them, as for any branch that leaves.
 
 **Effects** (IO, abort) are a fixpoint over calls, closure sets and
 constraints solved to methods, each constraint attributed to the def whose
@@ -80,8 +83,22 @@ termination argument:
 * otherwise an error naming the rule, unless the def is `unsafe def`.
 
 A self-call inside a loop body is an error (the body is a def of its own),
-as is a cycle of calls between defs. `while` outside an unsafe def is an
-error, and so is a `for` over an open range alone.
+as is a def passing itself as a function value (`kids *> depth` inside
+`depth`), and a cycle of calls between defs. `while` outside an unsafe def
+is an error, and so is a `for` over an open range alone.
+
+**Coverage** (`core.rs`) is the usefulness check over a matrix of pattern
+rows: a list pattern is nil and cons cells, `bool` and `nothing` are
+constructors, other literals never cover their type, and an arm with a
+guard may always decline. A match that misses a value makes its def
+fallible, and the check names a value it misses for `fire --check`.
+
+**Lost changes** (`lost.rs`). A statement whose only effect is to change a
+binding (`p.x = v`, `xs[i] = v`, `xs.push(v)`, a method answering nothing)
+is noted where it rebinds the binding. A backward liveness walk over each
+body (loops to a fixpoint, their variables new each turn) reports such a
+change when nothing reads the binding afterwards: a loop's copy of an
+element, a parameter, or any other copy.
 
 **Laws** are checked in a frame of their own inside the program's scope:
 the variables are declared with their annotated types, the hypothesis and
@@ -147,8 +164,14 @@ constructor. Rows of patterns compile column by column: constructors
 (including list shapes, `T | nothing` and results) split on the
 constructor, literals become a chain of equality picks with every row that
 accepts the literal, guards are tested at the leaf with the remaining rows
-as the fallback. An empty set of rows aborts in a fallible def; in a pure
-def the checker proved it unreachable, and any value of the type fills it.
+as the fallback. An empty set of rows aborts in a fallible def (with the
+match's line); in a pure def the checker proved it unreachable, and any
+value of the type fills it.
+
+**Failures.** Where an operation can fail by itself (an index, a
+conversion, an unwrap, `assert`, `error`), its failure is wrapped by
+`F.at("line N: ", r)` or its message is prefixed, so the message names the
+line it happened at. A failure passing through calls is not wrapped again.
 
 **Loops.** The body of a `for` becomes a def
 `E -> S -> A -> F.Ctl<S, R>`: the environment (what it reads), the state
@@ -162,7 +185,10 @@ zipped into pairs first; an open range becomes `enumerate_from`.
 **Fuel.** A fuel def matches `fuel` first: `0n` answers a value of the
 result type (built in place; a generic part comes from a parameter of that
 type), `1n+fuel_` runs the body, whose self-calls pass `fuel_`. Outside
-callers pass `F.i32.fuel(n)`, which is `n + 1`.
+callers pass `F.i32.fuel(n)`, which is `n + 1`. Used as a value (`xs *>
+fact`, stored in a list), a fuel def is called through a forwarder
+`fact.F.value(n)` that starts the fuel: a template's code is inlined where
+it is called, so it may use each argument only once.
 
 **Dictionaries.** At a call, each dictionary of the callee is a closed
 term: the caller's own dictionary parameter when the subject stayed
@@ -173,8 +199,10 @@ accessor path. Strings inside containers show quoted (`['a']`,
 
 **Laws** are printed as Bend laws (`for` parameters, hypotheses as
 equality parameters, the claim as an equation), with `def name(): {==}` for
-a closed law and a case split for a finite one. A runnable image carries
-only these; `fire --check`'s image also carries the open ones.
+a closed law and a case split for a finite one. A type parameter a law
+leaves open is `int` (`for t: Tree` is `Tree<U32>`), as `fire --test`
+samples it. A runnable image carries only these; `fire --check`'s image
+also carries the open ones.
 
 **Affinity.** After lowering, every def is marked: parameters, lets, binds,
 pattern fields and lambda parameters used more than once get `+`,
@@ -192,7 +220,8 @@ counting a use in each thunk and each argument handed to a `+` binder.
 | `fire p.fire --total` | reject a program with any `unsafe def` (combines with the others) |
 
 A law Bend rejects is reported as the law, with the two sides Bend
-computed.
+computed; a failing def of the proof file is reported as that law's proof.
+Once Bend rejects the image, no law is reported proven.
 
 ## Testing
 

@@ -29,13 +29,15 @@ n = nothing       # the unit value
 ```
 
 An interpolation takes an optional format spec: `{value:[fill][align][width][.precision f]}`
-with align `<` `>` `^`. Numbers pad on the left, text on the right:
+with align `<` `>` `^`. Numbers pad on the left, text on the right, and a
+`0` before the width pads a number with zeros after its sign:
 
 ```fire
 "{price:.2f} €"       # 3.50 €
 "[{total:8.2f}]"      # [    3.50]
 "{name:<8}|{n:>5}"    # columns
 "{'ada':*^9}"         # ***ada***
+"{h:02}:{m:02}"       # 09:05, and -5 is -05
 "{cents / 100:>6}"    # any expression before the spec
 ```
 
@@ -188,6 +190,12 @@ items.push(v)`); a lambda that pushes onto its *own* parameter answers the
 extended list instead, since nothing outside could see the rebinding.
 Writes go through any chain of indexes and members: `rows[r][c] = v`,
 `d[k].push(v)`, `xs[i].name = v`.
+
+A change nothing reads is an error, since it reaches nothing: changing a
+loop's copy of an element (`for p in pts` with `p.x = 0` in the body), a
+parameter that the def neither returns nor reads again, or any binding
+that is not read after the change. Change the list through its index
+(`pts[i].x = 0`), return the changed value, or make the def a method.
 
 Printing an object shows its public data members in declaration order;
 `==` compares them structurally. Methods are neither printed nor compared.
@@ -371,11 +379,22 @@ matches positionally (`Node(l, v, r) =>`, `Leaf =>`, §7.1). A match on a
 (`{r, c} =>`, `[a, b] =>`, `Leaf =>`, `0 =>`); on a result it uses `{ok}`
 and `{err}` arms. A match whose arms cover every case is exhaustive and
 cannot fail; one that does not is fallible (§11), and `fire --check` lists
-it. In statement position the arms need not share a type; used as a value,
+it with a value no arm accepts (`line 18: no arm accepts Node(Node(_, _, _), _, _)`).
+Coverage looks through every field of a constructor and every cell of a
+list pattern. In statement position the arms need not share a type; used as a value,
 arms answering `nothing` and arms answering a `T` make a `T | nothing`.
 
 An arm's body may be `return`, `break` or `continue` on the arm's line
-(`nothing => return 0`), as after `do`.
+(`nothing => return 0`), as after `do`, or end in one. In a match whose
+value is bound, such an arm leaves, and the other arms give the value:
+
+```fire
+for s in lines
+    n = match s.parse_int()
+        {ok} => ok
+        {err} => continue      # or `return {err}`, `break`
+    total += n
+```
 
 ### Comprehensions
 
@@ -449,7 +468,23 @@ accepts:
 
 Anything else is rejected with the rule it misses: recursion on a filtered
 list, `gcd(b, a % b)`, a self-call inside a loop body (the body is its own
-def in Bend), and mutual recursion (Bend has none; merge the defs).
+def in Bend), a def passing itself as a function (`kids *> depth` inside
+`depth`), and mutual recursion (Bend has none; merge the defs).
+
+A tree whose children are a list is walked by a def over the list of
+trees, calling itself on the children of the first and on the rest:
+
+```fire
+type Rose
+    Node(value: int, kids: [Rose])
+
+def total(ts)
+    match ts
+        [] => 0
+        [Node(v, kids), ...rest] => v + total(kids) + total(rest)
+
+total([tree])
+```
 
 ```fire
 # Euclid's remainders shrink, but not by a step the checker can follow
@@ -490,7 +525,8 @@ law insert_contains                         # over an infinite type
 
 `for` names the variables with their types (the one place a type is
 written for a value: a law ranges over a type), and `if cond` after them
-adds a hypothesis. The body is an equation (`a == b`, structural) or a
+adds a hypothesis. A type parameter left open is `int`: `for t: Tree` is a
+tree of ints, as `fire --test` samples it. The body is an equation (`a == b`, structural) or a
 boolean. A law may mention pure and fallible defs, not IO or unsafe ones,
 and no top-level values. It is proven as strongly as the compiler can:
 
@@ -563,7 +599,9 @@ Effects are inferred, and nothing is written differently at a call site.
 
 Termination is not an effect: it is checked (§8).
 
-An abort stops the program with a message. Expected failures are
+An abort stops the program with a message that starts with the line it
+happened at (`line 4: list index 2 out of range for length 2`). Expected
+failures are
 **results**, `{ok: value}` or `{err: payload}`, and the pipeline carries
 them:
 
@@ -664,7 +702,10 @@ destructuring and f-string match patterns; runtime type values (`type(x)`,
 `x: int` as a runtime test outside a `T | nothing` match); `?.`; `[]` on a
 record; list spread (`[...xs, 1]`, use `xs + [1]`); type aliases (a named
 type is a `type` declaration); a `for` over an open range on its own;
-`while` outside an `unsafe def`; mutual recursion between defs, and a def
-calling itself from inside a loop body; a `!>` handler whose value has a
+`while` outside an `unsafe def`; mutual recursion between defs, a def
+calling itself from inside a loop body, and a def passing itself as a
+function in its own body; a change nothing reads (§4.1); `return`, `break`
+or `continue` in a value used inside a larger expression (bind it first); a
+`!>` handler whose value has a
 different type than the ok value; function values whose environment holds
 a function of the same kind (`compose(f, compose(g, h))`).

@@ -121,9 +121,11 @@ law sort_small
 
 * `for` names the quantified variables with their types. This is the one
   place a type is written for a value, since a law ranges over a type,
-  not over data. `if` adds a hypothesis. The body is an equation
-  (`a == b`, compared structurally at the type of `a`) or a boolean
-  expression (the claim that it holds).
+  not over data. A type parameter left open is `int` (`for t: Tree` is
+  `Tree<U32>` in the image): over `Unit` every value is equal, and a proof
+  would say nothing about the values. `if` adds a hypothesis. The body
+  is an equation (`a == b`, compared structurally at the type of `a`) or
+  a boolean expression (the claim that it holds).
 * A law may mention pure and fallible defs. It may not mention an IO def
   (Bend cannot state it) or a def that may diverge (the checker would
   hang; measured, not guessed).
@@ -258,7 +260,7 @@ contains:
 | an expression `if` whose operands are cheap, pure and total | `Bool.pick(T, c, a, b)`, eager | `04` |
 | a statement or expression branch with no self-call and no early return | a helper def that matches its condition parameter and returns the branch's value or its live-out variables (a `Data` record read back through projection defs) | `07` |
 | a branch containing a self-call | `Bool.pick(Unit -> T, c, _ => .., _ => ..)(Unit{})`: thunks, so no helper has to call back into the def being defined, and the recursion stays structural | `01`, `02`, `05`, `06` |
-| a branch containing `return`, `break` or `continue` | the rest of the block moves into the branches that fall through, and the branch is a pick of terms | `05` |
+| a branch containing `return`, `break` or `continue` (also an arm of a bound `match`: `n = match x` with `{err} => return e` is that statement, its other arms binding `n`) | the rest of the block moves into the branches that fall through, and the branch is a pick of terms | `05` |
 
 The second form keeps the enclosing body straight-line and readable,
 instead of a chain of continuation defs. The third keeps a recursive def
@@ -303,7 +305,9 @@ at `n + 1` by every outside caller and counted down (`1n+fuel_`) by every
 self-call. The fuel always outlasts the int, so the `0n` case is dead; Bend
 still needs a value there, and the compiler builds one of the result type
 (a generic part of it is taken from a parameter of that type, or the def
-is rejected with a message).
+is rejected with a message). Used as a value (`xs *> fib`), such a def is
+called through a forwarder `fib.F.value` that starts the fuel, since the
+code a template receives is inlined and may use its argument only once.
 
 ### 4.5 Closures
 
