@@ -131,6 +131,11 @@ fn unsupported_programs_are_rejected_with_a_message() {
         ("def P(public var x = 0)\n    public var y = 0\ndef bump(q)\n    q.x += 1\nvar r = P()\nbump(r)\nprint(r)\n", "a copy of what the caller passed"),
         ("def fill(xs)\n    xs.push(1)\nprint(fill([]))\n", "a copy of what the caller passed"),
         ("var a = [1]\nb = a\nb.push(2)\nprint(a)\n", "nothing reads 'b' afterwards"),
+        // a change in the right side of `or` runs only when that side does,
+        // which needs to know whether `or` is logical or a default
+        ("def pick(a, xs)\n    var ys = xs\n    r = a or ys.pop()\n    {r, ys}\nprint(pick(true, [false]))\n", "a call that changes `ys` cannot sit in the right side of `or`"),
+        // a `while` condition runs on every pass, not once before the loop
+        ("unsafe def f()\n    var xs = [1, 2]\n    while len(xs) > 0 and xs.pop() > 0 do print(xs)\nf()\n", "a call that changes `xs` cannot sit in a `while` condition"),
     ];
     for (src, fragment) in cases {
         match fire_bend::compile(src) {

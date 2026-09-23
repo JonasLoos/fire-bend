@@ -1,0 +1,57 @@
+# a call that changes a variable runs only where its value is evaluated:
+# not when `and`/`or` decide on their left side, and only in the branch of
+# an `if` value (or the `elif` condition) that is reached
+var xs = []
+ok = len(xs) == 0 or xs.pop() > 0
+print(ok, xs)
+var ys = [5, 7]
+big = len(ys) == 0 or ys.pop() > 6
+print(big, ys)
+none = len(xs) > 0 and xs.pop() > 0
+print(none, xs)
+some = len(ys) > 0 and ys.pop() > 0
+print(some, ys)
+
+var zs = [1, 2, 3]
+v = if len(zs) > 5 do zs.pop() elif len(zs) > 2 and zs.pop() > 0 do 10 + zs.pop() else 0
+print(v, zs)
+w = if len(zs) > 5 do zs.pop() else -1
+print(w, zs)
+print(len(zs) == 0 or zs.pop() > 0, if len(zs) > 0 do zs.pop() else 9, zs)
+if len(zs) == 0 or zs.pop() > 0
+    print("empty")
+
+# a default runs only when the value is absent
+var counts = {}
+counts["a"] = 1
+var spare = [3]
+got = counts["a"] or spare.pop()
+print(got, spare)
+got2 = counts["b"] or spare.pop()
+print(got2, spare)
+
+# methods that change their object, called on a variable and on a sibling
+def Counter()
+    public var count = 0
+    public var log = []
+    public bump = () =>
+        count += 1
+        count
+    public note = x => log.push(x)
+    public bump_if = go =>
+        went = go and bump() > 0
+        went
+    public both = go =>
+        r = if go do bump() else -1
+        if go do note(r) else note(0)
+        r
+
+var c = Counter()
+a = c.count > 0 and c.bump() > 0
+print(a, c.count)
+b = c.count == 0 or c.bump() > 5
+print(b, c.count)
+print(c.bump_if(false), c.count)
+print(c.bump_if(true), c.count)
+print(c.both(false), c.count, c.log)
+print(c.both(true), c.count, c.log)
