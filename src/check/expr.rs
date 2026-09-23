@@ -1359,19 +1359,24 @@ impl Checker {
                 }
             }
         }
+        // the body and the filter run on every pass: calls hoisted out of
+        // them go in the innermost loop, not in front of the statement
         let mut inner = Vec::new();
-        let v = self.check_expr(value, Some(&elem));
+        let (v, mut then) = self.check_lazy(value, Some(&elem));
         self.unify(&elem, &v.ty, line);
         let acc_var = self.var(&acc, Type::list(elem.clone()));
         let pushed = self.dict(Class::Method("push".into(), vec![elem.clone()], Type::list(elem.clone())), Type::list(elem.clone()), vec![acc_var, v], Type::list(elem.clone()), line);
-        let push_stmt = Stmt { kind: StmtKind::Assign { name: acc.clone(), value: pushed }, line };
+        let mut hoists = !then.is_empty();
+        then.push(Stmt { kind: StmtKind::Assign { name: acc.clone(), value: pushed }, line });
         match filter {
             Some(f) => {
-                let c = self.check_expr(f, Some(&Type::Bool));
+                let (c, before) = self.check_lazy(f, Some(&Type::Bool));
                 self.unify(&Type::Bool, &c.ty, line);
-                inner.push(Stmt { kind: StmtKind::If { cond: c, then: Block { stmts: vec![push_stmt] }, else_: Block::default() }, line });
+                hoists |= !before.is_empty();
+                inner.extend(before);
+                inner.push(Stmt { kind: StmtKind::If { cond: c, then: Block { stmts: then }, else_: Block::default() }, line });
             }
-            None => inner.push(push_stmt),
+            None => inner.extend(then),
         }
         self.pop_scope();
         let mut body_block = Block { stmts: inner };
@@ -1381,7 +1386,12 @@ impl Checker {
         stmts.extend(body_block.stmts);
         let result = self.var(&acc, Type::list(elem.clone()));
         stmts.push(Stmt { kind: StmtKind::Expr(result), line });
-        self.expr(ExprKind::Block(Block { stmts }), Type::list(elem))
+        let block = Block { stmts };
+        if hoists {
+            // the variables those calls change leave through the value
+            return self.thread_assignments(block, Type::list(elem));
+        }
+        self.expr(ExprKind::Block(block), Type::list(elem))
     }
 
     // -- pipelines -----------------------------------------------------------------

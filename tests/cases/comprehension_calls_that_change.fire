@@ -1,0 +1,33 @@
+# a call that changes a variable inside a comprehension runs on every pass
+# (the filter) or on every pass the filter lets through (the body), and
+# the variable keeps its changes after the loop
+var xs = [1, 2, 3]
+ys = for i in 0..2 do xs.pop()
+print(ys, xs)
+var zs = [1, 2, 3, 4, 5]
+evens = for i in 0..4 if zs.pop() % 2 == 0 do i
+print(evens, zs)
+var ws = [1, 2, 3, 4]
+picked = for i in 0..4 if i % 2 == 0 do ws.pop() * 10
+print(picked, ws)
+var a = [1, 2]
+var b = [7, 8, 9]
+pairs = for i in 0..2 do [a.pop(), b.pop()]
+print(pairs, a, b)
+def Counter()
+    public var count = 0
+    public bump = () =>
+        count += 1
+        count
+    public many = n => for i in 0..n do bump()
+var c = Counter()
+print(for i in 0..3 do c.bump(), c.count)
+print(c.many(2), c.count)
+var ns = [1, 2, 3, 4, 5]
+nested = for i in 0..2 do for j in 0..2 do ns.pop() + 10 * i
+print(nested, ns)
+var log = []
+blocks = for x in [1, 2, 3]
+    log.push(x * 2)
+    x + len(log)
+print(blocks, log)

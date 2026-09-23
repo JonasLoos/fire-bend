@@ -193,8 +193,10 @@ Writes go through any chain of indexes and members: `rows[r][c] = v`,
 
 Such a call runs only where its value is evaluated: in the right side of
 `and`/`or` only when the left side does not decide (`len(xs) == 0 or
-xs.pop() > 0` leaves an empty `xs` alone), and in an `if` value only in
-the branch taken. The one exception is an `or` whose left side's type is
+xs.pop() > 0` leaves an empty `xs` alone), in an `if` value only in
+the branch taken, and in a comprehension on every pass (`for i in 0..2
+do xs.pop()` takes two elements; in the body, only on the passes its
+`if` filter lets through). The one exception is an `or` whose left side's type is
 not known where it is written (a generic parameter), since it may be
 logical or a default: a change on its right is an error there; split it
 into its own statement. A `while` condition runs on every pass, so a
