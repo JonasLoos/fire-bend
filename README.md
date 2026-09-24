@@ -1,16 +1,19 @@
 # Fire
 
-A small, indentation-based language where data flows left to right. Fire
-compiles to [Bend 2](https://bend-lang.com), and a compiled program keeps
-Bend's guarantees: it is typed, it terminates, and its matches are covered.
+Fire is a lightweight frontend for Bend 2, a total, dependently typed language with proofs. It keeps Bend's guarantees and adds a simpler syntax, type and effect inference, pipelines, and checked mutability.
 
 ```fire
-result = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    ?> $ % 2 == 1     # filter: keep the odd ones
-    *> $ * $          # map: square them
-    |> sum            # apply: add them up
+def grade(score)                     # inferred types
+    if score >= 90 do "A" elif score >= 75 do "B" else "C"
 
-print("sum of odd squares: {result}")   # 165
+law top_marks                        # laws are proven when the program is built
+    grade(100) == "A"
+
+["92", "78", "n/a", "85"]
+    *> $.parse_int()                 # text to numbers; "n/a" becomes an error
+    *> grade                         # errors skip the stages they can't run
+    !> "absent"                      # and are recovered here
+    |> print                         # ['A', 'B', 'absent', 'B']
 ```
 
 * **Pipelines compose computation.** `|>` applies, `*>` maps, `?>` filters,
