@@ -9,6 +9,8 @@
 //   thunks when a branch calls the def itself; the body stays straight;
 // * an if or match statement with an early exit (return, break, continue)
 //   takes the rest of the block into its non-exiting branches;
+// * the opening branch of a def that counts an int down, on its
+//   parameters, is a match on a condition parameter of a worker def;
 // * a for loop is a driver from the prelude over a body def that answers a
 //   control value; a while loop is the unsafe driver over the same shape.
 
@@ -70,6 +72,19 @@ pub struct FnCtx {
     /// A name bound to a pattern variable (`rest` for `__f36`): a match on
     /// the name is a match on the pattern variable, which Bend can inspect.
     pub aliases: HashMap<String, String>,
+    /// The def opens with a branch on its parameters, taken as a parameter
+    /// of a worker def: self-calls go to the worker and pass the condition.
+    pub split: Option<HeadSplit>,
+}
+
+/// A def whose opening branch is a real match on a condition parameter
+/// (`fib.F.go(fuel, n, __c)`): the condition over the def's parameters,
+/// lowered once, and the parameters it reads.
+#[derive(Clone)]
+pub struct HeadSplit {
+    pub worker: String,
+    pub cond: Term,
+    pub reads: Vec<String>,
 }
 
 impl FnCtx {
@@ -90,6 +105,7 @@ impl FnCtx {
             loop_: None,
             ret: img.ret.clone(),
             aliases: HashMap::new(),
+            split: None,
         }
     }
 
@@ -110,6 +126,7 @@ impl FnCtx {
             loop_: None,
             ret: Ty::Unit,
             aliases: HashMap::new(),
+            split: None,
         }
     }
 
@@ -252,7 +269,15 @@ impl<'a> Lower<'a> {
                 self.lift_mode(t, Mode::Pure, ctx.mode, &rty)
             };
             let zero = self.finish_body(ctx, vec![], Ans::Monadic(dflt));
-            let body = self.lower_block_body(ctx, &stmts, Leaf::Result);
+            let body = match self.head_split(ctx, def, img, &stmts) {
+                // the opening branch matches the condition parameter
+                Some((then, else_)) => {
+                    let a = self.lower_block_body(ctx, &then, Leaf::Result);
+                    let b = self.lower_block_body(ctx, &else_, Leaf::Result);
+                    Body::Match { scrutinee: "__c".into(), arms: vec![(ir::Pat::Ctor("True".into(), vec![]), a), (ir::Pat::Ctor("False".into(), vec![]), b)] }
+                }
+                None => self.lower_block_body(ctx, &stmts, Leaf::Result),
+            };
             Body::Match { scrutinee: "__fuel".into(), arms: vec![(ir::Pat::Zero, zero), (ir::Pat::Succ("__fuel_".into()), body)] }
         } else {
             self.lower_block_body(ctx, &stmts, Leaf::Result)
@@ -265,6 +290,63 @@ impl<'a> Lower<'a> {
             let (tn, _) = img.env.clone().unwrap();
             Body::Match { scrutinee: "env".into(), arms: vec![(ir::Pat::Ctor(tn, caps), inner)] }
         }
+    }
+
+    /// A def that counts an int down and opens with a branch on its
+    /// parameters (`if n <= 1 do return n`, or a body that is one `if`
+    /// value) takes the condition as a parameter of a worker def, which
+    /// matches it: a thunk under a self-call costs about 20 ns, a match
+    /// nothing. Sets `ctx.split` and answers the two branches, each with
+    /// the rest of the body after it where it falls through.
+    fn head_split(&mut self, ctx: &mut FnCtx, def: &Def, img: &Image, stmts: &[Stmt]) -> Option<(Vec<Stmt>, Vec<Stmt>)> {
+        let first = stmts.first()?;
+        let (cond, then, else_) = match &first.kind {
+            StmtKind::Return(Expr { kind: ExprKind::If(c, t, e), .. }) if stmts.len() == 1 => {
+                let ret = |e: &Expr| vec![Stmt { kind: StmtKind::Return(e.clone()), line: e.line }];
+                ((**c).clone(), ret(t), ret(e))
+            }
+            StmtKind::If { cond, then, else_ } => {
+                let rest = &stmts[1..];
+                let mut a = then.stmts.clone();
+                let mut b = else_.stmts.clone();
+                if !self.block_always_exits(then) {
+                    a.extend(rest.iter().cloned());
+                }
+                if !self.block_always_exits(else_) {
+                    b.extend(rest.iter().cloned());
+                }
+                (cond.clone(), a, b)
+            }
+            _ => return None,
+        };
+        // the condition reads only value parameters, through pure operations
+        if !self.is_pure_expr(&cond) || self.has_self_call(ctx, &cond) {
+            return None;
+        }
+        let values: HashSet<String> = def.params.iter().zip(&img.fnp).filter(|(_, k)| **k == FnParamKind::Value).map(|(p, _)| p.name.clone()).collect();
+        let mut ok = true;
+        let mut reads: Vec<String> = Vec::new();
+        walk_expr(&cond, &mut |x: &Expr| match &x.kind {
+            ExprKind::Var(v) if values.contains(v) => {
+                let n = local_name(v);
+                if !reads.contains(&n) {
+                    reads.push(n);
+                }
+            }
+            ExprKind::Lit(_) | ExprKind::Not(_) | ExprKind::And(..) | ExprKind::Or(..) | ExprKind::Builtin(..) | ExprKind::Dict { .. } | ExprKind::Field(..) => {}
+            ExprKind::Call { def: d, .. } if self.core.defs[*d].captures.is_empty() => {}
+            _ => ok = false,
+        });
+        if !ok {
+            return None;
+        }
+        let mut pre = Vec::new();
+        let c = self.expr(ctx, &cond, &mut pre);
+        if !pre.is_empty() {
+            return None;
+        }
+        ctx.split = Some(HeadSplit { worker: format!("{}.F.go", img.name), cond: c, reads });
+        Some((then, else_))
     }
 
     /// A field's type of a data type instantiated at `args`.
@@ -384,6 +466,7 @@ impl<'a> Lower<'a> {
             ir::Stmt::Let { name, value, .. } => Term::App(Box::new(Term::Lam(vec![name], Box::new(rest))), vec![value]),
             ir::Stmt::Bind { name, ty, value, .. } => self.bind_term(ctx, name, ty, value, rest, ret),
             ir::Stmt::Step(m) => self.bind_term(ctx, "_".into(), Ty::Unit, m, rest, ret),
+            ir::Stmt::Par { names, calls } => Term::Par(names, calls, Box::new(rest)),
         }
     }
 

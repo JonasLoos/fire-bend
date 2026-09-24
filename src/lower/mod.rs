@@ -5,7 +5,9 @@
 // erased or template parameters, its dictionaries template parameters, a
 // function-typed parameter that the body only calls is a template (code)
 // plus an environment value, a self-recursive def gets its descending
-// parameter first (or a Nat fuel). This file holds the driver: names,
+// parameter first (or a Nat fuel; a fuel def opening with a branch on
+// its parameters is a worker taking the condition), and a pure def's
+// independent self-calls run in parallel (`ir.rs`). This file holds the driver: names,
 // types, def images, closure representations, derived defs and the
 // resolution of dictionaries to Bend terms. `body.rs` lowers statements
 // (branches, loops, matches), `expr.rs` expressions and builtins,
@@ -182,7 +184,11 @@ pub fn lower_program(core: &Program, laws: Laws) -> Result<ir::Program, Vec<Diag
             }
         }
         if !more {
-            return Ok(ir::Program { types: lw.types, defs: lw.defs });
+            let mut defs = lw.defs;
+            for d in &mut defs {
+                d.parallelize();
+            }
+            return Ok(ir::Program { types: lw.types, defs });
         }
     }
 }
@@ -958,6 +964,22 @@ impl<'a> Lower<'a> {
         ir_def.body = body;
         // a lambda never recurses, so it needs no `@unsafe` of its own
         ir_def.is_unsafe = def.unsafe_ && !matches!(def.kind, DefKind::Lambda);
+        if let Some(sp) = ctx.split.clone() {
+            // the def keeps its name and parameters, and answers the worker
+            // on its condition; the body is the worker's
+            let mut entry = self.def_header(&img, &def, line);
+            let mut args: Vec<Term> = entry.tmpl_types.iter().map(|t| Term::TmplTy(Ty::Param(t.clone()))).collect();
+            args.extend(entry.tmpl_funcs.iter().map(|(f, _)| Term::TmplRef(f.clone())));
+            args.extend(entry.erased.iter().map(|t| Term::TyArg(Ty::Param(t.clone()))));
+            args.extend(entry.params.iter().map(|p| Term::var(&p.name)));
+            args.push(sp.cond.clone());
+            entry.body = Body::term(Term::Call(sp.worker.clone(), args));
+            self.mark_reusable(&mut entry);
+            self.ir_units.insert(entry.name.clone(), def.unit);
+            self.defs.push(entry);
+            ir_def.name = sp.worker;
+            ir_def.params.push(IrParam::new("__c", Ty::Bool));
+        }
         self.mark_reusable(&mut ir_def);
         self.ir_units.insert(ir_def.name.clone(), def.unit);
         self.defs.push(ir_def);
@@ -1585,7 +1607,7 @@ fn mark_body(b: &mut Body, counts: &HashMap<String, usize>) {
                             *reusable = true;
                         }
                     }
-                    ir::Stmt::Step(_) => {}
+                    ir::Stmt::Step(_) | ir::Stmt::Par { .. } => {}
                 }
             }
         }

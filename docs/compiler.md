@@ -167,7 +167,7 @@ User names are emitted verbatim: the Fire def `insert` is the Bend def
 `Stack.push`. A name that collides with Base gets a trailing underscore.
 The compiler's own defs live under `F.` (the prelude) or an `F` segment of
 their owner (`insert.F.if3`, `Tree.F.show`, `Stack.F.new`,
-`main.F.loop5`). No Fire name contains a dot, so a proof can say `insert`
+`main.F.loop5`, `fib.F.go`). No Fire name contains a dot, so a proof can say `insert`
 and mean it. A lambda is `outer.fn2`, a nested def `outer.inner`.
 
 ### Types
@@ -218,20 +218,21 @@ what makes a Fire function callable any number of times.
 
 ### Branches
 
-Bend has no `if`, and a `match` may inspect only a parameter. Four forms
+Bend has no `if`, and a `match` may inspect only a parameter. Five forms
 cover every branch, chosen by what it contains:
 
 | branch | form | shape |
 |---|---|---|
 | an expression `if` with cheap, pure operands | `Bool.pick(T, c, a, b)`, eager | [`04`](shapes/04_loops_io.bend) |
 | no self-call and no early exit | a helper def that matches the condition and answers the branch's value, or its live-out variables in an `F.OutN` record | [`07`](shapes/07_statement_branches.bend) |
+| the opening branch of a def that counts an int down, on its parameters | the condition is a parameter of a worker def, which matches it (see Int recursion) | [`11`](shapes/11_condition_parameter.bend) |
 | a self-call, or inside a term | `Bool.pick` over thunks, applied to `Unit{}` | [`01`](shapes/01_data_and_recursion.bend), [`05`](shapes/05_branches_in_effects.bend) |
 | `return`, `break` or `continue` | the rest of the block moves into the branches that fall through | [`05`](shapes/05_branches_in_effects.bend) |
 
 The helper def keeps a body straight-line and cheap; thunks keep a
 recursive def structural, since no helper has to call back into it. A
 thunk costs about 20 ns per branch (see below), which is why it is used
-only where a helper cannot be.
+only where neither a helper nor a condition parameter can be.
 
 ### Matches
 
@@ -273,6 +274,44 @@ predecessor. The fuel always outlasts the int, so the `0n` case is dead;
 Bend still needs a value there, and the compiler builds one of the result
 type. Used as a value (`xs *> fib`), such a def goes through a forwarder
 `fib.F.value` that starts the fuel.
+
+Such a def usually opens with its base case (`if n <= 1 do n else
+fib(n - 1) + fib(n - 2)`, or `if n <= 1 do return n`), and that branch
+holds the self-calls, so it would be a thunk on every call. When the
+condition reads only value parameters through pure operations, it
+becomes a parameter instead ([`11`](shapes/11_condition_parameter.bend)):
+the body moves to a worker `fib.F.go(__fuel, n, __c: Bool)` that matches
+`__c` under the fuel, each branch followed by the rest of the body where
+it falls through. `fib` keeps its name and parameters and answers the
+worker on its condition, so callers, laws and proofs see the same def (a
+proof about `fib` unfolds it to the worker). A self-call goes to the
+worker directly and passes the condition on its own arguments; an
+argument the condition reads that is not a variable or a literal is
+bound first, so it is computed once. Structural defs keep their thunks:
+the match on the descending parameter must come first in Bend, and their
+conditions usually read what it binds.
+
+### Parallel calls
+
+Bend runs the calls of a parallel let (`a b = f(x) g(y)`) at once on the
+CPU's threads. In a def that answers a plain value (no IO, no abort),
+every call a term reaches is evaluated, since Bend is strict and only a
+lambda's body waits. So two or more self-calls that one term evaluates
+run in parallel, as a parallel let around the term: `size(l) + 1 +
+size(r)` becomes `(a b = size(l) size(r); ((a + 1) + b))`
+([`12`](shapes/12_parallel_calls.bend)). In a block, the self-calls of the
+lets and the result form one group, and the parallel let is a statement
+placed after the lets they read. A binder that the rest uses twice is
+`+`.
+
+Three calls make a three-way parallel let. A call stays where it is when
+it reads a variable bound on its way (an earlier call's answer), sits in a lambda or on the
+right of `&&`/`||` (it may not run), or is in a def that can abort or do
+IO: its calls are steps of a `do` block, and running one after an abort
+would change what the program does. A lambda's body is a group of its
+own, so the calls of one branch run in parallel with each other. This is
+tree recursion's speedup; a loop over a list is a fold, one step after
+another, and gains nothing.
 
 ### Effects and failures
 
@@ -354,6 +393,23 @@ cannot turn the loop into a formula.
 A `Nat` counter is free, which makes `for` over a range total at no cost; a
 thunk branch costs about 20 ns; closed laws are cheap enough to check on
 every build.
+
+Condition parameters and parallel calls, against the compiler before
+them (best of three, on 1 thread and on the 4 of the test machine):
+
+| program | before | after, 1 thread | after, 4 threads |
+|---|---|---|---|
+| `fib(36)`, one opening branch and two self-calls | 0.96 s | 0.137 s | 0.043 s |
+| a full tree of depth 22 built and summed | 0.32 s | 0.23 s | 0.075 s |
+| 200 K inserts into a search tree, then one sum | 0.38 s | 0.40 s | 0.43 s |
+
+The last line is the price of a parallel call. Bend runs a def that can
+never reach a fork in a faster sequential mode, and a program with a
+parallel let loses that mode for most of its defs: here the sum is too
+small to pay for it, and the inserts, which never fork, run about 5 %
+slower (12 % with 4 threads). Where the tree recursion is the work, the
+parallel let wins: the same program summing its tree 21 times takes
+0.65 s before and 0.56 s after on 4 threads.
 
 ## Limits
 

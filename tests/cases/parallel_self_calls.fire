@@ -1,0 +1,88 @@
+# independent self-calls of a pure def run in parallel (docs/compiler.md):
+# in one expression, across a builtin's lets, or across statements
+
+type Tree
+    Leaf
+    Node(left: Tree, value, right: Tree)
+
+type Tri
+    T0
+    T3(a: Tri, b: Tri, c: Tri, v: int)
+
+def build(n)
+    if n <= 1 do Leaf else Node(build(n - 1), n, build(n - 2))
+
+def size(t)
+    match t
+        Leaf => 0
+        Node(l, _, r) => size(l) + 1 + size(r)
+
+def total(t)                             # three at once
+    match t
+        T0 => 0
+        T3(a, b, c, v) => total(a) + total(b) + total(c) + v
+
+def mk(n)
+    if n <= 2 do T0 else T3(mk(n - 1), mk(n - 2), mk(n - 3), n)
+
+def all_pos(t)                           # under `and`: they may not run
+    match t
+        Leaf => true
+        Node(l, v, r) => v > 0 and all_pos(l) and all_pos(r)
+
+def mirror(t)                            # constructor arguments
+    match t
+        Leaf => Leaf
+        Node(l, v, r) => Node(mirror(r), v, mirror(l))
+
+def depth(t)                             # through the lets of `max`, in a branch
+    match t
+        Leaf => 0
+        Node(l, v, r) => if v > 1000 do 0 else 1 + max(depth(l), depth(r))
+
+def show(t)                              # strings
+    match t
+        Leaf => "."
+        Node(l, v, r) => "({show(l)} {v} {show(r)})"
+
+def spread(t)                            # one call per statement
+    match t
+        Leaf => 0
+        Node(l, v, r) =>
+            a = spread(l)
+            w = v * 2
+            b = spread(r)
+            a + w + b
+
+def dependent(t)                         # a statement reading the first answer
+    match t
+        Leaf => 0
+        Node(l, v, r) =>
+            a = dependent(l)
+            b = dependent(r) + (if a > 3 do 1 else 0)
+            a + b + v
+
+def rebind(t)                            # a name bound twice
+    match t
+        Leaf => 1
+        Node(l, v, r) =>
+            var x = rebind(l)
+            x = x + rebind(r)
+            x + v
+
+def lookup(t, i)                         # fallible: stays sequential
+    match t
+        Leaf => [0][i]
+        Node(l, v, r) => lookup(l, i) + lookup(r, i) + v
+
+t = build(8)
+print(size(t), total(mk(7)), all_pos(t), all_pos(Node(Leaf, -1, t)))
+print(show(mirror(build(4))), depth(t))
+print(spread(t), dependent(t), rebind(t), lookup(build(3), 0))
+
+law size_four
+    size(build(4)) == 4
+
+law mirror_twice
+    for t: Tree
+    mirror(mirror(t)) == t

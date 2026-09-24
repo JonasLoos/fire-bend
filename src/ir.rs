@@ -6,7 +6,7 @@
 // pretty-printer and every rule Bend enforces (see docs/compiler.md) is
 // the lowering's responsibility, not the printer's.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 
 // ---------------------------------------------------------------------------
@@ -238,6 +238,9 @@ pub enum Term {
     App(Box<Term>, Vec<Term>),
     /// A type passed as an erased argument.
     TyArg(Ty),
+    /// `(a b = f(x) g(y); body)` — calls evaluated in parallel, their
+    /// answers bound for the body.
+    Par(Vec<String>, Vec<Term>, Box<Term>),
 }
 
 impl Term {
@@ -394,6 +397,18 @@ impl Term {
                 out.push(')');
             }
             Term::TyArg(ty) => ty.write(out, false),
+            Term::Par(names, calls, body) => {
+                out.push('(');
+                out.push_str(&names.join(" "));
+                out.push_str(" =");
+                for c in calls {
+                    out.push(' ');
+                    c.write(out);
+                }
+                out.push_str("; ");
+                body.write(out);
+                out.push(')');
+            }
         }
     }
 
@@ -404,6 +419,7 @@ impl Term {
             Term::App(f, args) => std::iter::once(&**f).chain(args).collect(),
             Term::Lam(_, b) | Term::TmplTerm(b) => vec![&**b],
             Term::Op(a, _, b, _) | Term::Cat(a, b) | Term::And(a, b) | Term::Or(a, b) => vec![&**a, &**b],
+            Term::Par(_, calls, body) => calls.iter().chain([&**body]).collect(),
             _ => vec![],
         }
     }
@@ -414,6 +430,7 @@ impl Term {
             Term::App(f, args) => std::iter::once(&mut **f).chain(args).collect(),
             Term::Lam(_, b) | Term::TmplTerm(b) => vec![&mut **b],
             Term::Op(a, _, b, _) | Term::Cat(a, b) | Term::And(a, b) | Term::Or(a, b) => vec![&mut **a, &mut **b],
+            Term::Par(_, calls, body) => calls.iter_mut().chain([&mut **body]).collect(),
             _ => vec![],
         }
     }
@@ -464,6 +481,73 @@ impl Term {
         }
     }
 
+    /// The term with free variables replaced (a lambda's parameters
+    /// shadow; a template argument is closed).
+    pub fn subst(&self, m: &HashMap<String, Term>) -> Term {
+        match self {
+            Term::Var(v) => m.get(v).cloned().unwrap_or_else(|| self.clone()),
+            Term::TmplTerm(_) => self.clone(),
+            Term::Par(names, calls, b) => {
+                let mut inner = m.clone();
+                for n in names {
+                    inner.remove(n.trim_start_matches('+'));
+                }
+                Term::Par(names.clone(), calls.iter().map(|c| c.subst(m)).collect(), Box::new(b.subst(&inner)))
+            }
+            Term::Lam(params, b) => {
+                let mut inner = m.clone();
+                for p in params {
+                    inner.remove(p.trim_start_matches('+'));
+                }
+                Term::Lam(params.clone(), Box::new(b.subst(&inner)))
+            }
+            _ => {
+                let mut t = self.clone();
+                for c in t.children_mut() {
+                    *c = c.subst(m);
+                }
+                t
+            }
+        }
+    }
+
+    /// Variables the term reads (a lambda's or parallel let's binders
+    /// are its own).
+    pub fn free_vars(&self, out: &mut HashSet<String>) {
+        match self {
+            Term::Var(v) => {
+                out.insert(v.clone());
+            }
+            Term::Lam(params, b) => {
+                let mut inner = HashSet::new();
+                b.free_vars(&mut inner);
+                for p in params {
+                    inner.remove(p.trim_start_matches('+'));
+                }
+                out.extend(inner);
+            }
+            Term::Par(names, calls, b) => {
+                for c in calls {
+                    c.free_vars(out);
+                }
+                let mut inner = HashSet::new();
+                b.free_vars(&mut inner);
+                for n in names {
+                    inner.remove(n.trim_start_matches('+'));
+                }
+                out.extend(inner);
+            }
+            _ => {
+                if let Term::CallVar(f, _) = self {
+                    out.insert(f.clone());
+                }
+                for c in self.children() {
+                    c.free_vars(out);
+                }
+            }
+        }
+    }
+
     /// Count of syntactic occurrences of each variable name.
     pub fn count_vars(&self, counts: &mut HashMap<String, usize>) {
         match self {
@@ -481,6 +565,19 @@ impl Term {
                     if params.get(i).is_some_and(|p| p.starts_with('+')) {
                         a.count_vars(counts);
                     }
+                }
+            }
+            Term::Par(names, calls, b) => {
+                for c in calls {
+                    c.count_vars(counts);
+                }
+                let mut inner = HashMap::new();
+                b.count_vars(&mut inner);
+                for n in names {
+                    inner.remove(n.trim_start_matches('+'));
+                }
+                for (k, v) in inner {
+                    *counts.entry(k).or_insert(0) += v;
                 }
             }
             Term::Lam(params, b) => {
@@ -527,6 +624,8 @@ pub enum Stmt {
     Bind { name: String, reusable: bool, ty: Ty, value: Term },
     /// A unit step inside a do-block.
     Step(Term),
+    /// `a b = f(x) g(y)`: calls evaluated in parallel (pure blocks only).
+    Par { names: Vec<String>, calls: Vec<Term> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -583,16 +682,16 @@ impl Body {
     fn terms(&self) -> Vec<&Term> {
         match self {
             Body::Match { .. } => vec![],
-            Body::Block { stmts, tail } => stmts.iter().map(Stmt::value).chain([tail]).collect(),
-            Body::Do { stmts, tail, .. } => stmts.iter().map(Stmt::value).chain([tail.term()]).collect(),
+            Body::Block { stmts, tail } => stmts.iter().flat_map(Stmt::values).chain([tail]).collect(),
+            Body::Do { stmts, tail, .. } => stmts.iter().flat_map(Stmt::values).chain([tail.term()]).collect(),
         }
     }
 
     fn terms_mut(&mut self) -> Vec<&mut Term> {
         match self {
             Body::Match { .. } => vec![],
-            Body::Block { stmts, tail } => stmts.iter_mut().map(Stmt::value_mut).chain([tail]).collect(),
-            Body::Do { stmts, tail, .. } => stmts.iter_mut().map(Stmt::value_mut).chain([tail.term_mut()]).collect(),
+            Body::Block { stmts, tail } => stmts.iter_mut().flat_map(Stmt::values_mut).chain([tail]).collect(),
+            Body::Do { stmts, tail, .. } => stmts.iter_mut().flat_map(Stmt::values_mut).chain([tail.term_mut()]).collect(),
         }
     }
 
@@ -725,16 +824,18 @@ impl Body {
 }
 
 impl Stmt {
-    /// The term a statement evaluates.
-    fn value(&self) -> &Term {
+    /// The terms a statement evaluates.
+    fn values(&self) -> Vec<&Term> {
         match self {
-            Stmt::Let { value, .. } | Stmt::Bind { value, .. } | Stmt::Step(value) => value,
+            Stmt::Let { value, .. } | Stmt::Bind { value, .. } | Stmt::Step(value) => vec![value],
+            Stmt::Par { calls, .. } => calls.iter().collect(),
         }
     }
 
-    fn value_mut(&mut self) -> &mut Term {
+    fn values_mut(&mut self) -> Vec<&mut Term> {
         match self {
-            Stmt::Let { value, .. } | Stmt::Bind { value, .. } | Stmt::Step(value) => value,
+            Stmt::Let { value, .. } | Stmt::Bind { value, .. } | Stmt::Step(value) => vec![value],
+            Stmt::Par { calls, .. } => calls.iter_mut().collect(),
         }
     }
 
@@ -788,8 +889,203 @@ impl Stmt {
                 value.write(out);
             }
             Stmt::Step(t) => t.write(out),
+            Stmt::Par { names, calls } => {
+                out.push_str(&names.join(" "));
+                out.push_str(" =");
+                for c in calls {
+                    out.push(' ');
+                    c.write(out);
+                }
+            }
         }
         out.push('\n');
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parallel self-calls
+// ---------------------------------------------------------------------------
+//
+// In a pure def every call a term reaches is evaluated (Bend is strict;
+// only a lambda's body waits), so two self-calls that one term, or one
+// block, evaluates can run at once: `size(l) + size(r)` becomes
+// `(a b = size(l) size(r); a + b)`. A call is taken out of the term only
+// where it reads no variable the term binds on the way (an applied lambda
+// is a let), and never from under a lambda or the right of `&&`/`||`,
+// which may not run. A lambda's body is a region of its own.
+
+/// Visit the outermost self-calls a term evaluates, with whether each can
+/// move ahead of the term (it reads no variable the term binds).
+fn visit_calls(t: &mut Term, me: &str, bound: &mut Vec<String>, f: &mut dyn FnMut(&mut Term, bool)) {
+    match t {
+        Term::Call(g, _) if g == me => {
+            let mut fv = HashSet::new();
+            t.free_vars(&mut fv);
+            let ok = !bound.iter().any(|b| fv.contains(b));
+            f(t, ok);
+        }
+        Term::Lam(..) | Term::TmplTerm(_) | Term::And(..) | Term::Or(..) => {}
+        Term::App(g, args) if matches!(**g, Term::Lam(..)) => {
+            for a in args.iter_mut() {
+                visit_calls(a, me, bound, f);
+            }
+            if let Term::Lam(ps, b) = &mut **g {
+                let n = bound.len();
+                bound.extend(ps.iter().map(|p| p.trim_start_matches('+').to_string()));
+                visit_calls(b, me, bound, f);
+                bound.truncate(n);
+            }
+        }
+        Term::Par(names, _, b) => {
+            let n = bound.len();
+            bound.extend(names.iter().map(|n| n.trim_start_matches('+').to_string()));
+            visit_calls(b, me, bound, f);
+            bound.truncate(n);
+        }
+        _ => {
+            for c in t.children_mut() {
+                visit_calls(c, me, bound, f);
+            }
+        }
+    }
+}
+
+/// Replace the movable calls `pick` selects (by their order among the
+/// term's movable calls) with fresh variables; answers the names and calls.
+fn take_calls(t: &mut Term, me: &str, counter: &mut usize, pick: &dyn Fn(usize) -> bool, names: &mut Vec<String>, calls: &mut Vec<Term>) {
+    let mut i = 0;
+    visit_calls(t, me, &mut Vec::new(), &mut |c, ok| {
+        if ok {
+            if pick(i) {
+                *counter += 1;
+                let n = format!("__par{}", counter);
+                calls.push(std::mem::replace(c, Term::Var(n.clone())));
+                names.push(n);
+            }
+            i += 1;
+        }
+    });
+}
+
+/// A parallel let's binders, `+` where what follows uses one twice.
+fn reusable(names: Vec<String>, counts: &HashMap<String, usize>) -> Vec<String> {
+    names.into_iter().map(|n| if counts.get(&n).copied().unwrap_or(0) > 1 { format!("+{}", n) } else { n }).collect()
+}
+
+/// A term as a region: its movable self-calls, if two or more, run in
+/// parallel ahead of it; then the regions inside it.
+fn par_term(t: &mut Term, me: &str, counter: &mut usize) {
+    let mut n = 0;
+    visit_calls(t, me, &mut Vec::new(), &mut |_, ok| n += ok as usize);
+    if n >= 2 {
+        let (mut names, mut calls) = (Vec::new(), Vec::new());
+        take_calls(t, me, counter, &|_| true, &mut names, &mut calls);
+        let mut counts = HashMap::new();
+        t.count_vars(&mut counts);
+        let body = std::mem::replace(t, Term::unit());
+        *t = Term::Par(reusable(names, &counts), calls, Box::new(body));
+    }
+    par_inside(t, me, counter);
+}
+
+/// The regions nested in a term: lambda bodies, the bodies of applied
+/// lambdas (for calls that read their binders), the operands of `&&`/`||`,
+/// and the arguments of self-calls.
+fn par_inside(t: &mut Term, me: &str, counter: &mut usize) {
+    match t {
+        Term::Lam(_, b) => par_term(b, me, counter),
+        Term::TmplTerm(_) => {}
+        Term::And(a, b) | Term::Or(a, b) => {
+            par_term(a, me, counter);
+            par_term(b, me, counter);
+        }
+        Term::Call(g, args) if g == me => {
+            for a in args.iter_mut() {
+                par_term(a, me, counter);
+            }
+        }
+        Term::App(g, args) if matches!(**g, Term::Lam(..)) => {
+            for a in args.iter_mut() {
+                par_inside(a, me, counter);
+            }
+            if let Term::Lam(_, b) = &mut **g {
+                par_term(b, me, counter);
+            }
+        }
+        _ => {
+            for c in t.children_mut() {
+                par_inside(c, me, counter);
+            }
+        }
+    }
+}
+
+/// The terms of a pure block a parallel let may take calls from: each
+/// let's value and the result, with its position (the result's is the
+/// number of statements).
+fn block_terms<'a>(stmts: &'a mut [Stmt], tail: &'a mut Term) -> Vec<(usize, &'a mut Term)> {
+    let len = stmts.len();
+    let mut out: Vec<(usize, &mut Term)> = stmts.iter_mut().enumerate().filter_map(|(j, s)| match s {
+        Stmt::Let { value, .. } => Some((j, value)),
+        _ => None,
+    }).collect();
+    out.push((len, tail));
+    out
+}
+
+/// A body: in a block, the self-calls of its lets and tail run in
+/// parallel at the point where the most of them have what they read
+/// (after the last let each reads, before the first term that uses one);
+/// then each term as a region.
+fn par_body(b: &mut Body, me: &str, counter: &mut usize) {
+    match b {
+        Body::Match { arms, .. } => {
+            for (_, a) in arms {
+                par_body(a, me, counter);
+            }
+        }
+        Body::Do { .. } => {}
+        Body::Block { stmts, tail } => {
+            // per movable call: the term it is in, and the last let it reads
+            let len = stmts.len();
+            let lets: Vec<Option<String>> = stmts.iter().map(|s| match s {
+                Stmt::Let { name, .. } => Some(name.clone()),
+                _ => None,
+            }).collect();
+            let mut found: Vec<(usize, usize)> = Vec::new();
+            for (j, t) in block_terms(stmts, tail) {
+                visit_calls(t, me, &mut Vec::new(), &mut |c, ok| {
+                    if ok {
+                        let mut fv = HashSet::new();
+                        c.free_vars(&mut fv);
+                        let after = lets[..j].iter().rposition(|n| n.as_ref().is_some_and(|n| fv.contains(n))).map_or(0, |i| i + 1);
+                        found.push((j, after));
+                    }
+                });
+            }
+            let best = (0..=len).map(|p| (found.iter().filter(|&&(j, a)| a <= p && p <= j).count(), p)).max_by_key(|&(n, p)| (n, p));
+            if let Some((n, p)) = best
+                && n >= 2 {
+                    let (mut names, mut calls) = (Vec::new(), Vec::new());
+                    let mut k = 0;
+                    for (j, t) in block_terms(stmts, tail) {
+                        let mine: Vec<bool> = found[k..].iter().take_while(|&&(jj, _)| jj == j).map(|&(_, a)| a <= p && p <= j).collect();
+                        k += mine.len();
+                        take_calls(t, me, counter, &|i| mine[i], &mut names, &mut calls);
+                    }
+                    let mut counts = HashMap::new();
+                    for t in stmts[p..].iter().flat_map(Stmt::values).chain([&*tail]) {
+                        t.count_vars(&mut counts);
+                    }
+                    stmts.insert(p, Stmt::Par { names: reusable(names, &counts), calls });
+                }
+            for s in stmts.iter_mut() {
+                for t in s.values_mut() {
+                    par_term(t, me, counter);
+                }
+            }
+            par_term(tail, me, counter);
+        }
     }
 }
 
@@ -833,6 +1129,17 @@ impl Def {
     /// A def with value parameters only.
     pub fn new(name: impl Into<String>, params: Vec<Param>, ret: Ty, body: Body) -> Def {
         Def { name: name.into(), is_unsafe: false, tmpl_types: vec![], tmpl_funcs: vec![], erased: vec![], erased_types: vec![], params, ret, body }
+    }
+
+    /// Evaluate a pure def's independent self-calls in parallel (tree
+    /// recursion: `size(l) + size(r)`); see `par_body`.
+    pub fn parallelize(&mut self) {
+        if self.name.starts_with("law:") || matches!(self.ret, Ty::Io(_) | Ty::Result(..)) {
+            return;
+        }
+        let me = self.name.clone();
+        let mut counter = 0;
+        par_body(&mut self.body, &me, &mut counter);
     }
 
     fn write(&self, out: &mut String) {

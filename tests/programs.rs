@@ -127,6 +127,38 @@ fn generated_source_is_deterministic() {
 }
 
 #[test]
+fn branches_and_self_calls_take_their_fast_forms() {
+    let image = |path: &str| fire_bend::compile(&std::fs::read_to_string(common::repo().join(path)).unwrap()).unwrap();
+    let def = |src: &str, name: &str| -> String {
+        let at = src.find(&format!("\ndef {}(", name)).unwrap_or_else(|| panic!("no def {}", name));
+        src[at + 1..].split("\n\n").next().unwrap().to_string()
+    };
+    // an opening branch on parameters is a match on a condition parameter
+    let s = image("tests/cases/branch_on_parameters_in_int_recursion.fire");
+    for f in ["fib", "fib2", "steps", "both", "via_call", "rep", "nested_arg", "pick", "countdown"] {
+        let go = def(&s, &format!("{}.F.go", f));
+        assert!(go.contains("match __c:"), "{}.F.go:\n{}", f, go);
+        assert!(def(&s, f).contains(&format!("{}.F.go(", f)), "{} forwards to its worker", f);
+    }
+    // with one branch, no thunk is left (a later branch, like the guard of
+    // `steps`, keeps its own form)
+    for f in ["fib", "fib2", "both", "rep", "pick", "countdown"] {
+        let go = def(&s, &format!("{}.F.go", f));
+        assert!(!go.contains("Bool.pick(Unit ->"), "{}.F.go:\n{}", f, go);
+    }
+    assert!(!s.contains("not_head.F.go"), "a condition on a local stays a branch");
+    // independent self-calls of a pure def run in parallel
+    let s = image("tests/cases/parallel_self_calls.fire");
+    for f in ["size", "total", "mirror", "depth", "show", "spread", "dependent", "rebind", "build.F.go", "mk.F.go"] {
+        assert!(def(&s, f).contains("__par2"), "{} runs its self-calls in parallel:\n{}", f, def(&s, f));
+    }
+    assert!(def(&s, "total").contains("__par3"), "three calls at once");
+    for f in ["all_pos", "lookup"] {
+        assert!(!def(&s, f).contains("__par"), "{} stays sequential:\n{}", f, def(&s, f));
+    }
+}
+
+#[test]
 fn laws_are_classified_and_property_tested() {
     use fire_bend::core::Proof;
     let source = std::fs::read_to_string(common::repo().join("tests/cases/laws_in_a_program.fire")).unwrap();

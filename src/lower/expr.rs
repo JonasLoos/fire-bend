@@ -349,13 +349,47 @@ impl<'a> Lower<'a> {
                 _ => value_terms[i] = Some(self.expr(ctx, a, pre)),
             }
         }
+        // a self-call of a def whose opening branch is a parameter: the
+        // worker, given the condition on these arguments (each argument the
+        // condition reads is bound first, so it is computed once)
+        let split = if d == ctx.self_def { ctx.split.clone() } else { None };
+        if let Some(sp) = &split {
+            for &i in &img.order {
+                let n = local_name(&def.params[i].name);
+                if !sp.reads.contains(&n) {
+                    continue;
+                }
+                if let Some(t) = value_terms[i].take() {
+                    let t = if matches!(t, Term::Var(_) | Term::U32(_) | Term::F32(_) | Term::Nat(_) | Term::Str(_)) {
+                        t
+                    } else {
+                        let v = self.fresh("a");
+                        pre.push(ir::Stmt::Let { name: v.clone(), reusable: false, ty: Some(img.params[i].clone()), value: t });
+                        Term::var(&v)
+                    };
+                    value_terms[i] = Some(t);
+                }
+            }
+        }
+        let mut reads: HashMap<String, Term> = HashMap::new();
         for &i in &img.order {
             match img.fnp.get(i) {
                 Some(FnParamKind::Template { .. }) => call_args.push(fn_vals[i].as_ref().unwrap().env.clone()),
-                _ => call_args.push(value_terms[i].take().unwrap_or(Term::unit())),
+                _ => {
+                    let t = value_terms[i].take().unwrap_or(Term::unit());
+                    reads.insert(local_name(&def.params[i].name), t.clone());
+                    call_args.push(t);
+                }
             }
         }
-        let t = Term::Call(img.name.clone(), call_args);
+        let callee = match &split {
+            Some(sp) => {
+                call_args.push(sp.cond.subst(&reads));
+                sp.worker.clone()
+            }
+            None => img.name.clone(),
+        };
+        let t = Term::Call(callee, call_args);
         let rty = self.ty_in(ctx, ret_ty, line);
         // a recursive call's mode is the def's own mode
         self.bind_monadic(ctx, t, img.mode, &rty, pre, line)

@@ -1,0 +1,92 @@
+# a def counting an int down that opens with a branch on its parameters
+# matches the condition as a parameter of a worker def (docs/compiler.md);
+# every shape of that opening branch answers what it did before
+
+def fib(n)                               # the body is one if value
+    if n <= 1 do n else fib(n - 1) + fib(n - 2)
+
+def fib2(n)                              # a guard that returns, then the rest
+    if n <= 1 do return n
+    fib2(n - 1) + fib2(n - 2)
+
+def steps(n, var k)                      # a branch that falls through into the rest
+    if n % 2 == 0
+        k += 1
+    else
+        k += 10
+    if n <= 0 do return k
+    steps(n - 1, k)
+
+def both(n, m)                           # and/or over two parameters
+    if n <= 0 or (m > 100 and n % 3 == 0) do return m
+    both(n - 1, m + n)
+
+def small(x)
+    x < 3
+
+def via_call(n)                          # the condition calls a pure def
+    if small(n) do return [n]
+    if n <= 1 do return []
+    via_call(n - 2) + [n]
+
+def rep(x, n)                            # generic in x, counting n
+    if n <= 0 do [] else [x] + rep(x, n - 1)
+
+def heavy(n)
+    var t = 0
+    for i in 0..n
+        t += i
+    t
+
+def nested_arg(n, m)                     # an argument the condition reads is a call
+    if n + m <= 0 do return m
+    if n <= 0 do return 0
+    1 + nested_arg(n - 1, heavy(m) - heavy(m - 1))
+
+def abs_cond(n)                          # a builtin method in the condition
+    if n.abs() <= 1 do return 7
+    if n <= 0 do return 0
+    abs_cond(n - 1) + 1
+
+def x_param(x)                           # a parameter named like a template's own
+    if str(x).length() <= 1 do return x
+    if x <= 0 do return 0
+    x_param(x - 1)
+
+def pick(xs: [int], n)                   # fallible: the index may miss
+    if n <= 0 do return xs[0]
+    pick(xs, n - 1) + xs[n % len(xs)]
+
+def countdown(n)                         # IO
+    if n <= 0
+        print("liftoff")
+        return 0
+    print(n)
+    countdown(n - 1) + 1
+
+def not_head(n, k)                       # the condition reads a local: a thunk as before
+    m = n * 2
+    if m <= 0 do return k
+    if n <= 0 do return k
+    not_head(n - 1, k + 1)
+
+print(fib(10), fib(-5), fib(0), fib(1))
+print(fib2(15), fib2(-3))
+print(steps(5, 0), steps(-2, 0), steps(0, 3))
+print(both(10, 0), both(200, 150), both(-1, 9))
+print(via_call(9), via_call(2), via_call(-4))
+print(rep("ab", 3), rep(1.5, 2), rep(true, 0))
+print(nested_arg(6, 5), nested_arg(3, -9))
+print(abs_cond(5), abs_cond(-1))
+print(x_param(25), x_param(-3))
+print([5, 6, 7] *> fib, [1, 2] *> fib2)
+print(pick([1, 2, 3], 4))
+print(countdown(3))
+print(not_head(4, 0))
+
+law fib_ten
+    fib(10) == 55
+
+law fib2_matches
+    for b: bool
+    fib2(if b do 7 else 8) == fib(if b do 7 else 8)
