@@ -1,6 +1,6 @@
 # Fire
 
-Fire is a lightweight frontend for Bend 2, a total, dependently typed language with proofs. It keeps Bend's guarantees and adds a simpler syntax, type and effect inference, pipelines, and checked mutability.
+Fire is a lightweight frontend for [Bend 2](https://github.com/bendlang/bend), a total, dependently typed language with proofs. It keeps Bend's checker and adds a simpler syntax, simple types with full inference, pipelines, and checked mutability.
 
 ```fire
 def grade(score)                     # inferred types
@@ -23,14 +23,14 @@ law top_marks                        # laws are proven when the program is built
   with alternatives or recursion is declared (`type Tree`).
 * **One `def` covers functions and classes.** A def with `public` members
   builds an object; objects are values, never shared.
-* **Programs are total.** Every def is seen to end and every match to be
-  covered, and Bend's checker confirms it. Where termination is a theorem
-  beyond the checker, the def says `unsafe def`.
+* **Programs are total.** Every def is seen to end, and Bend's checker
+  confirms it. Where termination is a theorem beyond the checker, the def
+  says `unsafe def`.
 * **Laws state what defs promise.** The compiler proves the mechanical
   ones, property-tests the rest, and hands them to Bend as claims.
 
 > [!WARNING]
-> Fire is an experimental proof of concept.
+> Fire is experimental and a proof of concept.
 
 ## Install and run
 
