@@ -19,18 +19,7 @@ impl Checker {
         // a frame of its own: a synthetic def that is never emitted
         let id = self.new_def(name, DefKind::Law, None, line);
         self.defs[id].state = State::InProgress;
-        self.frames.push(Frame {
-            def: id,
-            kind: FrameKind::Plain,
-            scopes: vec![Scope::default()],
-            captures: Vec::new(),
-            loop_depth: 0,
-            returns: Vec::new(),
-            ret: Type::Unit,
-            mutates_member: false,
-            piped: Vec::new(),
-            unsafe_: false,
-        });
+        self.frames.push(Frame::new(id, FrameKind::Plain, Type::Unit, false));
         let mut tvars = Vec::new();
         for (v, t) in vars {
             let ty = self.annotation(t, line);
@@ -105,27 +94,15 @@ impl Checker {
         let laws = self.laws.clone();
         for (li, law) in laws.iter().enumerate() {
             let mut callees: Vec<DefId> = Vec::new();
-            let mut visit = |e: &Expr| {
-                match &e.kind {
-                    ExprKind::Call { def, .. } | ExprKind::DefRef { def, .. } | ExprKind::Lambda(def) => callees.push(*def),
-                    ExprKind::Dict { id, .. } => {
-                        if let Some(Solution::Method(m, _, _)) = &self.store.constraints[*id].solution {
-                            callees.push(*m);
-                        }
+            walk_law(law, &mut |e: &Expr| match &e.kind {
+                ExprKind::Call { def, .. } | ExprKind::DefRef { def, .. } | ExprKind::Lambda(def) => callees.push(*def),
+                ExprKind::Dict { id, .. } => {
+                    if let Some(Solution::Method(m, _, _)) = &self.store.constraints[*id].solution {
+                        callees.push(*m);
                     }
-                    _ => {}
                 }
-            };
-            for h in &law.hyps {
-                walk_expr(h, &mut visit);
-            }
-            match &law.claim {
-                Claim::Equation(a, b, _) => {
-                    walk_expr(a, &mut visit);
-                    walk_expr(b, &mut visit);
-                }
-                Claim::Holds(x) => walk_expr(x, &mut visit),
-            }
+                _ => {}
+            });
             // transitively
             let mut seen = std::collections::HashSet::new();
             let mut stack = callees;
@@ -148,16 +125,7 @@ impl Checker {
                         floats = true;
                     }
                 };
-                for h in &law.hyps {
-                    walk_expr(h, &mut note);
-                }
-                match &law.claim {
-                    Claim::Equation(a, b, _) => {
-                        walk_expr(a, &mut note);
-                        walk_expr(b, &mut note);
-                    }
-                    Claim::Holds(x) => walk_expr(x, &mut note),
-                }
+                walk_law(law, &mut note);
                 for &d in &seen {
                     walk_block(&self.defs[d].body, &mut note);
                 }
@@ -175,5 +143,19 @@ impl Checker {
                 }
             }
         }
+    }
+}
+
+/// Visit every expression of a law's hypotheses and claim.
+fn walk_law(law: &Law, f: &mut dyn FnMut(&Expr)) {
+    for h in &law.hyps {
+        walk_expr(h, f);
+    }
+    match &law.claim {
+        Claim::Equation(a, b, _) => {
+            walk_expr(a, f);
+            walk_expr(b, f);
+        }
+        Claim::Holds(x) => walk_expr(x, f),
     }
 }

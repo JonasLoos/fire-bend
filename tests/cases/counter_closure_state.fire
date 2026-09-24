@@ -1,8 +1,0 @@
-def Counter
-    public var count = 0
-    public increment = () => count += 1
-    public get_count = () => count
-
-counter = Counter()
-counter.increment()
-print(counter.get_count())  # 1

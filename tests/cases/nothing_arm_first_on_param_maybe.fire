@@ -1,6 +1,0 @@
-# a nothing arm first, on a maybe whose payload type comes from a parameter
-def first_or(xs, d)
-    match xs.first()
-        nothing => d
-        k: int => k
-print(first_or([5], 0), first_or([], 9))

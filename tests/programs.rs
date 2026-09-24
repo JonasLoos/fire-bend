@@ -1,56 +1,26 @@
 // tests/programs.rs
-// Every program under examples/ and tests/cases/ compiles to Bend. When a
-// `bend` binary is on PATH the program is also built and run, and its output
-// must match the `<name>.out` golden next to it.
-//
-// BEND_TESTS=skip checks compilation only; BEND_TESTS=require fails (instead
-// of skipping the run) when `bend` is missing.
+// Every program under examples/ and tests/cases/ compiles to Bend and, when
+// `bend` runs (see tests/common), builds, runs and prints its `<name>.out`.
+// The other tests cover diagnostics, laws and `fire --check`.
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::Path;
 use std::process::Command;
 
-fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn bend_available() -> bool {
-    Command::new("bend").arg("version").output().map(|o| o.status.success()).unwrap_or(false)
-}
-
-fn programs(dir: &str) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = walkdir::WalkDir::new(repo().join(dir))
-        .into_iter()
-        .map(|e| e.unwrap().into_path())
-        .filter(|p| p.extension().is_some_and(|e| e == "fire"))
-        .collect();
-    paths.sort();
-    assert!(!paths.is_empty(), "no programs under {}", dir);
-    paths
-}
-
-/// Compile, and run through bend if possible. Returns the program's output.
+/// Compile, and when `bend` runs, build and run: the program's output.
 fn compile_and_run(path: &Path) -> Option<String> {
-    let source = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {}: {}", path.display(), e));
-    let bend_source = match fire_bend::compile(&source) {
-        Ok(s) => s,
-        Err(diags) => {
-            let msgs: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-            panic!("{}: compilation failed:\n{}", path.display(), msgs.join("\n"));
-        }
-    };
-    let mode = std::env::var("BEND_TESTS").unwrap_or_default();
-    if mode == "skip" {
+    let source = std::fs::read_to_string(path).unwrap();
+    let bend_source = fire_bend::compile(&source).unwrap_or_else(|diags| {
+        let msgs: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
+        panic!("{}: compilation failed:\n{}", path.display(), msgs.join("\n"))
+    });
+    if !common::use_bend() {
         return None;
     }
-    if !bend_available() {
-        assert!(mode != "require", "bend is not on PATH");
-        return None;
-    }
-    let dir = std::env::temp_dir().join(format!("fire-tests-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("programs");
     let stem = path.file_stem().unwrap().to_str().unwrap();
-    let src = dir.join(format!("{}.bend", stem));
-    std::fs::write(&src, &bend_source).unwrap();
+    let src = common::write(&dir, &format!("{}.bend", stem), &bend_source);
     let bin = dir.join(stem);
     let lane = fire_bend::build_with_bend(&src, &bin, fire_bend::Lane::from_env())
         .unwrap_or_else(|e| panic!("{}: bend rejected the generated program:\n{}", path.display(), e));
@@ -67,26 +37,24 @@ fn compile_and_run(path: &Path) -> Option<String> {
     Some(out)
 }
 
-fn check(path: &Path) {
-    let golden = std::fs::read_to_string(path.with_extension("out"))
-        .unwrap_or_else(|_| panic!("{}: missing golden", path.display()));
-    if let Some(got) = compile_and_run(path) {
-        assert_eq!(got, golden, "{}: output differs from the golden", path.display());
+fn check_goldens(dir: &str) {
+    for path in common::files(dir, "fire") {
+        let golden = std::fs::read_to_string(path.with_extension("out"))
+            .unwrap_or_else(|_| panic!("{}: missing golden", path.display()));
+        if let Some(got) = compile_and_run(&path) {
+            assert_eq!(got, golden, "{}: output differs from the golden", path.display());
+        }
     }
 }
 
 #[test]
 fn examples() {
-    for p in programs("examples") {
-        check(&p);
-    }
+    check_goldens("examples");
 }
 
 #[test]
 fn cases() {
-    for p in programs("tests/cases") {
-        check(&p);
-    }
+    check_goldens("tests/cases");
 }
 
 #[test]
@@ -150,7 +118,7 @@ fn unsupported_programs_are_rejected_with_a_message() {
 
 #[test]
 fn generated_source_is_deterministic() {
-    let source = std::fs::read_to_string(repo().join("examples/word_stats.fire")).unwrap();
+    let source = std::fs::read_to_string(common::repo().join("examples/basics.fire")).unwrap();
     let a = fire_bend::compile(&source).unwrap();
     let b = fire_bend::compile(&source).unwrap();
     assert_eq!(a, b);
@@ -161,7 +129,7 @@ fn generated_source_is_deterministic() {
 #[test]
 fn laws_are_classified_and_property_tested() {
     use fire_bend::core::Proof;
-    let source = std::fs::read_to_string(repo().join("tests/cases/laws_in_a_program.fire")).unwrap();
+    let source = std::fs::read_to_string(common::repo().join("tests/cases/laws_in_a_program.fire")).unwrap();
     let (image, report) = fire_bend::compile_for_check(&source).unwrap();
     let proof = |name: &str| report.laws.iter().find(|(n, _, _)| n == name).map(|(_, _, p)| p.clone()).unwrap();
     assert_eq!(proof("cycle_of_three"), Proof::Finite);
@@ -174,14 +142,11 @@ fn laws_are_classified_and_property_tested() {
     assert!(report.unsafe_defs.is_empty());
     // the property-test image compiles, and under Bend every law holds
     let tests = fire_bend::compile_tests(&source).unwrap();
-    if std::env::var("BEND_TESTS").unwrap_or_default() == "skip" || !bend_available() {
+    if !common::use_bend() {
         return;
     }
-    let dir = std::env::temp_dir().join(format!("fire-law-tests-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let src = dir.join("laws.bend");
-    std::fs::write(&src, &tests).unwrap();
-    let run = Command::new("bend").arg(&src).env("BEND_NO_TELEMETRY", "1").output().unwrap();
+    let src = common::write(&common::scratch("law-tests"), "laws.bend", &tests);
+    let run = common::bend(&[&src]);
     let out = String::from_utf8_lossy(&run.stdout);
     assert!(run.status.success(), "{}", out);
     for law in ["cycle_of_three", "twice_small", "twice_length", "cents_text"] {
@@ -202,17 +167,15 @@ fn laws_over_generic_types_are_stated_for_ints() {
 /// Bend accepts the whole image; a failing proof is the proof's fault.
 #[test]
 fn check_reports_proofs_from_the_proof_file() {
-    if std::env::var("BEND_TESTS").unwrap_or_default() == "skip" || !bend_available() {
+    if !common::use_bend() {
         return;
     }
-    let dir = std::env::temp_dir().join(format!("fire-proof-tests-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let prog = dir.join("app.fire");
-    std::fs::write(&prog, "def app(xs, ys)\n    match xs\n        [] => ys\n        [h, ...t] => [h] + app(t, ys)\nlaw app_nil_left\n    for xs: [int]\n    app([], xs) == xs\nlaw app_small\n    app([1], [2]) == [1, 2]\nlaw app_nil\n    for xs: [int]\n    app(xs, []) == xs\nprint(app([1], [2]))\n").unwrap();
+    let dir = common::scratch("proof-tests");
+    let prog = common::write(&dir, "app.fire", "def app(xs, ys)\n    match xs\n        [] => ys\n        [h, ...t] => [h] + app(t, ys)\nlaw app_nil_left\n    for xs: [int]\n    app([], xs) == xs\nlaw app_small\n    app([1], [2]) == [1, 2]\nlaw app_nil\n    for xs: [int]\n    app(xs, []) == xs\nprint(app([1], [2]))\n");
     let run = |proof: &str| {
-        std::fs::write(dir.join("app.proof.bend"), proof).unwrap();
+        common::write(&dir, "app.proof.bend", proof);
         let out = Command::new(env!("CARGO_BIN_EXE_fire")).arg(&prog).arg("--check").output().unwrap();
-        (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+        (out.status.success(), common::text(&out))
     };
     // a proof that checks
     let (ok, text) = run("def app_nil_left(xs):\n  {==}\n");
@@ -239,21 +202,17 @@ fn property_tests_build() {
     // a false law that only a repeated element breaks is caught
     let src = "def increasing(xs: [int])\n    for i in 1..len(xs)\n        if xs[i - 1] >= xs[i] do return false\n    true\nlaw sorted_is_strict\n    for xs: [int]\n    increasing(sorted(xs))\n";
     let tests = fire_bend::compile_tests(src).unwrap();
-    if std::env::var("BEND_TESTS").unwrap_or_default() == "skip" || !bend_available() {
+    if !common::use_bend() {
         return;
     }
-    let dir = std::env::temp_dir().join(format!("fire-dup-tests-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("dups.bend");
-    std::fs::write(&file, &tests).unwrap();
-    let run = Command::new("bend").arg(&file).env("BEND_NO_TELEMETRY", "1").output().unwrap();
-    let out = String::from_utf8_lossy(&run.stdout);
+    let file = common::write(&common::scratch("dup-tests"), "dups.bend", &tests);
+    let out = common::text(&common::bend(&[&file]));
     assert!(out.contains("law sorted_is_strict: FAILS"), "{}", out);
 }
 
 #[test]
 fn check_lists_partial_matches() {
-    let source = std::fs::read_to_string(repo().join("tests/cases/match_coverage_through_maybe.fire")).unwrap();
+    let source = std::fs::read_to_string(common::repo().join("tests/cases/match_coverage_through_maybe.fire")).unwrap();
     let (_, report) = fire_bend::compile_for_check(&source).unwrap();
     // `partial` leaves out `Minus`; `name` covers every case
     assert_eq!(report.partial_matches, vec![(18, "Minus".to_string())]);

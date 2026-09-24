@@ -1,0 +1,11 @@
+# a line that starts with an operator continues the chain left to right:
+# `- 3 + 1` after `x` is `(x - 3) + 1`, and tighter operators still bind first
+x = 10
+y = x
+    - 3 + 1
+z = x
+    - 3 * 2 - 1
+    + 4
+w = x > 5
+    and x < 20 and x != 7
+print(y, z, w)

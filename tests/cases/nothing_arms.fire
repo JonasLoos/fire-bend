@@ -1,0 +1,33 @@
+# a match on a T | nothing: a `nothing` arm, then a value arm that sees the
+# narrowed T, whether bound by name or by an annotated name, and whether the
+# T is known at once or comes from a parameter or a record field
+xs = [1, 2]
+x = match xs.first()
+    nothing => -1
+    n => n * 100
+print(x)
+
+match [3, 4].first()
+    nothing => print("none")
+    n => print(n + 1)
+
+def find(ys, who)
+    ys ?> $ == who |> $.first()
+
+r = match find([1, 2], 2)
+    nothing => 0
+    s => s + 1
+print(r)
+
+def first_or(ys, d)
+    match ys.first()
+        nothing => d
+        k: int => k
+print(first_or([5], 0), first_or([], 9))
+
+def find_value(pairs, name)
+    hit = pairs ?> $.key == name *> $.value |> $.first()
+    match hit
+        nothing => ""
+        v: str => v
+print(find_value([{key: "a", value: "x"}], "a"), find_value([{key: "a", value: "x"}], "b"))

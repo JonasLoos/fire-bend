@@ -7,3 +7,5 @@ print("[{n:03}] [{m:03}] [{n:05}] [{1234:03}] [{x:08.2f}] [{2.5:06.1f}]")
 print("[{n:0>4}] [{m:*^5}] [{m:<3}|]")
 for [h, mi] in [[9, 5], [12, 30]]
     print("{h:02}:{mi:02}")
+# a `d` type changes nothing, and a precision fixes a number's decimals
+print("[{m:02d}] [{m:>4d}] [{1.5:.2}] [{m:.1}] [{'abc':.1}]")

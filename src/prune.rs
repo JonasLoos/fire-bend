@@ -1,7 +1,7 @@
 // src/prune.rs
-// Keep only the prelude items a program reaches. The prelude is ~1500 lines
-// and Bend checks (and clang compiles) all of it on every build; a typical
-// program uses a few dozen of its defs.
+// Keep only the prelude items a program reaches. Bend checks (and clang
+// compiles) the whole prelude on every build, and a typical program uses a
+// few dozen of its defs.
 
 use std::collections::{HashMap, HashSet};
 
@@ -105,9 +105,6 @@ fn split_blocks(lines: &[&str]) -> Vec<Block> {
         let mut provides = vec![name.clone()];
         let mut refs = HashSet::new();
         for l in body {
-            if l.trim_start().starts_with('#') {
-                continue;
-            }
             for t in tokens(l) {
                 if head.starts_with("type ") && t.starts_with(&format!("{}.", name)) {
                     provides.push(t.to_string());
@@ -151,6 +148,28 @@ mod tests {
         let out = prune_prelude(PRELUDE, "x = F.Pair.mk{key: 1}\n");
         assert!(out.contains("type F.Pair"));
         assert!(!out.contains("def F.fst"));
+    }
+
+    /// Bend has no forward references: every prelude item may mention
+    /// only itself and the items above it (`tools/prelude_sort.py` puts
+    /// them in that order).
+    #[test]
+    fn the_prelude_declares_before_use() {
+        let lines: Vec<&str> = crate::lower::PRELUDE.lines().collect();
+        let blocks = split_blocks(&lines);
+        let mut owner: HashMap<&str, usize> = HashMap::new();
+        for (i, b) in blocks.iter().enumerate() {
+            for name in &b.provides {
+                owner.insert(name.as_str(), i);
+            }
+        }
+        for (i, b) in blocks.iter().enumerate() {
+            for r in &b.refs {
+                if let Some(&j) = owner.get(r.as_str()) {
+                    assert!(j <= i, "prelude: {} uses {}, which is declared below it", b.provides[0], r);
+                }
+            }
+        }
     }
 
     #[test]

@@ -1,2 +1,0 @@
-# sorted() without a key on strings
-print(sorted(["b", "a", "c"]))

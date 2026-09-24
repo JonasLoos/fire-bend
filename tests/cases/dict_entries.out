@@ -1,1 +1,11 @@
-[{key: 'a', value: 1}]
+{a: 2, b: 1} [{key: 'a', value: 2}, {key: 'b', value: 1}]
+[{key: 'a', value: 2}, {key: 'b', value: 1}]
+['a', 'b']
+a=2
+b=1
+1. a 2
+2. b 1
+[{key: 'a', value: 2}, {key: 'b', value: 1}, {key: 'c', value: 3}]
+true
+{key: 3, value: 'c'}
+first a

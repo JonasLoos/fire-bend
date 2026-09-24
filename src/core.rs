@@ -12,7 +12,7 @@
 //
 // The lowering (lower/) reads only this. It never re-infers anything.
 
-use crate::types::{ClosId, ConstraintId, Scheme, TVar, Type, TypeId, TypeStore};
+use crate::types::{ConstraintId, Scheme, TVar, Type, TypeId, TypeStore};
 
 pub type DefId = usize;
 
@@ -105,9 +105,6 @@ pub struct DataType {
 }
 
 impl DataType {
-    pub fn ctor_index(&self, name: &str) -> Option<usize> {
-        self.ctors.iter().position(|c| c.name == name)
-    }
     /// The field index of a name in constructor 0 (records and classes).
     pub fn field_index(&self, name: &str) -> Option<usize> {
         self.ctors.first().and_then(|c| c.fields.iter().position(|f| f.name == name))
@@ -201,8 +198,6 @@ pub struct Def {
     /// The def itself or something it calls is `unsafe` (Bend's report).
     pub relies_on_unsafe: bool,
     pub descent: Descent,
-    /// The lambda-site id of this def when used as a value.
-    pub closure_id: ClosId,
     pub line: usize,
 }
 
@@ -300,7 +295,24 @@ pub enum ExprKind {
 #[derive(Debug, Clone)]
 pub enum FPart {
     Text(String),
-    Expr(Expr, Option<String>),
+    Expr(Expr, Option<Pad>),
+}
+
+/// Padding of an interpolated value to a width.
+#[derive(Debug, Clone)]
+pub struct Pad {
+    pub width: u32,
+    pub fill: char,
+    pub align: Align,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Right,
+    Center,
+    /// zeros after the sign
+    Zeros,
 }
 
 #[derive(Debug, Clone)]
@@ -381,12 +393,6 @@ pub struct Program {
     pub laws: Vec<Law>,
     pub main: DefId,
     pub store: TypeStore,
-}
-
-impl Program {
-    pub fn type_name(&self, id: TypeId) -> String {
-        self.types[id].name.clone()
-    }
 }
 
 /// Whether the arms cover every value of the subject's type.
@@ -581,6 +587,34 @@ impl Missed {
     }
 }
 
+/// Visit every statement of a block and of the blocks nested in its
+/// statements (branches, arms, loop bodies), not inside expressions.
+pub fn for_each_stmt(b: &Block, f: &mut dyn FnMut(&Stmt)) {
+    for s in &b.stmts {
+        for_stmt_and_nested(s, f);
+    }
+}
+
+/// Visit a statement and the statements nested in it, as `for_each_stmt`.
+pub fn for_stmt_and_nested(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
+    f(s);
+    match &s.kind {
+        StmtKind::If { then, else_, .. } => {
+            for_each_stmt(then, f);
+            for_each_stmt(else_, f);
+        }
+        StmtKind::Match { arms, .. } => {
+            for a in arms {
+                if let ExprKind::Block(b) = &a.body.kind {
+                    for_each_stmt(b, f);
+                }
+            }
+        }
+        StmtKind::For { body, .. } | StmtKind::While { body, .. } => for_each_stmt(body, f),
+        _ => {}
+    }
+}
+
 /// Visit every expression in a block (statements first, then nested
 /// expressions), calling `f` on each.
 pub fn walk_block(b: &Block, f: &mut dyn FnMut(&Expr)) {
@@ -600,12 +634,7 @@ pub fn walk_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
         }
         StmtKind::Match { subject, arms } => {
             walk_expr(subject, f);
-            for a in arms {
-                if let Some(g) = &a.guard {
-                    walk_expr(g, f);
-                }
-                walk_expr(&a.body, f);
-            }
+            walk_arms(arms, f);
         }
         StmtKind::While { cond, body } => {
             walk_expr(cond, f);
@@ -617,6 +646,15 @@ pub fn walk_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
             }
             walk_block(body, f);
         }
+    }
+}
+
+fn walk_arms(arms: &[Arm], f: &mut dyn FnMut(&Expr)) {
+    for a in arms {
+        if let Some(g) = &a.guard {
+            walk_expr(g, f);
+        }
+        walk_expr(&a.body, f);
     }
 }
 
@@ -658,12 +696,7 @@ pub fn walk_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         }
         ExprKind::Match(subject, arms) => {
             walk_expr(subject, f);
-            for a in arms {
-                if let Some(g) = &a.guard {
-                    walk_expr(g, f);
-                }
-                walk_expr(&a.body, f);
-            }
+            walk_arms(arms, f);
         }
         ExprKind::Block(b) => walk_block(b, f),
         ExprKind::And(a, b) | ExprKind::Or(a, b) => {

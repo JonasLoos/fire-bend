@@ -186,23 +186,36 @@ pub(crate) fn replaced_by(name: &str) -> &'static str {
     }
 }
 
-/// Builtin methods that exist on exactly one builtin type, used to fix a
-/// receiver whose type is not known yet.
-pub(crate) fn unique_receiver(store: &mut TypeStore, name: &str) -> Option<Type> {
-    let str_only = ["upper", "lower", "trim", "trim_start", "trim_end", "split", "lines", "replace", "starts_with", "ends_with", "chars", "repeat", "to_int", "parse_int", "parse_float", "char_code"];
-    let list_only = ["map", "filter", "each", "reduce", "any", "all", "find", "push", "pop", "drop_last", "sort", "sorted", "flatten", "count"];
-    let map_only = ["keys", "values", "entries", "has", "set", "remove", "delete"];
-    if str_only.contains(&name) {
-        Some(Type::Str)
-    } else if list_only.contains(&name) {
-        let e = store.fresh();
-        Some(Type::list(e))
-    } else if map_only.contains(&name) {
-        let v = store.fresh();
-        Some(Type::map(v))
-    } else {
-        None
+/// The builtin types that have a method of this name taking `nargs`
+/// arguments, as `method_sig` defines them.
+pub(crate) fn builtin_receivers(store: &mut TypeStore, name: &str, nargs: usize) -> Vec<Type> {
+    let candidates = [
+        Type::Str,
+        Type::Int,
+        Type::Float,
+        Type::Bool,
+        Type::list(store.fresh()),
+        Type::range(),
+        Type::map(store.fresh()),
+    ];
+    candidates
+        .into_iter()
+        .filter(|t| method_sig(store, t, name, nargs).is_some_and(|(params, _, _)| params.len() == nargs))
+        .collect()
+}
+
+/// The builtin type that a method of this name fixes a receiver of unknown
+/// type to: the one type that has it. A method that takes a function (a
+/// list's `map`, which a range also has) is lowered with its function as
+/// code, which a generic receiver cannot pass on, so it fixes a list.
+pub(crate) fn unique_receiver(store: &mut TypeStore, name: &str, nargs: usize) -> Option<Type> {
+    let mut found = builtin_receivers(store, name, nargs);
+    if found.len() == 1 {
+        return found.pop();
     }
+    let list = found.into_iter().find(|t| matches!(t, Type::List(_)))?;
+    let (params, _, _) = method_sig(store, &list, name, nargs)?;
+    params.iter().any(|p| matches!(store.shallow(p), Type::Fn(..))).then_some(list)
 }
 
 pub fn describe_class(c: &Class) -> String {
@@ -238,15 +251,11 @@ impl Checker {
         }
     }
 
-    /// The def that performs what a constraint provides: for an instance of
-    /// a generic def's dictionary, that generic def.
-    fn effect_owner(&self, id: ConstraintId) -> DefId {
-        self.store.constraints[id].user
-    }
-
+    /// Note an effect of what a constraint provides, on the def that
+    /// performs it.
     fn note_effect(&mut self, id: ConstraintId, eff: Effect) {
         if !eff.is_pure() {
-            let owner = self.effect_owner(id);
+            let owner = self.store.constraints[id].user;
             self.defs[owner].own_effect = self.defs[owner].own_effect.join(eff);
         }
     }
@@ -261,10 +270,10 @@ impl Checker {
         let subject = self.shallow(&c.subject);
         if let Type::Var(_) = subject {
             // a method name that only one builtin type has fixes the receiver
-            if let Class::Method(name, _, _) = &c.class {
+            if let Class::Method(name, args, _) = &c.class {
                 let has_class_method = self.types.iter().any(|t| t.method(name).is_some());
                 if !has_class_method
-                    && let Some(t) = unique_receiver(&mut self.store, name)
+                    && let Some(t) = unique_receiver(&mut self.store, name, args.len())
                         && self.store.unify(&subject, &t).is_ok() {
                             return self.solve_one(id);
                         }
@@ -272,287 +281,15 @@ impl Checker {
             return false;
         }
         let line = c.line;
-        let ok = match &c.class {
-            Class::Eq | Class::Ord | Class::Show => match &subject {
-                Type::Fn(..) => Err("functions"),
-                _ => {
-                    // the parts: a list's elements, a data type's arguments
-                    let parts: Vec<Type> = match &subject {
-                        Type::List(e) | Type::Map(e) => vec![(**e).clone()],
-                        Type::Data(_, args) => args.clone(),
-                        _ => vec![],
-                    };
-                    let owner = c.owner;
-                    let user = c.user;
-                    let class = c.class.clone();
-                    let subs: Vec<ConstraintId> = parts.iter().map(|p| self.store.constrain(class.clone(), p.clone(), owner, user, line)).collect();
-                    for s in &subs {
-                        self.solve_one(*s);
-                    }
-                    Ok(Solution::Concrete(subs))
-                }
-            },
-            Class::Arith(op) => {
-                let op = *op;
-                match &subject {
-                    Type::Int | Type::Float => Ok(Solution::Concrete(vec![])),
-                    Type::Str | Type::List(_) if op == ArithOp::Add => Ok(Solution::Concrete(vec![])),
-                    Type::Data(tid, _) => match self.class_operator(*tid, op.symbol()) {
-                        Some(m) => {
-                            self.ensure_def(m, line);
-                            let (owner, user) = (self.store.constraints[id].owner, self.store.constraints[id].user);
-                            let (mt, targs, dicts) = self.instantiate_def_type_for(m, owner, user, line);
-                            // self, other -> result (unary minus: self -> result)
-                            let params = if op == ArithOp::Neg { vec![subject.clone()] } else { vec![subject.clone(), subject.clone()] };
-                            let want = self.store.fresh_fn(params, subject.clone());
-                            match self.store.unify(&mt, &want) {
-                                Ok(()) => {
-                                    self.note_call(m, line);
-                                    Ok(Solution::Method(m, targs, dicts))
-                                }
-                                Err(_) => Err("operator"),
-                            }
-                        }
-                        None => Err("operator"),
-                    },
-                    _ => Err("operator"),
-                }
-            }
-            Class::OrElse(rhs, ret) => match &subject {
-                Type::Bool => {
-                    self.unify(rhs, &Type::Bool, line);
-                    self.unify(ret, &Type::Bool, line);
-                    Ok(Solution::Concrete(vec![]))
-                }
-                Type::Data(MAYBE, args) => {
-                    let inner = args[0].clone();
-                    self.unify(rhs, &inner, line);
-                    self.unify(ret, &inner, line);
-                    Ok(Solution::Concrete(vec![]))
-                }
-                _ => Err("or"),
-            },
-            Class::Zero => match &subject {
-                Type::Int | Type::Float | Type::Str | Type::List(_) => Ok(Solution::Concrete(vec![])),
-                _ => Err("sum"),
-            },
-            Class::Len => match &subject {
-                Type::List(_) | Type::Str | Type::Map(_) | Type::Data(RANGE, _) => Ok(Solution::Concrete(vec![])),
-                _ => Err("len"),
-            },
-            Class::Iter(elem) => {
-                let item = match &subject {
-                    Type::List(e) => Some((**e).clone()),
-                    Type::Data(RANGE, _) => Some(Type::Int),
-                    Type::Str => Some(Type::Str),
-                    Type::Map(v) => Some(Type::entry((**v).clone())),
-                    _ => None,
-                };
-                match item {
-                    Some(t) => {
-                        self.unify(elem, &t, line);
-                        Ok(Solution::Concrete(vec![]))
-                    }
-                    None => Err("iteration"),
-                }
-            }
-            Class::Index(idx, elem) => match &subject {
-                Type::List(e) => {
-                    let e = (**e).clone();
-                    self.unify(idx, &Type::Int, line);
-                    self.unify(elem, &e, line);
-                    self.note_effect(id, Effect::ABORT);
-                    Ok(Solution::Concrete(vec![]))
-                }
-                Type::Str => {
-                    self.unify(idx, &Type::Int, line);
-                    self.unify(elem, &Type::Str, line);
-                    self.note_effect(id, Effect::ABORT);
-                    Ok(Solution::Concrete(vec![]))
-                }
-                Type::Data(RANGE, _) => {
-                    self.unify(idx, &Type::Int, line);
-                    self.unify(elem, &Type::Int, line);
-                    self.note_effect(id, Effect::ABORT);
-                    Ok(Solution::Concrete(vec![]))
-                }
-                Type::Map(v) => {
-                    let v = (**v).clone();
-                    self.unify_key(idx, line);
-                    self.unify(elem, &Type::maybe(v), line);
-                    Ok(Solution::Concrete(vec![]))
-                }
-                _ => Err("indexing"),
-            },
-            Class::IndexSet(idx, val) => match &subject {
-                Type::List(e) => {
-                    let e = (**e).clone();
-                    self.unify(idx, &Type::Int, line);
-                    self.unify(val, &e, line);
-                    self.note_effect(id, Effect::ABORT);
-                    Ok(Solution::Concrete(vec![]))
-                }
-                Type::Map(v) => {
-                    let v = (**v).clone();
-                    self.unify_key(idx, line);
-                    self.unify(val, &v, line);
-                    Ok(Solution::Concrete(vec![]))
-                }
-                _ => Err("index assignment"),
-            },
-            Class::Field(name, ty) => match &subject {
-                Type::Data(tid, args) => {
-                    let tid = *tid;
-                    match self.field_through_parents(tid, name) {
-                        Some((path, fty_template)) => {
-                            let args = args.clone();
-                            let fty = self.field_type_at(tid, name, &args).unwrap_or(fty_template);
-                            self.unify(ty, &fty, line);
-                            Ok(Solution::Field(self.field_path(tid, &path)))
-                        }
-                        None => Err("field"),
-                    }
-                }
-                _ => Err("field"),
-            },
-            Class::SetField(name, ty) => match &subject {
-                Type::Data(tid, args) => {
-                    let tid = *tid;
-                    let args = args.clone();
-                    match self.field_through_parents(tid, name) {
-                        Some((path, fty_template)) => {
-                            let fty = self.field_type_at(tid, name, &args).unwrap_or(fty_template);
-                            self.unify(ty, &fty, line);
-                            Ok(Solution::Field(self.field_path(tid, &path)))
-                        }
-                        None => Err("field"),
-                    }
-                }
-                _ => Err("field"),
-            },
-            Class::Method(name, args, ret) => {
-                let name = name.clone();
-                let args = args.clone();
-                let ret = ret.clone();
-                match &subject {
-                    Type::Data(tid, _) if !matches!(self.types[*tid].kind, DataKind::Builtin) => {
-                        let tid = *tid;
-                        match self.method_through_parents(tid, &name) {
-                            Some(m) => {
-                                self.ensure_def(m, line);
-                                if let DefKind::Method { mutates: true, .. } = self.defs[m].kind {
-                                    self.error(line, format!("the method .{}() modifies its receiver, so the receiver must be a variable of known type; annotate the parameter", name));
-                                    Ok(Solution::Method(m, vec![], vec![]))
-                                } else {
-                                    let (owner, user) = (self.store.constraints[id].owner, self.store.constraints[id].user);
-                                    let (mt, targs, dicts) = self.instantiate_def_type_for(m, owner, user, line);
-                                    let want = self.store.fresh_fn(args.clone(), ret.clone());
-                                    // the method's first parameter is self
-                                    let mut full = vec![subject.clone()];
-                                    if let Type::Fn(ps, _, _) = &want { full.extend(ps.iter().cloned()) }
-                                    let want_full = self.store.fresh_fn(full, ret.clone());
-                                    match self.store.unify(&mt, &want_full) {
-                                        Ok(()) => {
-                                            self.note_call(m, line);
-                                            Ok(Solution::Method(m, targs, dicts))
-                                        }
-                                        Err(e) => {
-                                            let l = self.show_type(&e.left);
-                                            let r = self.show_type(&e.right);
-                                            self.error(line, format!("type mismatch in .{}(): expected {}, found {}", name, l, r));
-                                            Ok(Solution::Method(m, targs, dicts))
-                                        }
-                                    }
-                                }
-                            }
-                            None => Err("method"),
-                        }
-                    }
-                    _ => match method_sig(&mut self.store, &subject, &name, args.len()) {
-                        Some((ps, r, eff)) => {
-                            if ps.len() != args.len() {
-                                self.error(line, format!(".{}() takes {} argument(s), found {}", name, ps.len(), args.len()));
-                            } else {
-                                for (a, p) in args.iter().zip(ps.iter()) {
-                                    self.unify(a, p, line);
-                                }
-                            }
-                            self.unify(&ret, &r, line);
-                            self.note_effect(id, eff);
-                            // what the method needs of the elements
-                            let owner = c.owner;
-                            let user = c.user;
-                            let elem = match &subject {
-                                Type::List(e) => Some((**e).clone()),
-                                Type::Data(RANGE, _) => Some(Type::Int),
-                                _ => None,
-                            };
-                            let mut subs = Vec::new();
-                            if let Some(e) = elem {
-                                let needs: Vec<Class> = match name.as_str() {
-                                    "sum" => vec![Class::Arith(ArithOp::Add), Class::Zero],
-                                    "min" | "max" => vec![Class::Ord],
-                                    "contains" | "index_of" => vec![Class::Eq],
-                                    "sort" | "sorted" if args.is_empty() => vec![Class::Ord],
-                                    _ => vec![],
-                                };
-                                for cl in needs {
-                                    subs.push(self.store.constrain(cl, e.clone(), owner, user, line));
-                                }
-                                if matches!(name.as_str(), "sort" | "sorted") && !args.is_empty() {
-                                    // the key's type
-                                    if let Type::Fn(_, k, _) = self.shallow(&args[0]) {
-                                        subs.push(self.store.constrain(Class::Ord, (*k).clone(), owner, user, line));
-                                    }
-                                }
-                            }
-                            for sc in &subs {
-                                self.solve_one(*sc);
-                            }
-                            Ok(Solution::Concrete(subs))
-                        }
-                        None => Err("method"),
-                    },
-                }
-            }
-            Class::Convert(name, ty) => {
-                let ty = ty.clone();
-                let ok = match (*name, &subject) {
-                    ("str", _) => Some(Type::Str),
-                    ("int", Type::Int) | ("int", Type::Float) => Some(Type::Int),
-                    ("int", Type::Str) => {
-                        self.note_effect(id, Effect::ABORT);
-                        Some(Type::Int)
-                    }
-                    ("int", Type::Bool) => Some(Type::Int),
-                    ("float", Type::Int) | ("float", Type::Float) => Some(Type::Float),
-                    ("float", Type::Str) => {
-                        self.note_effect(id, Effect::ABORT);
-                        Some(Type::Float)
-                    }
-                    _ => None,
-                };
-                match ok {
-                    Some(t) => {
-                        self.unify(&ty, &t, line);
-                        Ok(Solution::Concrete(vec![]))
-                    }
-                    None => Err("conversion"),
-                }
-            }
-        };
-        match ok {
-            Ok(sol) => {
-                self.store.constraints[id].solution = Some(sol);
-            }
-            Err(_) => {
-                let what = describe_class(&c.class);
+        match self.solution(id, &c, &subject) {
+            Some(sol) => self.store.constraints[id].solution = Some(sol),
+            None => {
                 let s = self.show_type(&subject);
                 match &c.class {
                     Class::Method(n, _, _) => self.error(line, format!("no method .{}() on a value of type {}{}", n, s, replaced_by(n))),
                     Class::Field(n, _) | Class::SetField(n, _) => self.error(line, format!("no field .{} on a value of type {}", n, s)),
                     Class::Index(..) if matches!(subject, Type::Data(PAIR, _)) => self.error(line, format!("indexing is not defined on {}: read its fields, `.key` and `.value`", s)),
-                    _ => self.error(line, format!("{} is not defined on {}", what, s)),
+                    _ => self.error(line, format!("{} is not defined on {}", describe_class(&c.class), s)),
                 }
                 self.store.constraints[id].solution = Some(Solution::Concrete(vec![]));
             }
@@ -560,9 +297,186 @@ impl Checker {
         true
     }
 
-    /// The method of a class named after an operator symbol.
-    pub(crate) fn class_operator(&self, tid: TypeId, sym: &str) -> Option<DefId> {
-        self.types[tid].method(sym)
+    /// How a constraint `c` (number `id`) is met on its known subject, or
+    /// None when the subject's type does not support it.
+    fn solution(&mut self, id: ConstraintId, c: &Constraint, subject: &Type) -> Option<Solution> {
+        let line = c.line;
+        let none = Some(Solution::Concrete(vec![]));
+        match &c.class {
+            Class::Eq | Class::Ord | Class::Show => {
+                // the parts: a list's elements, a data type's arguments
+                let parts: Vec<Type> = match subject {
+                    Type::Fn(..) => return None,
+                    Type::List(e) | Type::Map(e) => vec![(**e).clone()],
+                    Type::Data(_, args) => args.clone(),
+                    _ => vec![],
+                };
+                let subs: Vec<ConstraintId> = parts.into_iter().map(|p| self.store.constrain(c.class.clone(), p, c.owner, c.user, line)).collect();
+                for s in &subs {
+                    self.solve_one(*s);
+                }
+                Some(Solution::Concrete(subs))
+            }
+            Class::Arith(op) => match subject {
+                Type::Int | Type::Float => none,
+                Type::Str | Type::List(_) if *op == ArithOp::Add => none,
+                Type::Data(tid, _) => {
+                    let m = self.types[*tid].method(op.symbol())?;
+                    self.ensure_def(m);
+                    let (mt, targs, dicts) = self.instantiate_def_type_for(m, c.owner, c.user, line);
+                    // self, other -> result (unary minus: self -> result)
+                    let params = if *op == ArithOp::Neg { vec![subject.clone()] } else { vec![subject.clone(), subject.clone()] };
+                    let want = self.store.fresh_fn(params, subject.clone());
+                    self.store.unify(&mt, &want).ok()?;
+                    self.note_call(m, line);
+                    Some(Solution::Method(m, targs, dicts))
+                }
+                _ => None,
+            },
+            Class::OrElse(rhs, ret) => {
+                let t = match subject {
+                    Type::Bool => Type::Bool,
+                    Type::Data(MAYBE, args) => args[0].clone(),
+                    _ => return None,
+                };
+                self.unify(rhs, &t, line);
+                self.unify(ret, &t, line);
+                none
+            }
+            Class::Zero => matches!(subject, Type::Int | Type::Float | Type::Str | Type::List(_)).then_some(Solution::Concrete(vec![])),
+            Class::Len => matches!(subject, Type::List(_) | Type::Str | Type::Map(_) | Type::Data(RANGE, _)).then_some(Solution::Concrete(vec![])),
+            Class::Iter(elem) => {
+                let item = match subject {
+                    Type::List(e) => (**e).clone(),
+                    Type::Data(RANGE, _) => Type::Int,
+                    Type::Str => Type::Str,
+                    Type::Map(v) => Type::entry((**v).clone()),
+                    _ => return None,
+                };
+                self.unify(elem, &item, line);
+                none
+            }
+            Class::Index(idx, elem) => {
+                let item = match subject {
+                    Type::List(e) => (**e).clone(),
+                    Type::Str => Type::Str,
+                    Type::Data(RANGE, _) => Type::Int,
+                    Type::Map(v) => {
+                        self.unify_key(idx, line);
+                        self.unify(elem, &Type::maybe((**v).clone()), line);
+                        return none;
+                    }
+                    _ => return None,
+                };
+                self.unify(idx, &Type::Int, line);
+                self.unify(elem, &item, line);
+                self.note_effect(id, Effect::ABORT);
+                none
+            }
+            Class::IndexSet(idx, val) => match subject {
+                Type::List(e) => {
+                    self.unify(idx, &Type::Int, line);
+                    self.unify(val, e, line);
+                    self.note_effect(id, Effect::ABORT);
+                    none
+                }
+                Type::Map(v) => {
+                    self.unify_key(idx, line);
+                    self.unify(val, v, line);
+                    none
+                }
+                _ => None,
+            },
+            Class::Field(name, ty) | Class::SetField(name, ty) => {
+                let Type::Data(tid, args) = subject else { return None };
+                let (path, fty_template) = self.field_through_parents(*tid, name)?;
+                let fty = self.field_type_at(*tid, name, args).unwrap_or(fty_template);
+                self.unify(ty, &fty, line);
+                Some(Solution::Field(self.field_path(*tid, &path)))
+            }
+            Class::Method(name, args, ret) => match subject {
+                Type::Data(tid, _) if !matches!(self.types[*tid].kind, DataKind::Builtin) => {
+                    let m = self.method_through_parents(*tid, name)?;
+                    self.ensure_def(m);
+                    if let DefKind::Method { mutates: true, .. } = self.defs[m].kind {
+                        self.error(line, format!("the method .{}() modifies its receiver, so the receiver must be a variable of known type; annotate the parameter", name));
+                        return Some(Solution::Method(m, vec![], vec![]));
+                    }
+                    let (mt, targs, dicts) = self.instantiate_def_type_for(m, c.owner, c.user, line);
+                    // the method's first parameter is self
+                    let full = std::iter::once(subject.clone()).chain(args.iter().cloned()).collect();
+                    let want = self.store.fresh_fn(full, ret.clone());
+                    match self.store.unify(&mt, &want) {
+                        Ok(()) => self.note_call(m, line),
+                        Err(e) => {
+                            let l = self.show_type(&e.left);
+                            let r = self.show_type(&e.right);
+                            self.error(line, format!("type mismatch in .{}(): expected {}, found {}", name, l, r));
+                        }
+                    }
+                    Some(Solution::Method(m, targs, dicts))
+                }
+                _ => {
+                    let (ps, r, eff) = method_sig(&mut self.store, subject, name, args.len())?;
+                    if ps.len() != args.len() {
+                        self.error(line, format!(".{}() takes {} argument(s), found {}", name, ps.len(), args.len()));
+                    } else {
+                        for (a, p) in args.iter().zip(ps.iter()) {
+                            self.unify(a, p, line);
+                        }
+                    }
+                    self.unify(ret, &r, line);
+                    self.note_effect(id, eff);
+                    // what the method needs of the elements
+                    let elem = match subject {
+                        Type::List(e) => Some((**e).clone()),
+                        Type::Data(RANGE, _) => Some(Type::Int),
+                        _ => None,
+                    };
+                    let mut subs = Vec::new();
+                    if let Some(e) = elem {
+                        let needs: Vec<Class> = match name.as_str() {
+                            "sum" => vec![Class::Arith(ArithOp::Add), Class::Zero],
+                            "min" | "max" => vec![Class::Ord],
+                            "contains" | "index_of" => vec![Class::Eq],
+                            "sort" | "sorted" if args.is_empty() => vec![Class::Ord],
+                            _ => vec![],
+                        };
+                        for cl in needs {
+                            subs.push(self.store.constrain(cl, e.clone(), c.owner, c.user, line));
+                        }
+                        if matches!(name.as_str(), "sort" | "sorted") && !args.is_empty() {
+                            // the key's type
+                            if let Type::Fn(_, k, _) = self.shallow(&args[0]) {
+                                subs.push(self.store.constrain(Class::Ord, (*k).clone(), c.owner, c.user, line));
+                            }
+                        }
+                    }
+                    for sc in &subs {
+                        self.solve_one(*sc);
+                    }
+                    Some(Solution::Concrete(subs))
+                }
+            },
+            Class::Convert(name, ty) => {
+                let t = match (*name, subject) {
+                    ("str", _) => Type::Str,
+                    ("int", Type::Int | Type::Float | Type::Bool) => Type::Int,
+                    ("float", Type::Int | Type::Float) => Type::Float,
+                    ("int", Type::Str) => {
+                        self.note_effect(id, Effect::ABORT);
+                        Type::Int
+                    }
+                    ("float", Type::Str) => {
+                        self.note_effect(id, Effect::ABORT);
+                        Type::Float
+                    }
+                    _ => return None,
+                };
+                self.unify(ty, &t, line);
+                none
+            }
+        }
     }
 
     /// A field's type in a data type instantiated at `args`, looking
@@ -582,8 +496,7 @@ impl Checker {
         None
     }
 
-    /// The path of field indices to a field, through adopted parents.
-    /// A field path as (type, field) steps from `tid`.
+    /// A path of field indices from `tid` as (type, field) steps.
     pub(crate) fn field_path(&self, tid: TypeId, path: &[usize]) -> Vec<(TypeId, usize)> {
         let mut out = Vec::new();
         let mut t = tid;
@@ -596,6 +509,7 @@ impl Checker {
         out
     }
 
+    /// A field's index path and declared type, through adopted parents.
     pub(crate) fn field_through_parents(&self, tid: TypeId, name: &str) -> Option<(Vec<usize>, Type)> {
         let dt = &self.types[tid];
         if let Some(idx) = dt.field_index(name) {
@@ -639,9 +553,6 @@ impl Checker {
         match self.defs[d].scheme.clone() {
             Some(s) if self.defs[d].state == State::Done => {
                 let (t, subst, dicts) = self.store.instantiate(&s, unit, user, line);
-                for (new, old) in dicts.iter().zip(s.dicts.iter()) {
-                    self.instance_of.insert(*new, *old);
-                }
                 for id in &dicts {
                     self.solve_one(*id);
                 }

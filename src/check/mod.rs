@@ -96,10 +96,7 @@ pub(crate) struct DefInfo {
     pub unit: DefId,
     /// Effects the body performs directly.
     pub own_effect: Effect,
-    pub closure_id: ClosId,
     pub line: usize,
-    /// For a method or constructor: the class.
-    pub class: Option<TypeId>,
     /// Default values of the parameters, checked in the def's own frame and
     /// copied into calls that leave them out.
     pub defaults: Vec<Option<Expr>>,
@@ -121,15 +118,29 @@ pub(crate) struct Frame {
     pub scopes: Vec<Scope>,
     pub captures: Vec<(String, Type)>,
     pub loop_depth: usize,
-    /// Types of `return` values, joined into the return type.
-    pub returns: Vec<Type>,
     pub ret: Type,
     /// A method assigned to a member (it must answer the rebuilt receiver).
     pub mutates_member: bool,
-    /// `$` inside a pipeline stage.
-    pub piped: Vec<Type>,
+    /// The type of `$` inside a pipeline stage.
+    pub piped: Option<Type>,
     /// The def's `unsafe` flag, inherited by lambdas inside it.
     pub unsafe_: bool,
+}
+
+impl Frame {
+    pub(crate) fn new(def: DefId, kind: FrameKind, ret: Type, unsafe_: bool) -> Frame {
+        Frame {
+            def,
+            kind,
+            scopes: vec![Scope::default()],
+            captures: Vec::new(),
+            loop_depth: 0,
+            ret,
+            mutates_member: false,
+            piped: None,
+            unsafe_,
+        }
+    }
 }
 
 pub(crate) struct Checker {
@@ -146,9 +157,6 @@ pub(crate) struct Checker {
     /// Constructors of declared types by name.
     pub ctor_names: HashMap<String, (TypeId, usize)>,
     pub lambda_counter: usize,
-    /// Which constraint each instantiated constraint came from (for the
-    /// effect of a forwarded dictionary).
-    pub instance_of: HashMap<ConstraintId, ConstraintId>,
     /// Calls from one def to another, for effects, descent and cycles:
     /// (caller, callee, line).
     pub calls: Vec<(DefId, DefId, usize)>,
@@ -199,7 +207,6 @@ impl Checker {
             type_names: HashMap::new(),
             ctor_names: HashMap::new(),
             lambda_counter: 0,
-            instance_of: HashMap::new(),
             calls: Vec::new(),
             line: 0,
             pending: Vec::new(),
@@ -335,13 +342,7 @@ impl Checker {
     fn capture(&mut self, from: usize, name: &str, b: Binding) -> Binding {
         match b {
             Binding::Local { ty, .. } => {
-                for fi in from + 1..self.frames.len() {
-                    let f = &mut self.frames[fi];
-                    if !f.captures.iter().any(|(n, _)| n == name) {
-                        f.captures.push((name.to_string(), ty.clone()));
-                    }
-                    f.scopes[0].names.insert(name.to_string(), Binding::Local { ty: ty.clone(), mutable: false });
-                }
+                self.capture_local(from, name, &ty);
                 Binding::Local { ty, mutable: false }
             }
             // a member reached from a lambda inside a method: the root local
@@ -353,17 +354,24 @@ impl Checker {
                     // a method sees the members of its object through self
                     return Binding::Member { root, root_ty, path, ty, mutable: false };
                 }
-                for fi in from + 1..self.frames.len() {
-                    let f = &mut self.frames[fi];
-                    if !f.captures.iter().any(|(n, _)| n == &root) {
-                        f.captures.push((root.clone(), root_ty.clone()));
-                    }
-                    f.scopes[0].names.insert(root.clone(), Binding::Local { ty: root_ty.clone(), mutable: false });
-                    f.scopes[0].names.insert(name.to_string(), Binding::Member { root: root.clone(), root_ty: root_ty.clone(), path: path.clone(), ty: ty.clone(), mutable: false });
+                self.capture_local(from, &root, &root_ty);
+                let member = Binding::Member { root, root_ty, path, ty, mutable: false };
+                for f in &mut self.frames[from + 1..] {
+                    f.scopes[0].names.insert(name.to_string(), member.clone());
                 }
-                Binding::Member { root, root_ty, path, ty, mutable: false }
+                member
             }
             other => other,
+        }
+    }
+
+    /// Capture a local of frame `from` by value into every frame after it.
+    fn capture_local(&mut self, from: usize, name: &str, ty: &Type) {
+        for f in &mut self.frames[from + 1..] {
+            if !f.captures.iter().any(|(n, _)| n == name) {
+                f.captures.push((name.to_string(), ty.clone()));
+            }
+            f.scopes[0].names.insert(name.to_string(), Binding::Local { ty: ty.clone(), mutable: false });
         }
     }
 
@@ -477,7 +485,6 @@ impl Checker {
 
     pub(crate) fn new_def(&mut self, name: &str, kind: DefKind, unit: Option<DefId>, line: usize) -> DefId {
         let id = self.defs.len();
-        let closure_id = id;
         let mono = self.store.fresh();
         self.defs.push(DefInfo {
             name: name.to_string(),
@@ -493,9 +500,7 @@ impl Checker {
             captures: Vec::new(),
             unit: unit.unwrap_or(id),
             own_effect: Effect::PURE,
-            closure_id,
             line,
-            class: None,
             defaults: Vec::new(),
         });
         id
@@ -519,18 +524,7 @@ impl Checker {
         // main: the top-level statements
         let main = self.new_def("main", DefKind::Main, None, 1);
         self.defs[main].state = State::InProgress;
-        self.frames.push(Frame {
-            def: main,
-            kind: FrameKind::Main,
-            scopes: vec![Scope::default()],
-            captures: Vec::new(),
-            loop_depth: 0,
-            returns: Vec::new(),
-            ret: Type::Unit,
-            mutates_member: false,
-            piped: Vec::new(),
-            unsafe_: false,
-        });
+        self.frames.push(Frame::new(main, FrameKind::Main, Type::Unit, false));
         // declared types first: constructors and type names are global
         for s in &program.statements {
             if let ast::Statement::TypeDecl { name, ctors } = &s.node {
@@ -547,7 +541,7 @@ impl Checker {
         // every hoisted top-level def is checked even when never called
         let pending: Vec<DefId> = self.frames[0].scopes[0].hoisted.values().cloned().collect();
         for d in pending {
-            self.ensure_def(d, 0);
+            self.ensure_def(d);
         }
         // laws see every def and type of the program (inside main's scope)
         for s in &program.statements {
@@ -555,10 +549,9 @@ impl Checker {
                 self.check_law(name, vars, hyp.as_ref(), claim, s.line);
             }
         }
-        let mut body = body;
         self.frames.pop();
         self.solve_pending();
-        self.defs[main].body = std::mem::take(&mut body);
+        self.defs[main].body = body;
         self.defs[main].state = State::Done;
         self.defs[main].scheme = Some(Scheme { vars: vec![], dicts: vec![], ty: self.store.fresh_fn(vec![], Type::Unit) });
         self.finish_constraints();
@@ -580,15 +573,14 @@ impl Checker {
             _ => None,
         };
         for s in stmts {
-            if let ast::Statement::Def { is_public: _, is_unsafe, name, params, return_type, body } = &s.node {
+            if let ast::Statement::Def { is_unsafe, name, params, return_type, body, .. } = &s.node {
                 if let Some(tid) = in_ctor {
                     self.declare_method(tid, name, params, return_type.clone(), body.clone(), *is_unsafe, s.line);
                     continue;
                 }
                 let is_class = params.iter().any(|p| p.is_public) || body.iter().any(stmt_declares_public);
                 let unit = if self.frame_ref().kind == FrameKind::Main { None } else { Some(self.unit()) };
-                let kind = DefKind::Plain;
-                let id = self.new_def(name, kind, unit, s.line);
+                let id = self.new_def(name, DefKind::Plain, unit, s.line);
                 self.defs[id].unsafe_ = *is_unsafe || self.frame_ref().unsafe_;
                 self.defs[id].source = Some(Source {
                     params: params.clone(),
@@ -600,7 +592,6 @@ impl Checker {
                 if is_class {
                     let tid = self.declare_class(name, id, body, s.line);
                     self.defs[id].kind = DefKind::Ctor(tid);
-                    self.defs[id].class = Some(tid);
                     self.declare(name, Binding::Class(tid));
                 } else {
                     self.declare(name, Binding::Func(id));
@@ -610,15 +601,10 @@ impl Checker {
         }
     }
 
-    /// Check a hoisted def now if it has not been checked yet. `line` is
-    /// where it was needed.
-    pub(crate) fn ensure_def(&mut self, id: DefId, line: usize) {
-        match self.defs[id].state {
-            State::Done | State::InProgress => {}
-            State::NotYet => {
-                let _ = line;
-                self.check_def(id);
-            }
+    /// Check a hoisted def now if it has not been checked yet.
+    pub(crate) fn ensure_def(&mut self, id: DefId) {
+        if self.defs[id].state == State::NotYet {
+            self.check_def(id);
         }
     }
 
@@ -632,10 +618,8 @@ impl Checker {
         // the def's scope chain: the frames up to where it was declared stay
         // visible; the frames after it are hidden while its body is checked
         let hidden: Vec<Frame> = self.frames.drain(source.frame + 1..).collect();
-        let saved_depth = self.frames[source.frame].scopes.len();
         // scopes deeper than the declaration are not visible to the def
         let hidden_scopes: Vec<Scope> = self.frames[source.frame].scopes.drain(source.depth + 1..).collect();
-        let _ = saved_depth;
         let kind = match self.defs[id].kind {
             DefKind::Ctor(t) => FrameKind::Ctor(t),
             DefKind::Method { rec, .. } => FrameKind::Method(rec),
@@ -650,30 +634,20 @@ impl Checker {
         let mono = self.fresh();
         self.defs[id].mono = mono;
         let ret = self.fresh();
-        self.frames.push(Frame {
-            def: id,
-            kind,
-            scopes: vec![Scope::default()],
-            captures: Vec::new(),
-            loop_depth: 0,
-            returns: Vec::new(),
-            ret: ret.clone(),
-            mutates_member: false,
-            piped: Vec::new(),
-            unsafe_: self.defs[id].unsafe_,
-        });
+        self.frames.push(Frame::new(id, kind, ret.clone(), self.defs[id].unsafe_));
         let (params, mut body) = match kind {
             FrameKind::Ctor(tid) => self.check_ctor_body(id, tid, &source),
             FrameKind::Method(tid) => self.check_method_body(id, tid, &source),
             _ => self.check_plain_body(id, &source),
         };
         let frame = self.frames.pop().unwrap();
-        let captures = frame.captures.clone();
+        let captures = frame.captures;
         let mutates = frame.mutates_member;
         self.solve_pending();
+        // the returns were joined into `ret` by `finish_body_value`
         let mut ret = match kind {
-            FrameKind::Ctor(tid) => Type::Data(tid, self.types[tid].params.iter().map(|v| Type::Var(*v)).collect()),
-            _ => self.join_returns(&frame, ret),
+            FrameKind::Ctor(tid) => self.class_self_type(tid),
+            _ => ret,
         };
         // a mutating method answers the rebuilt receiver (and its value)
         if let FrameKind::Method(tid) = kind {
@@ -692,7 +666,7 @@ impl Checker {
         let fty = match self.shallow(&self.defs[id].mono.clone()) {
             Type::Fn(_, _, c) => Type::Fn(param_types.clone(), Box::new(ret.clone()), c),
             _ => {
-                let c = self.store.clos_singleton(self.defs[id].closure_id);
+                let c = self.store.clos_singleton(id);
                 Type::Fn(param_types.clone(), Box::new(ret.clone()), c)
             }
         };
@@ -732,31 +706,46 @@ impl Checker {
             let ret = self.frame_ref().ret.clone();
             self.unify(&ret, &t, line);
         }
-        let param_types: Vec<Type> = params.iter().map(|p| p.ty.clone()).collect();
         // the monomorphic type is visible to recursive calls from here on
         let ret = self.frame_ref().ret.clone();
-        let c = self.store.clos_singleton(self.defs[id].closure_id);
-        let fty = Type::Fn(param_types, Box::new(ret), c);
+        self.bind_mono(id, &params, ret, line);
+        self.defs[id].params = params.clone();
+        self.defs[id].defaults = self.check_defaults(&source.params, &params, line);
+        let param_stmts = self.destructure_params(&params, &source.params);
+        let body = self.check_def_body(param_stmts, &source.body, line);
+        (params, body)
+    }
+
+    /// Unify a def's monomorphic type (what recursive calls see) with its
+    /// parameters and result; answers that function type.
+    pub(crate) fn bind_mono(&mut self, id: DefId, params: &[Param], ret: Type, line: usize) -> Type {
+        let c = self.store.clos_singleton(id);
+        let fty = Type::Fn(params.iter().map(|p| p.ty.clone()).collect(), Box::new(ret), c);
         let mono = self.defs[id].mono.clone();
         self.unify(&mono, &fty, line);
-        self.defs[id].params = params.clone();
-        self.defs[id].defaults = source.params.iter().zip(params.iter()).map(|(p, cp)| {
+        fty
+    }
+
+    /// The default values of the parameters, checked in the def's own
+    /// frame.
+    pub(crate) fn check_defaults(&mut self, ast_params: &[ast::Param], params: &[Param], line: usize) -> Vec<Option<Expr>> {
+        ast_params.iter().zip(params).map(|(p, cp)| {
             p.default.as_ref().map(|d| {
                 let x = self.check_expr(d, Some(&cp.ty));
                 self.unify(&cp.ty, &x.ty, line);
                 x
             })
-        }).collect();
-        let mut param_stmts = Vec::new();
-        for (p, ast_p) in params.iter().zip(source.params.iter()) {
-            param_stmts.extend(self.destructure_param(p, &ast_p.pattern));
-        }
-        self.hoist_defs(&source.body);
-        let mut body = self.check_block_stmts(&source.body);
-        param_stmts.append(&mut body.stmts);
-        body.stmts = param_stmts;
+        }).collect()
+    }
+
+    /// A def's body after its parameter statements, with its value
+    /// returned.
+    pub(crate) fn check_def_body(&mut self, mut stmts: Vec<Stmt>, body: &[ast::Stmt], line: usize) -> Block {
+        self.hoist_defs(body);
+        stmts.extend(self.check_block_stmts(body).stmts);
+        let mut body = Block { stmts };
         self.finish_body_value(&mut body, line);
-        (params, body)
+        body
     }
 
     /// Declare the parameters of a def or lambda in the current scope and
@@ -769,14 +758,7 @@ impl Checker {
                 ast::Pattern::Typed { type_expr, .. } => self.annotation(type_expr, line),
                 _ => self.fresh(),
             };
-            let name = match &p.pattern {
-                ast::Pattern::Identifier(n) => n.clone(),
-                ast::Pattern::Typed { pattern, .. } => match &**pattern {
-                    ast::Pattern::Identifier(n) => n.clone(),
-                    _ => format!("__p{}", i),
-                },
-                _ => format!("__p{}", i),
-            };
+            let name = plain_name(&p.pattern).cloned().unwrap_or_else(|| format!("__p{}", i));
             self.declare(&name, Binding::Local { ty: ty.clone(), mutable: p.is_var });
             out.push(Param { name, ty });
         }
@@ -862,22 +844,16 @@ impl Checker {
                     // `nothing` arms lift the others into a maybe
                     let mut ty = tys.first().cloned().unwrap_or_else(|| self.fresh());
                     let nothing_arm = arms.iter().zip(&leaves).any(|(a, l)| !l && expr::is_nothing_value(&a.body));
-                    let value_arm = arms.iter().zip(&leaves).any(|(a, l)| !l && !matches!(self.shallow(&a.body.ty), Type::Unit));
-                    if nothing_arm && value_arm {
-                        let inner = arms.iter().zip(&leaves).find(|(a, l)| !**l && !matches!(self.shallow(&a.body.ty), Type::Unit)).map(|(a, _)| a.body.ty.clone()).unwrap();
+                    let value_ty = arms.iter().zip(&leaves).find(|(a, l)| !**l && !matches!(self.shallow(&a.body.ty), Type::Unit)).map(|(a, _)| a.body.ty.clone());
+                    if nothing_arm && let Some(inner) = value_ty {
                         let inner = match self.shallow(&inner) {
                             Type::Data(MAYBE, args) => args[0].clone(),
                             _ => inner,
                         };
-                        ty = Type::maybe(inner.clone());
+                        ty = Type::maybe(inner);
                         for (a, _) in arms.iter_mut().zip(&leaves).filter(|(_, l)| !**l) {
-                            if expr::is_nothing_value(&a.body) {
-                                let b = std::mem::replace(&mut a.body, Expr { kind: ExprKind::Lit(Lit::Nothing), ty: Type::Unit, line: a.line });
-                                a.body = self.absent(b, &ty);
-                            } else {
-                                let b = std::mem::replace(&mut a.body, Expr { kind: ExprKind::Lit(Lit::Nothing), ty: Type::Unit, line: a.line });
-                                a.body = self.some(b);
-                            }
+                            let b = std::mem::replace(&mut a.body, Expr { kind: ExprKind::Lit(Lit::Nothing), ty: Type::Unit, line: a.line });
+                            a.body = if expr::is_nothing_value(&b) { self.absent(b, &ty) } else { self.some(b) };
                         }
                     }
                     for (a, l) in arms.iter_mut().zip(&leaves) {
@@ -909,7 +885,7 @@ impl Checker {
         let assigns = match body.stmts.last() {
             Some(s @ Stmt { kind: StmtKind::If { .. } | StmtKind::Match { .. }, .. }) => {
                 let mut found = false;
-                effects::for_each_stmt(&Block { stmts: vec![s.clone()] }, &mut |s: &Stmt| {
+                for_stmt_and_nested(s, &mut |s: &Stmt| {
                     if matches!(s.kind, StmtKind::Assign { .. }) {
                         found = true;
                     }
@@ -1016,12 +992,6 @@ impl Checker {
             }
             _ => false,
         }
-    }
-
-    /// The result type of a finished body (its returns were joined by
-    /// `finish_body_value`).
-    fn join_returns(&mut self, _frame: &Frame, ret: Type) -> Type {
-        ret
     }
 
     // -- finishing -------------------------------------------------------------
@@ -1152,29 +1122,22 @@ impl Checker {
     }
 
     fn finish(self) -> Program {
-        let mut defs = Vec::new();
-        let n = self.defs.len();
-        for id in 0..n {
-            let d = self.defs[id].clone();
-            let scheme = d.scheme.clone().unwrap_or(Scheme { vars: vec![], dicts: vec![], ty: d.mono.clone() });
-            defs.push(Def {
-                id,
-                name: d.name,
-                kind: d.kind,
-                unit: d.unit,
-                unsafe_: d.unsafe_,
-                params: d.params,
-                captures: d.captures,
-                scheme,
-                ret: d.ret,
-                body: d.body,
-                effect: self.effects_final.get(id).cloned().unwrap_or(d.own_effect),
-                relies_on_unsafe: self.unsafe_final.get(id).cloned().unwrap_or(d.unsafe_),
-                descent: self.descent_final.get(id).cloned().unwrap_or(Descent::None),
-                closure_id: d.closure_id,
-                line: d.line,
-            });
-        }
+        let defs = self.defs.into_iter().enumerate().map(|(id, d)| Def {
+            id,
+            name: d.name,
+            kind: d.kind,
+            unit: d.unit,
+            unsafe_: d.unsafe_,
+            params: d.params,
+            captures: d.captures,
+            scheme: d.scheme.unwrap_or(Scheme { vars: vec![], dicts: vec![], ty: d.mono }),
+            ret: d.ret,
+            body: d.body,
+            effect: self.effects_final.get(id).cloned().unwrap_or(d.own_effect),
+            relies_on_unsafe: self.unsafe_final.get(id).cloned().unwrap_or(d.unsafe_),
+            descent: self.descent_final.get(id).cloned().unwrap_or(Descent::None),
+            line: d.line,
+        }).collect();
         Program { types: self.types, defs, laws: self.laws, main: 0, store: self.store }
     }
 }
@@ -1185,6 +1148,18 @@ pub(crate) fn stmt_declares_public(s: &ast::Stmt) -> bool {
         ast::Statement::Declaration { is_public, .. } => *is_public,
         ast::Statement::Def { is_public, .. } => *is_public,
         _ => false,
+    }
+}
+
+/// The name a pattern binds when it is a plain name (`x`, `x: T`).
+pub(crate) fn plain_name(p: &ast::Pattern) -> Option<&String> {
+    match p {
+        ast::Pattern::Identifier(n) => Some(n),
+        ast::Pattern::Typed { pattern, .. } => match &**pattern {
+            ast::Pattern::Identifier(n) => Some(n),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

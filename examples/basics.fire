@@ -1,8 +1,61 @@
+# The everyday parts: bindings, functions, pipelines, closures, records,
+# dictionaries and strings.
+
 def double(x)
     x * 2
 
 print(double(21))
 print("hello", 1 + 2, 3.5, true, nothing)
+
+# pipelines: |> applies, *> maps, ?> filters; `$` is the piped value
 xs = [1, 2, 3]
 print(xs *> $ * 10)
 print(xs ?> $ % 2 == 1 |> sum)
+
+# a lambda captures the values it sees
+factor = 3
+print(xs *> $ * factor)
+
+def make_adder(k)
+    x => x + k
+
+add5 = make_adder(5)
+print(add5(10), xs *> add5)
+
+# records: named fields, filtered and sorted by key
+people = [{name: "ada", age: 36}, {name: "bob", age: 17}, {name: "cy", age: 50}]
+print(people ?> $.age >= 18 *> $.name)
+print(sorted(people, p => p.age) *> $.name)
+oldest = people.reduce((a, b) => if a.age > b.age do a else b)
+print(oldest.name)
+
+# a long pipeline continues on lines that start with the operator
+def Person(name: str)
+    public greet = () => "Hi, {name}!"
+
+greeting = ["Alice", "Bob"]
+    ?> $[0] != "B"
+    *> Person
+    |> $[0]
+    |> $.greet()
+print(greeting)
+
+# words: reduce, and a dictionary of counts
+text = "the quick brown fox jumps over the lazy dog the fox"
+words = text.split(" ")
+unique = words.reduce((acc, w) => if acc.contains(w) do acc else acc + [w], [])
+longest = words.reduce((best, w) => if len(w) > len(best) do w else best)
+print("words: {len(words)}, unique: {len(unique)}, longest: {longest}")
+
+counts = {}
+for w in words
+    counts[w] = (counts[w] or 0) + 1
+print(counts["the"], counts["fox"], counts["cat"])   # a missing key is nothing
+print(unique *> "{$}: {counts[$] or 0}" |> $.join(", "))
+
+# strings index and slice like lists; f-strings take format specs
+s = "Hello, World"
+print(s.upper(), s.lower(), len(s), s[0], s[-1], s[0..5])
+print(s.split(", ").join(" | "))
+print("{s:>15}|{s:<15}|{3.14159:.2f}|{42:5}")
+print(s.contains("World"), s.starts_with("He"), s.index_of("World"))

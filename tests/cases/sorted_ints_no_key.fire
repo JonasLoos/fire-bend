@@ -1,2 +1,0 @@
-# sorted() without a key on ints
-print(sorted([3, 1, 2]))

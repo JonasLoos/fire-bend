@@ -1,0 +1,17 @@
+# a receiver of unknown type is fixed by a builtin method only one builtin
+# type has; `.to_int()`, which ints, floats and strings all have, leaves it
+# generic, while a method taking a function (`.map`, which ranges have too)
+# fixes a list
+def whole(x)
+    x.to_int()
+
+print(whole(2.5), whole(-2.5), whole(7), whole("42"))
+
+def doubled(xs)
+    xs.map(n => n * 2)
+
+def total(xs)
+    xs.reduce((acc, n) => acc + n, 0)
+
+print(doubled([1, 2, 3]), total([1, 2, 3]))
+print((1..4).map(n => n * 2), (1..5).reduce((acc, n) => acc + n, 0))

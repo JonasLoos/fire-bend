@@ -1,5 +1,0 @@
-# an identifier arm after `nothing =>` narrows T | nothing to T
-xs = [3, 4]
-match xs.first()
-    nothing => print("none")
-    n => print(n + 1)

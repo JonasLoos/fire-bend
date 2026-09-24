@@ -82,7 +82,7 @@ impl Checker {
             ast::Statement::Def { name, .. } => {
                 // hoisted; a nested def with captures becomes a closure here
                 if let Some(d) = self.lookup_hoisted(name) {
-                    self.ensure_def(d, line);
+                    self.ensure_def(d);
                     let nested = self.defs[d].unit != d;
                     if nested && !self.defs[d].captures.is_empty() {
                         let ty = self.defs[d].scheme.as_ref().map(|s| s.ty.clone()).unwrap_or_else(|| self.defs[d].mono.clone());
@@ -131,7 +131,6 @@ impl Checker {
                 // an earlier return (or the annotation) may have fixed a `T | nothing`
                 let ret = self.frame_ref().ret.clone();
                 let x = self.fit(x, &ret);
-                self.frame().returns.push(x.ty.clone());
                 vec![self.stmt(StmtKind::Return(x))]
             }
             ast::Statement::Break => {
@@ -237,28 +236,28 @@ impl Checker {
                 self.unify(&Type::Bool, &x.ty, arm.line);
                 x
             });
-            let body = match &arm.body {
+            let block = match &arm.body {
                 ast::Expression::Block(stmts) => {
                     self.hoist_defs(stmts);
-                    let b = self.check_block_stmts(stmts);
-                    let ty = match b.stmts.last() {
-                        Some(Stmt { kind: StmtKind::Expr(e), .. }) => e.ty.clone(),
-                        _ => Type::Unit,
-                    };
-                    Expr { kind: ExprKind::Block(b), ty, line: arm.line }
+                    Some(self.check_block_stmts(stmts))
                 }
                 // in a statement match an expression arm is a statement
                 // (`{ok} => oks.push(ok)` stores back)
                 other if statement => {
                     let stmts = vec![ast::Stmt { node: ast::Statement::Expression(other.clone()), line: arm.line }];
-                    let b = self.check_block_stmts(&stmts);
+                    Some(self.check_block_stmts(&stmts))
+                }
+                _ => None,
+            };
+            let body = match block {
+                Some(b) => {
                     let ty = match b.stmts.last() {
                         Some(Stmt { kind: StmtKind::Expr(e), .. }) => e.ty.clone(),
                         _ => Type::Unit,
                     };
                     Expr { kind: ExprKind::Block(b), ty, line: arm.line }
                 }
-                other => self.check_expr(other, result_ty.as_ref()),
+                None => self.check_expr(&arm.body, result_ty.as_ref()),
             };
             self.pop_scope();
             if !statement {
@@ -348,10 +347,10 @@ impl Checker {
             if let (Some(Binding::Func(m)), ast::Expression::Lambda { .. }) = (self.lookup(name), value)
                 && let FrameKind::Ctor(tid) = self.frame_ref().kind
                     && self.types[tid].method(name) == Some(m) {
-                        self.ensure_def(m, line);
+                        self.ensure_def(m);
                         return vec![];
                     }
-            if self.lookup(name).is_none() && !self.is_global(name) {
+            if self.lookup(name).is_none() && !expr::GLOBALS.contains(&name.as_str()) {
                 if let FrameKind::Ctor(tid) = self.frame_ref().kind
                     && self.frame_ref().scopes.len() == 1 {
                         return self.check_member_declaration(tid, false, false, &targets[0].0, value);
@@ -364,10 +363,9 @@ impl Checker {
                 return self.check_let(pat, value, false);
             }
         // `x = stack.pop()`: a mutating call whose value is bound
-        let mut stmts = Vec::new();
         let x = self.check_expr(value, None);
         // chained targets share one evaluation
-        let (value_expr, mut stmts2) = if targets.len() > 1 {
+        let (value_expr, mut stmts) = if targets.len() > 1 {
             let tmp = self.temp("v");
             let t = x.ty.clone();
             let s = self.stmt(StmtKind::Let { name: tmp.clone(), value: x });
@@ -375,39 +373,21 @@ impl Checker {
         } else {
             (x, vec![])
         };
-        stmts.append(&mut stmts2);
         for (target, op) in targets {
             let rhs = value_expr.clone();
             let rhs = match op {
                 ast::AssignmentOp::Assign => rhs,
-                other => {
+                ast::AssignmentOp::Compound(bop) => {
                     // compound: read the target, combine, write back
                     let cur = self.read_target(target);
-                    let (cur, rhs) = self.adapt_for_compound(cur, rhs);
+                    let rhs = self.float_literal_if(rhs, matches!(self.shallow(&cur.ty), Type::Float));
                     self.unify(&cur.ty, &rhs.ty, line);
                     let t = cur.ty.clone();
-                    let name = match other {
-                        ast::AssignmentOp::AddAssign => Some(ArithOp::Add),
-                        ast::AssignmentOp::SubAssign => Some(ArithOp::Sub),
-                        ast::AssignmentOp::MulAssign => Some(ArithOp::Mul),
-                        ast::AssignmentOp::DivAssign => Some(ArithOp::Div),
-                        ast::AssignmentOp::ModAssign => Some(ArithOp::Mod),
-                        ast::AssignmentOp::PowAssign => Some(ArithOp::Pow),
-                        _ => None,
-                    };
-                    match name {
+                    match expr::arith_op(*bop) {
                         Some(aop) => self.dict(Class::Arith(aop), t.clone(), vec![cur, rhs], t, line),
                         None => {
                             self.unify(&Type::Int, &t, line);
-                            let b = match other {
-                                ast::AssignmentOp::BitAndAssign => "int.and",
-                                ast::AssignmentOp::BitOrAssign => "int.or",
-                                ast::AssignmentOp::BitXorAssign => "int.xor",
-                                ast::AssignmentOp::ShlAssign => "int.shl",
-                                ast::AssignmentOp::ShrAssign => "int.shr",
-                                _ => "int.ushr",
-                            };
-                            self.expr(ExprKind::Builtin(b.into(), vec![cur, rhs]), Type::Int)
+                            self.expr(ExprKind::Builtin(expr::int_builtin(*bop).into(), vec![cur, rhs]), Type::Int)
                         }
                     }
                 }
@@ -415,22 +395,6 @@ impl Checker {
             stmts.extend(self.write_target(target, rhs));
         }
         stmts
-    }
-
-    fn adapt_for_compound(&mut self, cur: Expr, rhs: Expr) -> (Expr, Expr) {
-        let cf = matches!(self.shallow(&cur.ty), Type::Float);
-        let rhs = match (&rhs.kind, cf) {
-            (ExprKind::Lit(Lit::Int(i)), true) => {
-                let i = *i;
-                self.lit(Lit::Float(i as f64))
-            }
-            _ => rhs,
-        };
-        (cur, rhs)
-    }
-
-    fn is_global(&self, name: &str) -> bool {
-        ["print", "len", "sum", "min", "max", "abs", "round", "sorted", "reversed", "range", "error", "assert", "str", "int", "float"].contains(&name)
     }
 
     /// Whether every name a destructuring pattern binds is new.

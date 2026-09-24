@@ -1,6 +1,6 @@
-# A token substitution engine: `{{name}}` placeholders, `{{#list}}...{{/list}}`
-# repetition, filters (`{{name|upper}}`), dictionaries, .keys()/.has(),
-# comprehensions and nested loops with break/continue.
+# A token substitution engine: `{{name}}` placeholders with filters
+# (`{{name|upper}}`), a class that scans its source, dictionaries,
+# comprehensions, and loops with break/continue.
 
 def Template(public source: str)
     public var missing = []

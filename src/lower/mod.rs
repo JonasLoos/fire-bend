@@ -15,7 +15,7 @@ mod body;
 mod expr;
 mod laws;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::core::*;
 use crate::ir::{self, Body, Def as IrDef, Param as IrParam, Term, Ty, TypeDef};
@@ -44,6 +44,14 @@ impl Mode {
     }
     pub fn join(self, other: Mode) -> Mode {
         if other > self { other } else { self }
+    }
+    /// The suffix of a driver in this mode (`F.for_list_res`).
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Mode::Pure => "",
+            Mode::Result => "_res",
+            Mode::Io => "_io",
+        }
     }
     /// The Bend type of a result of type `t` in this mode.
     pub fn wrap(self, t: Ty) -> Ty {
@@ -164,7 +172,7 @@ pub fn lower_program(core: &Program, laws: Laws) -> Result<ir::Program, Vec<Diag
             if d.erased.is_empty() {
                 continue;
             }
-            let mut used = std::collections::BTreeSet::new();
+            let mut used = BTreeSet::new();
             d.body.template_params(&mut used);
             if d.erased.iter().any(|p| used.contains(p))
                 && let Some(&unit) = lw.ir_units.get(&d.name)
@@ -174,7 +182,7 @@ pub fn lower_program(core: &Program, laws: Laws) -> Result<ir::Program, Vec<Diag
             }
         }
         if !more {
-            return Ok(ir::Program { types: lw.types, defs: lw.defs, raw_prelude: PRELUDE.to_string() });
+            return Ok(ir::Program { types: lw.types, defs: lw.defs });
         }
     }
 }
@@ -364,16 +372,16 @@ impl<'a> Lower<'a> {
                 Ty::result(e, a)
             }
             Type::Data(id, args) => {
-                let eff = self.eff_params[id].clone();
-                let name = self.type_names[id].clone();
-                let mut targs = Vec::new();
-                for (v, i) in &eff {
-                    let actual = self.instantiate_eff(id, *v, *i, &args);
-                    targs.push(self.ty(&actual, names, line));
-                }
-                Ty::Named(name, targs)
+                let targs = self.eff_actuals(id, &args).iter().map(|a| self.ty(a, names, line)).collect();
+                Ty::Named(self.type_names[id].clone(), targs)
             }
         }
+    }
+
+    /// The values of a data type's effective parameters under the
+    /// arguments of a use site.
+    pub fn eff_actuals(&self, id: TypeId, args: &[Type]) -> Vec<Type> {
+        self.eff_params[id].iter().map(|(v, i)| self.instantiate_eff(id, *v, *i, args)).collect()
     }
 
     /// The value of an effective parameter `v` (found inside parameter
@@ -418,14 +426,23 @@ impl<'a> Lower<'a> {
             return;
         }
         self.emitted_types.insert(name.clone());
-        let names: Vec<(TVar, String)> = self.eff_params[id].iter().enumerate().map(|(k, (v, _))| (*v, tparam_name(k))).collect();
+        let (params, names, _) = self.type_header(id);
         let mut ctors = Vec::new();
         for (ci, c) in t.ctors.iter().enumerate() {
             let cname = self.ctor_name(id, ci);
             let fields = c.fields.iter().map(|f| (field_name(&f.name), self.ty(&f.ty, &names, t.line))).collect();
             ctors.push((cname, fields));
         }
-        self.types.push(TypeDef { name, params: names.iter().map(|(_, n)| n.clone()).collect(), ctors });
+        self.types.push(TypeDef { name, params, ctors });
+    }
+
+    /// A data type's own parameters: their names, the variables they stand
+    /// for, and the type applied to them.
+    fn type_header(&self, tid: TypeId) -> (Vec<String>, Vec<(TVar, String)>, Ty) {
+        let names: Vec<(TVar, String)> = self.eff_params[tid].iter().enumerate().map(|(k, (v, _))| (*v, tparam_name(k))).collect();
+        let params: Vec<String> = names.iter().map(|(_, n)| n.clone()).collect();
+        let selft = Ty::Named(self.type_names[tid].clone(), params.iter().map(|p| Ty::Param(p.clone())).collect());
+        (params, names, selft)
     }
 
     /// The Bend constructor name of a data type's constructor.
@@ -510,11 +527,6 @@ impl<'a> Lower<'a> {
             Ty::Io(t) => {
                 let v = self.default_of_ty(t, line);
                 Term::call("IO.pure", vec![Term::TyArg((**t).clone()), v])
-            }
-            Ty::Tuple(a, b) => {
-                let x = self.default_of_ty(a, line);
-                let y = self.default_of_ty(b, line);
-                Term::Tuple(Box::new(x), Box::new(y))
             }
             Ty::Named(n, args) => {
                 // the first constructor of the emitted type, its fields defaulted
@@ -634,8 +646,6 @@ impl<'a> Lower<'a> {
         let (ptys, rty, mode) = self.member_signature(set[0], line);
         let mut arms = Vec::new();
         for d in set {
-            let (dp, dr, dm) = self.member_signature(*d, line);
-            let _ = (dp, dr, dm);
             let cname = format!("{}.{}", name, self.def_names[*d].replace('.', "_"));
             // a sum may be built while an earlier def's image is made (its
             // parameter holds functions a later lambda flows into)
@@ -662,22 +672,11 @@ impl<'a> Lower<'a> {
             let call = self.lift_mode(call, img.mode, mode, &rty);
             arms.push((ir::Pat::Ctor(cname, vec![("env".to_string(), false)]), Body::term(call)));
         }
-        let mut params = vec![IrParam { name: "f".into(), reusable: false, ty: Ty::Named(name.clone(), vec![]) }];
+        let mut params = vec![IrParam::new("f", Ty::Named(name.clone(), vec![]))];
         for (i, t) in ptys.iter().enumerate() {
-            params.push(IrParam { name: format!("a{}", i), reusable: false, ty: t.clone() });
+            params.push(IrParam::new(format!("a{}", i), t.clone()));
         }
-        let apply = IrDef {
-            name: format!("{}.call", name),
-            is_unsafe: false,
-            tmpl_types: vec![],
-            tmpl_funcs: vec![],
-            erased: vec![],
-            erased_types: vec![],
-            params,
-            ret: mode.wrap(rty),
-            body: Body::Match { scrutinee: "f".into(), arms },
-        };
-        self.defs.push(apply);
+        self.defs.push(IrDef::new(format!("{}.call", name), params, mode.wrap(rty), Body::Match { scrutinee: "f".into(), arms }));
         name
     }
 
@@ -751,23 +750,17 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        let mut out = Vec::new();
-        for d in 0..n {
-            let def = &self.core.defs[d];
-            let mut v = Vec::new();
-            for (i, p) in def.params.iter().enumerate() {
-                let is_fn = matches!(self.store.shallow(&p.ty), Type::Fn(..));
-                v.push(if !is_fn {
+        self.fn_kinds = self.core.defs.iter().zip(&kinds).map(|(def, template)| {
+            def.params.iter().zip(template).map(|(p, &template)| {
+                if !matches!(self.store.shallow(&p.ty), Type::Fn(..)) {
                     FnParamKind::Value
-                } else if kinds[d][i] {
+                } else if template {
                     FnParamKind::Template { code: format!("f_{}", p.name), env_ty: format!("E_{}", p.name), env: format!("env_{}", p.name) }
                 } else {
                     FnParamKind::Data
-                });
-            }
-            out.push(v);
-        }
-        self.fn_kinds = out;
+                }
+            }).collect()
+        }).collect();
     }
 
     /// Whether a function parameter is used only in call position or as an
@@ -782,12 +775,8 @@ impl<'a> Lower<'a> {
         };
         walk_block(&def.body, &mut |e: &Expr| {
             match &e.kind {
-                ExprKind::Var(v) if v == name => {
-                    // a bare use: only allowed as a call target or argument,
-                    // which the parent handles; a bare reference elsewhere is
-                    // a stored value. We detect the good cases below and
-                    // count every other occurrence.
-                }
+                // a bare use is judged by its parent (a call target or an
+                // argument), or by the statement it stands in
                 ExprKind::CallClosure(f, args) => {
                     if !matches!(&f.kind, ExprKind::Var(v) if v == name) {
                         check_arg(f, false, &mut ok);
@@ -852,9 +841,6 @@ impl<'a> Lower<'a> {
             }
             _ => {}
         });
-        // captured by a lambda inside the def: a value (the lambda's
-        // environment holds it), unless the lambda only calls it, which is
-        // handled by forwarding the code
         ok
     }
 
@@ -970,8 +956,8 @@ impl<'a> Lower<'a> {
         let body = self.lower_def_body(&mut ctx, &def, &img);
         let mut ir_def = self.def_header(&img, &def, line);
         ir_def.body = body;
+        // a lambda never recurses, so it needs no `@unsafe` of its own
         ir_def.is_unsafe = def.unsafe_ && !matches!(def.kind, DefKind::Lambda);
-        // lambdas of an unsafe def are unsafe too when they recurse (they cannot)
         self.mark_reusable(&mut ir_def);
         self.ir_units.insert(ir_def.name.clone(), def.unit);
         self.defs.push(ir_def);
@@ -979,52 +965,52 @@ impl<'a> Lower<'a> {
 
     /// The header of a def: its template, erased and value parameters.
     pub fn def_header(&mut self, img: &Image, def: &Def, line: usize) -> IrDef {
-        let mut tmpl_types = Vec::new();
-        let mut erased = Vec::new();
-        for (_, n) in &img.tparams {
-            if img.template {
-                tmpl_types.push(n.clone());
-            } else {
-                erased.push(n.clone());
-            }
-        }
-        let mut tmpl_funcs = Vec::new();
-        for dp in &img.dicts {
-            tmpl_funcs.push((dp.name.clone(), dp.ty.clone()));
-        }
-        // template function parameters: the unit's (forwarded by lambdas) or its own
-        let owner = if def.unit == def.id { def.id } else { def.unit };
-        let owner_img = self.images[owner].clone().unwrap();
-        let owner_def = self.core.defs[owner].clone();
-        for (i, k) in owner_img.fnp.iter().enumerate() {
-            if let FnParamKind::Template { code, env_ty, .. } = k {
-                tmpl_types.push(env_ty.clone());
-                let fty = self.template_code_ty(&owner_def.params[i].ty, env_ty, &img.tparams, line);
-                tmpl_funcs.push((code.clone(), fty));
-            }
-        }
         let mut params = Vec::new();
         if img.fuel {
-            params.push(IrParam { name: "__fuel".into(), reusable: false, ty: Ty::Nat });
+            params.push(IrParam::new("__fuel", Ty::Nat));
         }
         if let Some((_, ety)) = &img.env {
-            params.push(IrParam { name: "env".into(), reusable: false, ty: ety.clone() });
+            params.push(IrParam::new("env", ety.clone()));
         }
         for &i in &img.order {
             let p = &def.params[i];
             match &img.fnp[i] {
                 FnParamKind::Template { env_ty, env, .. } => {
-                    params.push(IrParam { name: env.clone(), reusable: false, ty: Ty::Param(env_ty.clone()) });
+                    params.push(IrParam::new(env.clone(), Ty::Param(env_ty.clone())));
                 }
-                _ => params.push(IrParam { name: local_name(&p.name), reusable: false, ty: img.params[i].clone() }),
+                _ => params.push(IrParam::new(local_name(&p.name), img.params[i].clone())),
             }
         }
-        IrDef { name: img.name.clone(), is_unsafe: false, tmpl_types, tmpl_funcs, erased, erased_types: vec![], params, ret: img.mode.wrap(img.ret.clone()), body: Body::term(Term::unit()) }
+        let mut d = IrDef::new(img.name.clone(), params, img.mode.wrap(img.ret.clone()), Body::term(Term::unit()));
+        self.unit_header(&mut d, &img.tparams, img.template, &img.dicts, def.unit, line);
+        d
+    }
+
+    /// Give a def of a unit the unit's template and erased parameters: its
+    /// type parameters, its dictionaries, and the code (with the
+    /// environment type) of each template function parameter.
+    pub fn unit_header(&mut self, d: &mut IrDef, tparams: &[(TVar, String)], template: bool, dicts: &[DictParam], unit: DefId, line: usize) {
+        let names = tparams.iter().map(|(_, n)| n.clone()).collect();
+        if template {
+            d.tmpl_types = names;
+        } else {
+            d.erased = names;
+        }
+        d.tmpl_funcs = dicts.iter().map(|dp| (dp.name.clone(), dp.ty.clone())).collect();
+        let unit_img = self.images[unit].clone().unwrap();
+        let unit_def = self.core.defs[unit].clone();
+        for (i, k) in unit_img.fnp.iter().enumerate() {
+            if let FnParamKind::Template { code, env_ty, .. } = k {
+                d.tmpl_types.push(env_ty.clone());
+                let fty = self.template_code_ty(&unit_def.params[i].ty, env_ty, tparams, line);
+                d.tmpl_funcs.push((code.clone(), fty));
+            }
+        }
     }
 
     /// The type of a template code parameter: environment, then the
     /// function's parameters, answering in the function's mode.
-    fn template_code_ty(&mut self, fty: &Type, env_ty: &str, names: &[(TVar, String)], line: usize) -> Ty {
+    pub fn template_code_ty(&mut self, fty: &Type, env_ty: &str, names: &[(TVar, String)], line: usize) -> Ty {
         match self.store.shallow(fty) {
             Type::Fn(ps, r, c) => {
                 let mut params = vec![Ty::Param(env_ty.to_string())];
@@ -1085,23 +1071,13 @@ impl<'a> Lower<'a> {
             let params: Vec<String> = (0..n).map(|i| format!("T{}", i)).collect();
             let fields = (0..n).map(|i| (format!("v{}", i), Ty::Param(format!("T{}", i)))).collect();
             self.types.push(TypeDef { name: name.clone(), params: params.clone(), ctors: vec![(name.clone(), fields)] });
+            let rty = Ty::Named(name.clone(), params.iter().map(|p| Ty::Param(p.clone())).collect());
+            let fields: Vec<(String, bool)> = (0..n).map(|j| (format!("v{}", j), false)).collect();
             for i in 0..n {
-                let mut erased = params.clone();
-                let _ = &mut erased;
-                self.defs.push(IrDef {
-                    name: format!("{}.v{}", name, i),
-                    is_unsafe: false,
-                    tmpl_types: vec![],
-                    tmpl_funcs: vec![],
-                    erased: params.clone(),
-                    erased_types: vec![],
-                    params: vec![IrParam { name: "r".into(), reusable: false, ty: Ty::Named(name.clone(), params.iter().map(|p| Ty::Param(p.clone())).collect()) }],
-                    ret: Ty::Param(format!("T{}", i)),
-                    body: Body::Match {
-                        scrutinee: "r".into(),
-                        arms: vec![(ir::Pat::Ctor(name.clone(), (0..n).map(|j| (format!("v{}", j), false)).collect()), Body::term(Term::var(&format!("v{}", i))))],
-                    },
-                });
+                let body = Body::Match { scrutinee: "r".into(), arms: vec![(ir::Pat::Ctor(name.clone(), fields.clone()), Body::term(Term::var(&format!("v{}", i))))] };
+                let mut d = IrDef::new(format!("{}.v{}", name, i), vec![IrParam::new("r", rty.clone())], Ty::Param(format!("T{}", i)), body);
+                d.erased = params.clone();
+                self.defs.push(d);
             }
         }
         name
@@ -1118,22 +1094,13 @@ impl<'a> Lower<'a> {
             _ => format!("{}.F.get_{}", tname, fname),
         };
         if self.derived.insert(name.clone()) {
-            let params: Vec<String> = (0..self.eff_params[tid].len()).map(tparam_name).collect();
-            let selft = Ty::Named(tname.clone(), params.iter().map(|p| Ty::Param(p.clone())).collect());
-            let names: Vec<(TVar, String)> = self.eff_params[tid].iter().enumerate().map(|(k, (v, _))| (*v, tparam_name(k))).collect();
+            let (params, names, selft) = self.type_header(tid);
             let fty = self.ty(&t.ctors[0].fields[idx].ty, &names, t.line);
             let fields: Vec<(String, bool)> = t.ctors[0].fields.iter().map(|f| (field_name(&f.name), false)).collect();
-            self.defs.push(IrDef {
-                name: name.clone(),
-                is_unsafe: false,
-                tmpl_types: vec![],
-                tmpl_funcs: vec![],
-                erased: params,
-                erased_types: vec![],
-                params: vec![IrParam { name: "self_".into(), reusable: false, ty: selft }],
-                ret: fty,
-                body: Body::Match { scrutinee: "self_".into(), arms: vec![(ir::Pat::Ctor(self.ctor_name(tid, 0), fields.clone()), Body::term(Term::var(&fields[idx].0)))] },
-            });
+            let body = Body::Match { scrutinee: "self_".into(), arms: vec![(ir::Pat::Ctor(self.ctor_name(tid, 0), fields.clone()), Body::term(Term::var(&fields[idx].0)))] };
+            let mut d = IrDef::new(name.clone(), vec![IrParam::new("self_", selft)], fty, body);
+            d.erased = params;
+            self.defs.push(d);
         }
         name
     }
@@ -1141,27 +1108,17 @@ impl<'a> Lower<'a> {
     /// A field replacer of a data type: `Type.set_field(self, v)`.
     pub fn setter(&mut self, tid: TypeId, idx: usize) -> String {
         let t = self.core.types[tid].clone();
-        let tname = self.type_names[tid].clone();
         let fname = field_name(&t.ctors[0].fields[idx].name);
-        let name = format!("{}.F.set_{}", tname, fname);
+        let name = format!("{}.F.set_{}", self.type_names[tid], fname);
         if self.derived.insert(name.clone()) {
-            let params: Vec<String> = (0..self.eff_params[tid].len()).map(tparam_name).collect();
-            let selft = Ty::Named(tname.clone(), params.iter().map(|p| Ty::Param(p.clone())).collect());
-            let names: Vec<(TVar, String)> = self.eff_params[tid].iter().enumerate().map(|(k, (v, _))| (*v, tparam_name(k))).collect();
+            let (params, names, selft) = self.type_header(tid);
             let fty = self.ty(&t.ctors[0].fields[idx].ty, &names, t.line);
             let fields: Vec<(String, bool)> = t.ctors[0].fields.iter().map(|f| (field_name(&f.name), false)).collect();
             let rebuilt = Term::Ctor(self.ctor_name(tid, 0), fields.iter().enumerate().map(|(j, (f, _))| if j == idx { Term::var("v") } else { Term::var(f) }).collect());
-            self.defs.push(IrDef {
-                name: name.clone(),
-                is_unsafe: false,
-                tmpl_types: vec![],
-                tmpl_funcs: vec![],
-                erased: params,
-                erased_types: vec![],
-                params: vec![IrParam { name: "self_".into(), reusable: false, ty: selft.clone() }, IrParam { name: "v".into(), reusable: false, ty: fty }],
-                ret: selft,
-                body: Body::Match { scrutinee: "self_".into(), arms: vec![(ir::Pat::Ctor(self.ctor_name(tid, 0), fields), Body::term(rebuilt))] },
-            });
+            let body = Body::Match { scrutinee: "self_".into(), arms: vec![(ir::Pat::Ctor(self.ctor_name(tid, 0), fields), Body::term(rebuilt))] };
+            let mut d = IrDef::new(name.clone(), vec![IrParam::new("self_", selft.clone()), IrParam::new("v", fty)], selft, body);
+            d.erased = params;
+            self.defs.push(d);
         }
         name
     }
@@ -1169,33 +1126,30 @@ impl<'a> Lower<'a> {
     /// The case eliminator of a data type: one thunk per constructor,
     /// answering `R`. Used to match on a computed value.
     pub fn eliminator(&mut self, tid: TypeId) -> String {
-        let t = self.core.types[tid].clone();
-        let tname = self.type_names[tid].clone();
         let name = match tid {
-            MAYBE => "F.maybe.case".to_string(),
-            RESULT => "F.result.case".to_string(),
-            _ => format!("{}.F.case", tname),
+            MAYBE => return "F.maybe.case".to_string(),
+            RESULT => return "F.result.case".to_string(),
+            _ => format!("{}.F.case", self.type_names[tid]),
         };
-        if tid == MAYBE || tid == RESULT {
-            return name;
-        }
         if self.derived.insert(name.clone()) {
-            let params: Vec<String> = (0..self.eff_params[tid].len()).map(tparam_name).collect();
-            let selft = Ty::Named(tname.clone(), params.iter().map(|p| Ty::Param(p.clone())).collect());
-            let names: Vec<(TVar, String)> = self.eff_params[tid].iter().enumerate().map(|(k, (v, _))| (*v, tparam_name(k))).collect();
-            let mut ps = vec![IrParam { name: "x".into(), reusable: false, ty: selft }];
+            let t = self.core.types[tid].clone();
+            let (params, names, selft) = self.type_header(tid);
+            let mut ps = vec![IrParam::new("x", selft)];
             let mut arms = Vec::new();
             for (ci, c) in t.ctors.iter().enumerate() {
                 let ftys: Vec<Ty> = c.fields.iter().map(|f| self.ty(&f.ty, &names, t.line)).collect();
                 let kty = if ftys.is_empty() { Ty::func(vec![Ty::Unit], Ty::Param("R".into())) } else { Ty::func(ftys.clone(), Ty::Param("R".into())) };
                 let kname = format!("k{}", ci);
-                ps.push(IrParam { name: kname.clone(), reusable: false, ty: kty });
+                ps.push(IrParam::new(kname.clone(), kty));
                 let fields: Vec<(String, bool)> = c.fields.iter().enumerate().map(|(j, _)| (format!("f{}", j), false)).collect();
                 let args: Vec<Term> = if fields.is_empty() { vec![Term::unit()] } else { fields.iter().map(|(f, _)| Term::var(f)).collect() };
                 arms.push((ir::Pat::Ctor(self.ctor_name(tid, ci), fields), Body::term(Term::CallVar(kname, args))));
             }
+            let mut d = IrDef::new(name.clone(), ps, Ty::Param("R".into()), Body::Match { scrutinee: "x".into(), arms });
+            d.erased = params;
             // the answer may be an `IO(..)`, a type that is not data
-            self.defs.push(IrDef { name: name.clone(), is_unsafe: false, tmpl_types: vec![], tmpl_funcs: vec![], erased: params, erased_types: vec!["R".into()], params: ps, ret: Ty::Param("R".into()), body: Body::Match { scrutinee: "x".into(), arms } });
+            d.erased_types = vec!["R".into()];
+            self.defs.push(d);
         }
         name
     }
@@ -1203,21 +1157,18 @@ impl<'a> Lower<'a> {
     /// A derived structural def (`show`, `eq`, `lt`, `default`) of a data
     /// type, a template over the operations of its type parameters.
     pub fn derived_def(&mut self, kind: &str, tid: TypeId, line: usize) -> String {
-        let t = self.core.types[tid].clone();
-        let tname = self.type_names[tid].clone();
         let name = match tid {
             MAYBE => return format!("F.maybe.{}", kind),
             RESULT => return format!("F.result.{}", kind),
             PAIR => return format!("F.pair.{}", kind),
             RANGE => return format!("F.range.{}", kind),
-            _ => format!("{}.F.{}", tname, kind),
+            _ => format!("{}.F.{}", self.type_names[tid], kind),
         };
         if !self.derived.insert(name.clone()) {
             return name;
         }
-        let params: Vec<String> = (0..self.eff_params[tid].len()).map(tparam_name).collect();
-        let names: Vec<(TVar, String)> = self.eff_params[tid].iter().enumerate().map(|(k, (v, _))| (*v, tparam_name(k))).collect();
-        let selft = Ty::Named(tname.clone(), params.iter().map(|p| Ty::Param(p.clone())).collect());
+        let t = self.core.types[tid].clone();
+        let (params, names, selft) = self.type_header(tid);
         let mut tmpl_funcs = Vec::new();
         for p in &params {
             let op_ty = match kind {
@@ -1245,7 +1196,7 @@ impl<'a> Lower<'a> {
                     for (k, &fi) in shown.iter().enumerate() {
                         let f = &c.fields[fi];
                         let ft = self.store.resolve(&f.ty);
-                        let sub = self.show_term(&ft, &names, tid, line);
+                        let sub = self.show_term(&ft, &names, line);
                         let shown_field = Term::CallVar("__s".into(), vec![Term::var(&field_name(&f.name))]);
                         let shown_field = replace_callvar(shown_field, "__s", &sub);
                         let is_parent = t.parent_field() == Some(fi);
@@ -1272,7 +1223,7 @@ impl<'a> Lower<'a> {
                     };
                     arms.push((ir::Pat::Ctor(self.ctor_name(tid, ci), fields), Body::term(text)));
                 }
-                (vec![IrParam { name: "x".into(), reusable: false, ty: selft.clone() }], Ty::Str, Body::Match { scrutinee: "x".into(), arms })
+                (vec![IrParam::new("x", selft.clone())], Ty::Str, Body::Match { scrutinee: "x".into(), arms })
             }
             "eq" | "lt" => {
                 // compare constructor index first, then fields in order
@@ -1295,14 +1246,14 @@ impl<'a> Lower<'a> {
                                 let ft = self.store.resolve(&f.ty);
                                 let a = Term::var(&fa[fi].0);
                                 let b = Term::var(&fb[fi].0);
-                                let eqt = self.cmp_term("eq", &ft, &names, tid, a.clone(), b.clone(), line);
+                                let eqt = self.cmp_term("eq", &ft, &names, a.clone(), b.clone(), line);
                                 let step = if kind == "eq" {
                                     match acc {
                                         None => eqt,
                                         Some(rest) => Term::And(Box::new(eqt), Box::new(rest)),
                                     }
                                 } else {
-                                    let ltt = self.cmp_term("lt", &ft, &names, tid, a, b, line);
+                                    let ltt = self.cmp_term("lt", &ft, &names, a, b, line);
                                     match acc {
                                         None => ltt,
                                         Some(rest) => Term::Or(Box::new(ltt), Box::new(Term::And(Box::new(eqt), Box::new(rest)))),
@@ -1317,7 +1268,7 @@ impl<'a> Lower<'a> {
                     arms.push((ir::Pat::Ctor(self.ctor_name(tid, ci), fa), Body::Match { scrutinee: "b".into(), arms: inner_arms }));
                 }
                 (
-                    vec![IrParam { name: "a".into(), reusable: false, ty: selft.clone() }, IrParam { name: "b".into(), reusable: false, ty: selft.clone() }],
+                    vec![IrParam::new("a", selft.clone()), IrParam::new("b", selft.clone())],
                     Ty::Bool,
                     Body::Match { scrutinee: "a".into(), arms },
                 )
@@ -1327,33 +1278,33 @@ impl<'a> Lower<'a> {
                 let ci = t.ctors.iter().position(|c| c.fields.is_empty()).unwrap_or(0);
                 let args: Vec<Term> = t.ctors[ci].fields.iter().map(|f| {
                     let ft = self.store.resolve(&f.ty);
-                    self.default_term(&ft, &names, tid, line)
+                    self.default_term(&ft, &names, line)
                 }).collect();
                 (vec![], selft.clone(), Body::term(Term::Ctor(self.ctor_name(tid, ci), args)))
             }
         };
-        self.defs.push(IrDef { name: name.clone(), is_unsafe: false, tmpl_types: params.clone(), tmpl_funcs, erased: vec![], erased_types: vec![], params: ir_params, ret, body });
+        let mut d = IrDef::new(name.clone(), ir_params, ret, body);
+        d.tmpl_types = params;
+        d.tmpl_funcs = tmpl_funcs;
+        self.defs.push(d);
         name
     }
 
     /// A term showing a value of a (possibly generic) type, as a closed
-    /// function term, inside the derived def of `owner_tid` whose type
-    /// parameters are `names`.
-    fn show_term(&mut self, t: &Type, names: &[(TVar, String)], owner: TypeId, line: usize) -> Term {
-        let _ = owner;
+    /// function term, inside a derived def whose type parameters are
+    /// `names`.
+    fn show_term(&mut self, t: &Type, names: &[(TVar, String)], line: usize) -> Term {
         let ops: Vec<(String, String)> = names.iter().map(|(_, n)| (n.clone(), format!("show_{}", n))).collect();
         self.derived_term("repr", t, names, &ops, line)
     }
 
-    fn cmp_term(&mut self, kind: &str, t: &Type, names: &[(TVar, String)], owner: TypeId, a: Term, b: Term, line: usize) -> Term {
-        let _ = owner;
+    fn cmp_term(&mut self, kind: &str, t: &Type, names: &[(TVar, String)], a: Term, b: Term, line: usize) -> Term {
         let ops: Vec<(String, String)> = names.iter().map(|(_, n)| (n.clone(), format!("{}_{}", kind, n))).collect();
         let f = self.derived_term(kind, t, names, &ops, line);
         apply_term(f, vec![a, b])
     }
 
-    fn default_term(&mut self, t: &Type, names: &[(TVar, String)], owner: TypeId, line: usize) -> Term {
-        let _ = owner;
+    fn default_term(&mut self, t: &Type, names: &[(TVar, String)], line: usize) -> Term {
         let ops: Vec<(String, String)> = names.iter().map(|(_, n)| (n.clone(), format!("default_{}", n))).collect();
         self.derived_term("default", t, names, &ops, line)
     }
@@ -1391,7 +1342,7 @@ impl<'a> Lower<'a> {
                 }
                 let sub = self.derived_term(if base == "show" { "repr" } else { base }, e, names, ops, line);
                 let prefix = if matches!(ty, Type::List(_)) { "F.list" } else { "F.map" };
-                lambda_over(if base == "show" { 1 } else { 2 }, base, Term::Call(format!("{}.{}", prefix, base), vec![Term::TmplTy(et), tmpl_arg(sub)]))
+                lambda_over(if base == "show" { 1 } else { 2 }, Term::Call(format!("{}.{}", prefix, base), vec![Term::TmplTy(et), tmpl_arg(sub)]))
             }
             Type::Fn(..) => {
                 self.error(line, format!("cannot {} a function", kind));
@@ -1399,27 +1350,20 @@ impl<'a> Lower<'a> {
             }
             Type::Data(id, args) => {
                 let id = *id;
-                let args = args.clone();
                 let name = self.derived_def(base, id, line);
                 // one operation per effective parameter of the type
-                let eff = self.eff_params[id].clone();
-                let mut call_args = Vec::new();
-                for (v, i) in &eff {
-                    let actual = self.instantiate_eff(id, *v, *i, &args);
-                    let at = self.ty(&actual, names, line);
-                    call_args.push(Term::TmplTy(at));
-                }
+                let actuals = self.eff_actuals(id, args);
+                let mut call_args: Vec<Term> = actuals.iter().map(|a| Term::TmplTy(self.ty(a, names, line))).collect();
                 let inner = expr::component_kind(id, kind);
-                for (v, i) in &eff {
-                    let actual = self.instantiate_eff(id, *v, *i, &args);
-                    let sub = self.derived_term(inner, &actual, names, ops, line);
+                for a in &actuals {
+                    let sub = self.derived_term(inner, a, names, ops, line);
                     call_args.push(tmpl_arg(sub));
                 }
                 if base == "default" {
                     return Term::Call(name, call_args);
                 }
                 let arity = if base == "show" { 1 } else { 2 };
-                lambda_over(arity, base, Term::Call(name, call_args))
+                lambda_over(arity, Term::Call(name, call_args))
             }
         }
     }
@@ -1519,8 +1463,6 @@ fn dict_param_name(c: &Class, k: usize) -> String {
     format!("{}_{}", base, k)
 }
 
-/// A term usable as a template argument: a def reference stays `~f`, a
-/// lambda is wrapped in `~(...)`.
 /// A derived operation of a builtin type (`F.i32.show`, ...) as a closed
 /// function term. Eta-expanded: a def with reusable parameters is not
 /// accepted as a template argument, a lambda is.
@@ -1539,6 +1481,8 @@ pub fn prim_op(prefix: &str, kind: &str) -> Term {
     Term::Lam(params, Box::new(Term::Call(name, args)))
 }
 
+/// A term usable as a template argument: a def reference stays `~f`, a
+/// lambda is wrapped in `~(...)`.
 pub fn tmpl_arg(t: Term) -> Term {
     match t {
         Term::TmplRef(_) | Term::TmplTy(_) => t,
@@ -1566,7 +1510,7 @@ pub fn apply_term(f: Term, args: Vec<Term>) -> Term {
 /// `a b => call(.., a, b)`: a lambda over the given arity around a partial
 /// template call (the operation of a structured type applied to the
 /// operations of its parts, then to the values).
-fn lambda_over(arity: usize, _kind: &str, call: Term) -> Term {
+pub fn lambda_over(arity: usize, call: Term) -> Term {
     let params: Vec<String> = (0..arity).map(|i| format!("__x{}", i)).collect();
     let body = match call {
         Term::Call(f, mut args) => {
@@ -1588,6 +1532,7 @@ fn replace_callvar(t: Term, name: &str, f: &Term) -> Term {
 }
 
 pub fn subst_var(t: Term, name: &str, with: &Term) -> Term {
+    let sub = |b: Box<Term>| Box::new(subst_var(*b, name, with));
     match t {
         Term::Var(v) if v == name => with.clone(),
         Term::Var(v) => Term::Var(v),
@@ -1601,40 +1546,15 @@ pub fn subst_var(t: Term, name: &str, with: &Term) -> Term {
                 Term::CallVar(f, args)
             }
         }
-        Term::Lam(ps, b) => {
-            if ps.iter().any(|p| p == name) {
-                Term::Lam(ps, b)
-            } else {
-                Term::Lam(ps, Box::new(subst_var(*b, name, with)))
-            }
-        }
-        Term::Op(a, op, b, ty) => Term::Op(Box::new(subst_var(*a, name, with)), op, Box::new(subst_var(*b, name, with)), ty),
-        Term::Cat(a, b) => Term::Cat(Box::new(subst_var(*a, name, with)), Box::new(subst_var(*b, name, with))),
-        Term::And(a, b) => Term::And(Box::new(subst_var(*a, name, with)), Box::new(subst_var(*b, name, with))),
-        Term::Or(a, b) => Term::Or(Box::new(subst_var(*a, name, with)), Box::new(subst_var(*b, name, with))),
-        Term::Cons(a, b) => Term::Cons(Box::new(subst_var(*a, name, with)), Box::new(subst_var(*b, name, with))),
-        Term::Tuple(a, b) => Term::Tuple(Box::new(subst_var(*a, name, with)), Box::new(subst_var(*b, name, with))),
+        Term::Lam(ps, b) if ps.iter().any(|p| p == name) => Term::Lam(ps, b),
+        Term::Lam(ps, b) => Term::Lam(ps, sub(b)),
+        Term::Op(a, op, b, ty) => Term::Op(sub(a), op, sub(b), ty),
+        Term::Cat(a, b) => Term::Cat(sub(a), sub(b)),
+        Term::And(a, b) => Term::And(sub(a), sub(b)),
+        Term::Or(a, b) => Term::Or(sub(a), sub(b)),
         Term::List(items) => Term::List(items.into_iter().map(|a| subst_var(a, name, with)).collect()),
-        Term::Ann(a, ty) => Term::Ann(Box::new(subst_var(*a, name, with)), ty),
         other => other,
     }
-}
-
-pub fn render_term(t: &Term) -> String {
-    let d = IrDef {
-        name: "x".into(),
-        is_unsafe: false,
-        tmpl_types: vec![],
-        tmpl_funcs: vec![],
-        erased: vec![],
-        erased_types: vec![],
-        params: vec![],
-        ret: Ty::Unit,
-        body: Body::term(t.clone()),
-    };
-    let p = ir::Program { types: vec![], defs: vec![d], raw_prelude: String::new() };
-    let s = p.render_defs_only();
-    s.trim().trim_start_matches("def x() -> Unit:").trim().to_string()
 }
 
 /// Mark lets used more than once as reusable, recursively.
@@ -1660,43 +1580,14 @@ fn mark_body(b: &mut Body, counts: &HashMap<String, usize>) {
         Body::Block { stmts, .. } | Body::Do { stmts, .. } => {
             for s in stmts {
                 match s {
-                    ir::Stmt::Let { name, reusable, .. } => {
+                    ir::Stmt::Let { name, reusable, .. } | ir::Stmt::Bind { name, reusable, .. } => {
                         if counts.get(name).cloned().unwrap_or(0) > 1 {
                             *reusable = true;
                         }
                     }
-                    ir::Stmt::Bind { name, reusable, .. } => {
-                        if counts.get(name).cloned().unwrap_or(0) > 1 {
-                            *reusable = true;
-                        }
-                    }
-                    _ => {}
+                    ir::Stmt::Step(_) => {}
                 }
             }
         }
     }
 }
-
-pub(crate) fn for_each_stmt(b: &Block, f: &mut dyn FnMut(&Stmt)) {
-    for s in &b.stmts {
-        f(s);
-        match &s.kind {
-            StmtKind::If { then, else_, .. } => {
-                for_each_stmt(then, f);
-                for_each_stmt(else_, f);
-            }
-            StmtKind::Match { arms, .. } => {
-                for a in arms {
-                    if let ExprKind::Block(b) = &a.body.kind {
-                        for_each_stmt(b, f);
-                    }
-                }
-            }
-            StmtKind::For { body, .. } | StmtKind::While { body, .. } => for_each_stmt(body, f),
-            _ => {}
-        }
-    }
-}
-
-// keep the map ordered for deterministic output
-pub type OrderedMap<K, V> = BTreeMap<K, V>;

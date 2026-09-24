@@ -1,7 +1,7 @@
 // src/main.rs — the `fire` command line.
 use clap::Parser;
 use std::path::{Path, PathBuf};
-use std::process::{self, Command};
+use std::process;
 
 /// Compile a Fire program to Bend 2 and run it.
 #[derive(Parser)]
@@ -115,21 +115,12 @@ fn check(file: &str, image: String, rep: &fire_bend::Report) -> i32 {
         full.push('\n');
         full.push_str(text);
     }
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("program");
-    let dir = std::env::temp_dir().join(format!("fire-check-{}-{}", stem, process::id()));
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        fail(&format!("cannot create {}: {}", dir.display(), e));
+    let src = fire_bend::write_temp_source("fire-check", file, &full).unwrap_or_else(|e| fail(&e));
+    let out = fire_bend::bend(&[src.as_os_str(), "--check-only".as_ref()]).unwrap_or_else(|e| fail(&e));
+    let text = fire_bend::output_text(&out);
+    if let Some(dir) = src.parent() {
+        let _ = std::fs::remove_dir_all(dir);
     }
-    let src = dir.join(format!("{}.bend", stem));
-    if let Err(e) = std::fs::write(&src, &full) {
-        fail(&format!("cannot write {}: {}", src.display(), e));
-    }
-    let out = match Command::new("bend").arg(&src).arg("--check-only").env("BEND_NO_TELEMETRY", "1").output() {
-        Ok(o) => o,
-        Err(e) => fail(&format!("cannot run `bend` ({}); is it installed and on PATH?", e)),
-    };
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    let _ = std::fs::remove_dir_all(&dir);
     let open: Vec<&(String, usize, Proof)> = rep.laws.iter().filter(|(n, _, p)| *p == Proof::Open && !proven_by_file.contains(n)).collect();
     // open laws are Bend's TODOs; anything else is a real rejection
     let todo_only = text.contains(" found.") && text.contains("TODO") && !text.contains("- expected");
@@ -200,7 +191,7 @@ fn check(file: &str, image: String, rep: &fire_bend::Report) -> i32 {
 
 /// A Bend rejection that points at a law: the law and a message about it.
 fn explain(text: &str, laws: &[(String, usize)]) -> Option<(String, String)> {
-    let loc = location(text)?;
+    let loc = field(text, "Location: ")?;
     let (name, line) = laws.iter().find(|(n, _)| *n == loc)?;
     let (lhs, rhs) = (field(text, "- expected :"), field(text, "- observed :"));
     Some((name.clone(), format!("line {}: law {} does not hold: one side is {} and the other {}", line, name, lhs.unwrap_or("?".into()), rhs.unwrap_or("?".into()))))
@@ -228,11 +219,8 @@ fn defines(text: &str, name: &str) -> bool {
     text.lines().any(|l| l.starts_with(&format!("def {}(", name)))
 }
 
-/// The def Bend's error points at (`Location: name`).
-fn location(text: &str) -> Option<String> {
-    text.lines().find_map(|l| l.strip_prefix("Location: ")).map(|s| s.trim().to_string())
-}
-
+/// The rest of the first line of Bend's output that starts with `key`
+/// (`Location: name`, `- expected : term`).
 fn field(text: &str, key: &str) -> Option<String> {
     text.lines().find_map(|l| l.strip_prefix(key)).map(|s| s.trim().to_string())
 }

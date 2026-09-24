@@ -76,12 +76,6 @@ impl Type {
     pub fn range() -> Type {
         Type::Data(RANGE, vec![])
     }
-    pub fn is_maybe(&self) -> bool {
-        matches!(self, Type::Data(MAYBE, _))
-    }
-    pub fn is_result(&self) -> bool {
-        matches!(self, Type::Data(RESULT, _))
-    }
 }
 
 /// An arithmetic operator, each its own constraint (and template parameter).
@@ -158,11 +152,7 @@ pub enum Class {
     Convert(&'static str, Type),
 }
 
-/// How a solved constraint is implemented (the lowering reads this).
 impl Class {
-    /// Classes whose operation may abort for some subjects (indexing,
-    /// methods, conversions): their dictionary form answers a result, and
-    /// a def that takes such a dictionary may abort.
     /// The same operation (types aside): same class, same name, same
     /// operator.
     pub fn same_op(&self, other: &Class) -> bool {
@@ -175,11 +165,15 @@ impl Class {
         }
     }
 
+    /// Classes whose operation may abort for some subjects (indexing,
+    /// methods, conversions): their dictionary form answers a result, and
+    /// a def that takes such a dictionary may abort.
     pub fn fallible(&self) -> bool {
         matches!(self, Class::Index(..) | Class::IndexSet(..) | Class::Method(..) | Class::Convert(..))
     }
 }
 
+/// How a solved constraint is implemented (the lowering reads this).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Solution {
     /// Implemented from the class and the resolved subject type alone
@@ -233,12 +227,18 @@ enum ClosNode {
 }
 
 /// Storage for type variables, closure-set variables and constraints.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct TypeStore {
     vars: Vec<Binding>,
     clos: Vec<ClosNode>,
     pub constraints: Vec<Constraint>,
     pub level: u32,
+}
+
+impl Default for TypeStore {
+    fn default() -> Self {
+        TypeStore::new()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -253,15 +253,12 @@ impl TypeStore {
     }
 
     pub fn fresh(&mut self) -> Type {
-        self.vars.push(Binding::Unbound { level: self.level });
-        Type::Var((self.vars.len() - 1) as TVar)
+        Type::Var(self.fresh_var())
     }
 
     pub fn fresh_var(&mut self) -> TVar {
-        match self.fresh() {
-            Type::Var(v) => v,
-            _ => unreachable!(),
-        }
+        self.vars.push(Binding::Unbound { level: self.level });
+        (self.vars.len() - 1) as TVar
     }
 
     pub fn fresh_clos(&mut self) -> ClosVar {
@@ -270,9 +267,7 @@ impl TypeStore {
     }
 
     pub fn clos_singleton(&mut self, id: ClosId) -> ClosVar {
-        let mut set = BTreeSet::new();
-        set.insert(id);
-        self.clos.push(ClosNode::Root(set));
+        self.clos.push(ClosNode::Root(BTreeSet::from([id])));
         (self.clos.len() - 1) as ClosVar
     }
 
@@ -302,13 +297,6 @@ impl TypeStore {
         match &self.clos[r as usize] {
             ClosNode::Root(s) => s.clone(),
             _ => unreachable!(),
-        }
-    }
-
-    pub fn clos_add(&mut self, c: ClosVar, id: ClosId) {
-        let r = self.clos_root(c);
-        if let ClosNode::Root(s) = &mut self.clos[r as usize] {
-            s.insert(id);
         }
     }
 
@@ -344,23 +332,40 @@ impl TypeStore {
 
     /// Fully resolve a type (replace bound variables everywhere).
     pub fn resolve(&self, t: &Type) -> Type {
+        self.map_vars(t, &Type::Var)
+    }
+
+    /// Rebuild a type (resolved), replacing each unbound variable by `f`'s
+    /// answer for it.
+    fn map_vars(&self, t: &Type, f: &impl Fn(TVar) -> Type) -> Type {
         match self.shallow(t) {
-            Type::Var(v) => Type::Var(v),
-            Type::List(e) => Type::List(Box::new(self.resolve(&e))),
-            Type::Map(e) => Type::Map(Box::new(self.resolve(&e))),
-            Type::Fn(ps, r, c) => Type::Fn(ps.iter().map(|p| self.resolve(p)).collect(), Box::new(self.resolve(&r)), c),
-            Type::Data(id, args) => Type::Data(id, args.iter().map(|a| self.resolve(a)).collect()),
+            Type::Var(v) => f(v),
+            Type::List(e) => Type::List(Box::new(self.map_vars(&e, f))),
+            Type::Map(e) => Type::Map(Box::new(self.map_vars(&e, f))),
+            Type::Fn(ps, r, c) => Type::Fn(ps.iter().map(|p| self.map_vars(p, f)).collect(), Box::new(self.map_vars(&r, f)), c),
+            Type::Data(id, args) => Type::Data(id, args.iter().map(|a| self.map_vars(a, f)).collect()),
             other => other,
         }
     }
 
-    fn occurs(&self, v: TVar, t: &Type) -> bool {
+    /// Call `f` on every occurrence of an unbound variable in a type, left
+    /// to right.
+    fn for_each_var(&self, t: &Type, f: &mut impl FnMut(TVar)) {
         match self.shallow(t) {
-            Type::Var(w) => w == v,
-            Type::List(e) | Type::Map(e) => self.occurs(v, &e),
-            Type::Fn(ps, r, _) => ps.iter().any(|p| self.occurs(v, p)) || self.occurs(v, &r),
-            Type::Data(_, args) => args.iter().any(|a| self.occurs(v, a)),
-            _ => false,
+            Type::Var(v) => f(v),
+            Type::List(e) | Type::Map(e) => self.for_each_var(&e, f),
+            Type::Fn(ps, r, _) => {
+                for p in &ps {
+                    self.for_each_var(p, f);
+                }
+                self.for_each_var(&r, f);
+            }
+            Type::Data(_, args) => {
+                for a in &args {
+                    self.for_each_var(a, f);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -373,34 +378,15 @@ impl TypeStore {
 
     /// Lower the level of every unbound variable in `t` to at most `level`.
     fn adjust_levels(&mut self, t: &Type, level: u32) {
-        match self.shallow(t) {
-            Type::Var(w) => {
-                if let Binding::Unbound { level: l } = &mut self.vars[w as usize]
-                    && *l > level {
-                        *l = level;
-                    }
+        let mut vs = Vec::new();
+        self.for_each_var(t, &mut |v| vs.push(v));
+        for v in vs {
+            if let Binding::Unbound { level: l } = &mut self.vars[v as usize]
+                && *l > level
+            {
+                *l = level;
             }
-            Type::List(e) | Type::Map(e) => self.adjust_levels(&e, level),
-            Type::Fn(ps, r, _) => {
-                for p in &ps {
-                    self.adjust_levels(p, level);
-                }
-                self.adjust_levels(&r, level);
-            }
-            Type::Data(_, args) => {
-                for a in &args {
-                    self.adjust_levels(a, level);
-                }
-            }
-            _ => {}
         }
-    }
-
-    /// Keep every variable in `t` monomorphic: lower its level to the
-    /// current one so `generalize` will not quantify it.
-    pub fn pin(&mut self, t: &Type) {
-        let level = self.level;
-        self.adjust_levels(t, level);
     }
 
     fn bind(&mut self, v: TVar, t: Type) -> Result<(), UnifyError> {
@@ -408,7 +394,7 @@ impl TypeStore {
             && w == v {
                 return Ok(());
             }
-        if self.occurs(v, &t) {
+        if self.mentions(&t, v) {
             return Err(UnifyError { left: Type::Var(v), right: t });
         }
         let level = self.var_level(v);
@@ -489,26 +475,11 @@ impl TypeStore {
     }
 
     fn collect_generic(&self, t: &Type, out: &mut Vec<TVar>) {
-        match self.shallow(t) {
-            Type::Var(v) => {
-                if self.var_level(v) > self.level && !out.contains(&v) {
-                    out.push(v);
-                }
+        self.for_each_var(t, &mut |v| {
+            if self.var_level(v) > self.level && !out.contains(&v) {
+                out.push(v);
             }
-            Type::List(e) | Type::Map(e) => self.collect_generic(&e, out),
-            Type::Fn(ps, r, _) => {
-                for p in &ps {
-                    self.collect_generic(p, out);
-                }
-                self.collect_generic(&r, out);
-            }
-            Type::Data(_, args) => {
-                for a in &args {
-                    self.collect_generic(a, out);
-                }
-            }
-            _ => {}
-        }
+        });
     }
 
     /// Instantiate a scheme with fresh variables. Returns the type, the
@@ -535,16 +506,12 @@ impl TypeStore {
 
     /// Whether a type (resolved) mentions a variable.
     pub fn mentions(&self, t: &Type, v: TVar) -> bool {
-        match self.shallow(t) {
-            Type::Var(w) => w == v,
-            Type::List(e) | Type::Map(e) => self.mentions(&e, v),
-            Type::Fn(ps, r, _) => ps.iter().any(|p| self.mentions(p, v)) || self.mentions(&r, v),
-            Type::Data(_, args) => args.iter().any(|a| self.mentions(a, v)),
-            _ => false,
-        }
+        let mut found = false;
+        self.for_each_var(t, &mut |w| found |= w == v);
+        found
     }
 
-    pub fn substitute_class(&mut self, c: &Class, subst: &[(TVar, Type)]) -> Class {
+    pub fn substitute_class(&self, c: &Class, subst: &[(TVar, Type)]) -> Class {
         match c {
             Class::Iter(e) => Class::Iter(self.substitute(e, subst)),
             Class::OrElse(r, t) => Class::OrElse(self.substitute(r, subst), self.substitute(t, subst)),
@@ -564,50 +531,17 @@ impl TypeStore {
     /// Replace quantified variables. Function closure variables are kept:
     /// every instance of a polymorphic function shares the closure set of
     /// its definition.
-    pub fn substitute(&mut self, t: &Type, subst: &[(TVar, Type)]) -> Type {
-        match self.shallow(t) {
-            Type::Var(v) => {
-                for (w, r) in subst {
-                    if *w == v {
-                        return r.clone();
-                    }
-                }
-                Type::Var(v)
-            }
-            Type::List(e) => Type::List(Box::new(self.substitute(&e, subst))),
-            Type::Map(e) => Type::Map(Box::new(self.substitute(&e, subst))),
-            Type::Fn(ps, r, c) => {
-                let ps = ps.iter().map(|p| self.substitute(p, subst)).collect();
-                let r = self.substitute(&r, subst);
-                Type::Fn(ps, Box::new(r), c)
-            }
-            Type::Data(id, args) => Type::Data(id, args.iter().map(|a| self.substitute(a, subst)).collect()),
-            other => other,
-        }
+    pub fn substitute(&self, t: &Type, subst: &[(TVar, Type)]) -> Type {
+        self.map_vars(t, &|v| subst.iter().find(|(w, _)| *w == v).map_or(Type::Var(v), |(_, r)| r.clone()))
     }
 
-    /// Free (unbound) variables of a type.
+    /// Free (unbound) variables of a type, each once.
     pub fn free_vars(&self, t: &Type, out: &mut Vec<TVar>) {
-        match self.shallow(t) {
-            Type::Var(v) => {
-                if !out.contains(&v) {
-                    out.push(v);
-                }
+        self.for_each_var(t, &mut |v| {
+            if !out.contains(&v) {
+                out.push(v);
             }
-            Type::List(e) | Type::Map(e) => self.free_vars(&e, out),
-            Type::Fn(ps, r, _) => {
-                for p in &ps {
-                    self.free_vars(p, out);
-                }
-                self.free_vars(&r, out);
-            }
-            Type::Data(_, args) => {
-                for a in &args {
-                    self.free_vars(a, out);
-                }
-            }
-            _ => {}
-        }
+        });
     }
 
     /// The types a constraint's class mentions besides its subject.
@@ -643,15 +577,11 @@ pub fn var_names(store: &TypeStore, tys: &[&Type]) -> Vec<(TVar, String)> {
     for t in tys {
         store.free_vars(t, &mut vs);
     }
-    let mut out: Vec<(TVar, String)> = Vec::new();
-    for v in vs {
-        if !out.iter().any(|(w, _)| *w == v) {
-            let i = out.len();
-            let n = if i < 26 { ((b'a' + i as u8) as char).to_string() } else { format!("t{}", i) };
-            out.push((v, n));
-        }
-    }
-    out
+    // `free_vars` lists each variable once
+    vs.into_iter().enumerate().map(|(i, v)| {
+        let n = if i < 26 { ((b'a' + i as u8) as char).to_string() } else { format!("t{}", i) };
+        (v, n)
+    }).collect()
 }
 
 impl fmt::Display for TypeDisplay<'_> {

@@ -83,7 +83,7 @@ statement_raw = _{
     for_stmt |
     if_stmt |
     match_stmt |
-    method_stmt |
+    def_stmt |
     guarded_arm |
     expression_big
 }
@@ -95,7 +95,7 @@ comment = { "#" ~ (!nl ~ ANY)* }
 trailing_comment = _{ w* ~ "#" ~ (!nl ~ ANY)* }
 /// A documentation comment, starting with `##`.
 documentation = { "##" ~ (!nl ~ ANY)* }
-/// Variable declaration statement, e.g. `public var a = 1` or `a : int = 1`.
+/// Variable declaration statement, e.g. `var a = 1` or `public var a: int = 1`.
 variable_declaration = { ((kw_public ~ w+ ~ (kw_var ~ w+)?) | (kw_var ~ w+)) ~ typecheck ~ w* ~ "=" ~ !"=" ~ w* ~ (match_stmt | expression_big | block) }
 /// Assignment statement. It allows chaining, e.g., `a = b = 1`. The value is evaluated once and assigned to all targets left-to-right.
 assignment_stmt = { (typecheck ~ w* ~ assignment_op ~ w*)+ ~ (match_stmt | expression_big | block) }
@@ -125,10 +125,10 @@ else = { (w* ~ block_nl | w+) ~ kw_else ~ (w+ ~ pipeline_expr_simple | w* ~ bloc
 match_stmt = { kw_match ~ w+ ~ expression_small ~ w* ~ block }
 /// A guarded match arm: `pattern if condition => body` (only valid inside a match block).
 guarded_arm = { typecheck ~ w+ ~ kw_if ~ w+ ~ expression_small ~ w* ~ lambda_op ~ w* ~ (return_stmt | break_stmt | continue_stmt | pipeline_expr | block) }
-/// Method definition statement. The body block is optional: a constructor
+/// Def statement (a function, constructor or method). The body block is optional: a constructor
 /// whose `public` parameters already declare all members needs none.
 /// `unsafe def` skips the termination check.
-method_stmt = { (kw_public ~ w+)? ~ (kw_unsafe ~ w+)? ~ kw_def ~ w+ ~ identifier ~ w* ~ ("(" ~ w* ~ method_args? ~ w* ~ ")")? ~ w* ~ (typecheck_op ~ w* ~ logic_or ~ w*)? ~ block? }
+def_stmt = { (kw_public ~ w+)? ~ (kw_unsafe ~ w+)? ~ kw_def ~ w+ ~ identifier ~ w* ~ ("(" ~ w* ~ def_params? ~ w* ~ ")")? ~ w* ~ (typecheck_op ~ w* ~ logic_or ~ w*)? ~ block? }
 /// A data type declaration: `type Tree` followed by one constructor per
 /// line, `Leaf` or `Node(left: Tree, value, right: Tree)`.
 type_stmt = { kw_type ~ w+ ~ identifier ~ w* ~ block }
@@ -137,9 +137,9 @@ type_stmt = { kw_type ~ w+ ~ identifier ~ w* ~ block }
 law_stmt = { kw_law ~ w+ ~ identifier ~ trailing_comment? ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ (law_for ~ w* ~ comment? ~ block_nl)? ~ expression_big ~ DROP }
 /// The quantified variables of a law with their types, and a hypothesis.
 law_for = { kw_for ~ w+ ~ typecheck ~ (w* ~ "," ~ w* ~ typecheck)* ~ (w+ ~ kw_if ~ w+ ~ expression_small)? }
-/// Arguments for a method definition. `public` makes a parameter a member;
+/// Parameters of a def. `public` makes a parameter a member;
 /// `var` makes it mutable.
-method_args = { (kw_public ~ w+)? ~ (kw_var ~ w+)? ~ w* ~ expression_small ~ w* ~ ("," ~ w* ~ (kw_public ~ w+)? ~ (kw_var ~ w+)? ~ w* ~ expression_small ~ w*)* }
+def_params = { (kw_public ~ w+)? ~ (kw_var ~ w+)? ~ w* ~ expression_small ~ w* ~ ("," ~ w* ~ (kw_public ~ w+)? ~ (kw_var ~ w+)? ~ w* ~ expression_small ~ w*)* }
 
 /// One or more space characters, used for indentation.
 indentation = _{ " "+ }
@@ -160,7 +160,7 @@ block = _{
 // Matches required newlines before the next statement in a block,
 // ensuring the next line starts exactly at the current indentation level (checked by PEEK_ALL).
 /// Required newlines before the next statement in an indented block, ensuring correct indentation.
-block_nl = _{ nls ~ PEEK_ALL ~ !indentation }  // The `!indentation` is not really necessary here, cuz `statement` doesn't start with whitespace
+block_nl = _{ nls ~ PEEK_ALL ~ !indentation }
 
 // --- Expressions ---
 // The following rules define the operator precedence hierarchy, from lowest to highest.
@@ -176,8 +176,8 @@ pipeline_expr = { pipeline_expr_simple ~ pipeline_block? }
 pipeline_expr_simple = { lambda_expr ~ (w* ~ pipeline_op ~ w* ~ pipeline_expr_simple)? }
 /// Lambda expression (anonymous function). E.g. `arg => expr`, `arg: type => expr`, or `(arg1, arg2 = default) => expr`.
 /// The part before `=>` is parsed once as an ordinary expression and upgraded
-/// to a parameter list by the AST builder — speculatively parsing it as
-/// parameters and re-parsing on failure made nesting exponentially slow.
+/// to a parameter list by the AST builder (trying parameters first and
+/// backtracking is exponential in the nesting depth).
 /// A body may also be `return`, `break` or `continue`, which a match arm
 /// needs (`nothing => return 0`).
 lambda_expr = { loop_expr ~ (w* ~ lambda_op ~ w* ~ (return_stmt | break_stmt | continue_stmt | lambda_expr | block))? }
@@ -206,23 +206,22 @@ logic_not = { (kw_not ~ w+)? ~ comparison }
 /// Comparison expression (==, !=, >, etc.), possibly spanning multiple lines.
 comparison = { comparison_simple ~ comparison_block? }
 /// A single line or part of a comparison expression.
-comparison_simple = { type_or ~ (w* ~ comparison_op ~ w* ~ type_or)* }
+comparison_simple = { bit_or ~ (w* ~ comparison_op ~ w* ~ bit_or)* }
 /// `|` expression, possibly spanning multiple lines: a union in a type
 /// (`int | nothing`), bitwise or on ints.
-type_or = { type_or_simple ~ type_or_block? }
+bit_or = { bit_or_simple ~ bit_or_block? }
 /// A single line or part of a `|` expression.
-type_or_simple = { xor ~ (w* ~ type_or_op ~ w* ~ xor)* }
+bit_or_simple = { xor ~ (w* ~ bit_or_op ~ w* ~ xor)* }
 /// Bitwise xor (`^`), possibly spanning multiple lines.
 xor = { xor_simple ~ xor_block? }
 /// A single line or part of a xor expression.
-xor_simple = { type_and ~ (w* ~ xor_op ~ w* ~ type_and)* }
+xor_simple = { bit_and ~ (w* ~ xor_op ~ w* ~ bit_and)* }
 /// `&` expression, possibly spanning multiple lines: bitwise and on ints.
-type_and = { type_and_simple ~ type_and_block? }
+bit_and = { bit_and_simple ~ bit_and_block? }
 /// A single line or part of an `&` expression.
-type_and_simple = { range ~ (w* ~ type_and_op ~ w* ~ range)* }
-/// Range expression (`..`). Left-factored: the leading `shift` is parsed
-/// exactly once (re-trying it per alternative made nested expressions
-/// exponentially slow to parse).
+bit_and_simple = { range ~ (w* ~ bit_and_op ~ w* ~ range)* }
+/// Range expression (`..`). Left-factored so the leading `shift` is parsed
+/// once (retrying it per alternative is exponential in the nesting depth).
 range = { shift ~ (w* ~ range_op ~ (w* ~ shift)?)? | range_op ~ w* ~ shift }
 /// Shift expression (`<<`, `>>`), possibly spanning multiple lines.
 shift = { shift_simple ~ shift_block? }
@@ -283,18 +282,18 @@ logic_and_block_line = { kw_and ~ w* ~ logic_and_simple ~ w* ~ comment? }
 comparison_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ comparison_block_line ~ (block_nl ~ comparison_block_line)* ~ DROP }
 /// A single line within a comparison block.
 comparison_block_line = { comparison_op ~ w* ~ comparison_simple ~ w* ~ comment? }
-/// An indented block continuing a type OR expression.
-type_or_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ type_or_block_line ~ (block_nl ~ type_or_block_line)* ~ DROP }
-/// A single line within a type OR block.
-type_or_block_line = { type_or_op ~ w* ~ type_or_simple ~ w* ~ comment? }
+/// An indented block continuing a `|` expression.
+bit_or_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ bit_or_block_line ~ (block_nl ~ bit_or_block_line)* ~ DROP }
+/// A single line within a `|` block.
+bit_or_block_line = { bit_or_op ~ w* ~ bit_or_simple ~ w* ~ comment? }
 /// An indented block continuing a xor expression.
 xor_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ xor_block_line ~ (block_nl ~ xor_block_line)* ~ DROP }
 /// A single line within a xor block.
 xor_block_line = { xor_op ~ w* ~ xor_simple ~ w* ~ comment? }
-/// An indented block continuing a type AND expression.
-type_and_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ type_and_block_line ~ (block_nl ~ type_and_block_line)* ~ DROP }
-/// A single line within a type AND block.
-type_and_block_line = { type_and_op ~ w* ~ type_and_simple ~ w* ~ comment? }
+/// An indented block continuing an `&` expression.
+bit_and_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ bit_and_block_line ~ (block_nl ~ bit_and_block_line)* ~ DROP }
+/// A single line within an `&` block.
+bit_and_block_line = { bit_and_op ~ w* ~ bit_and_simple ~ w* ~ comment? }
 /// An indented block continuing a shift expression.
 shift_block = { w* ~ nls ~ PEEK_ALL ~ PUSH(indentation) ~ shift_block_line ~ (block_nl ~ shift_block_line)* ~ DROP }
 /// A single line within a shift block.
@@ -350,12 +349,12 @@ paren_expr = { "(" ~ w* ~ (expression_big ~ (w* ~ "," ~ w* ~ expression_big)* | 
 pipeline_op = { "|>" | "*>" | "?>" | "!>" }
 /// Lambda operator: `=>`.
 lambda_op = { "=>" }
-/// Assignment operators: `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `**=`.
+/// Assignment operators: `=`, or an arithmetic or bitwise operator followed by `=` (`+=`, `<<=`, ...).
 assignment_op = { "**=" | "<<=" | ">>>=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | ("=" ~ !("=" | ">")) }
 /// `|`: a union in a type, bitwise or on ints.
-type_or_op = { "|" ~ !(">" | "=") }
+bit_or_op = { "|" ~ !(">" | "=") }
 /// `&`: bitwise and on ints.
-type_and_op = { "&" ~ !"=" }
+bit_and_op = { "&" ~ !"=" }
 /// Bitwise xor: `^`.
 xor_op = { "^" ~ !"=" }
 /// Shifts: `<<`, `>>`.

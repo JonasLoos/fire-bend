@@ -1,8 +1,8 @@
 # Fire
 
-A small, indentation-based language where data flows left to right, compiled
-to [Bend 2](https://bend-lang.com) and run on its runtime (native via clang,
-or JavaScript).
+A small, indentation-based language where data flows left to right. Fire
+compiles to [Bend 2](https://bend-lang.com), and a compiled program keeps
+Bend's guarantees: it is typed, it terminates, and its matches are covered.
 
 ```fire
 result = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
@@ -13,45 +13,42 @@ result = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 print("sum of odd squares: {result}")   # 165
 ```
 
-Four ideas:
-
-1. **Pipelines compose computation.** `|>` applies, `*>` maps, `?>` filters,
-   `!>` handles errors, and `$` names the piped value.
-2. **One construct, `def`, covers functions and classes.** A def that
-   declares `public` members builds an object; methods are closures.
-3. **Types and effects are inferred.** Every program is statically typed.
-   A function that can fail returns a result, one that prints is an IO
-   function, and the compiler works that out from the body. Only data with
-   alternatives or recursion is declared (`type Tree`).
-4. **Programs are total, and Bend checks it.** Every def is seen to
-   terminate and every match to be covered, and the compiled program is one
-   Bend's own checker certifies. Where termination is a theorem beyond the
-   checker, the def says `unsafe def`. Laws state what the defs promise;
-   the compiler proves the mechanical ones, tests the rest, and hands them
-   to Bend as claims.
+* **Pipelines compose computation.** `|>` applies, `*>` maps, `?>` filters,
+  `!>` recovers from an error, and `$` is the piped value.
+* **Types and effects are inferred.** A function that can fail returns a
+  result, one that prints is IO, and the compiler works that out. Only data
+  with alternatives or recursion is declared (`type Tree`).
+* **One `def` covers functions and classes.** A def with `public` members
+  builds an object; objects are values, never shared.
+* **Programs are total.** Every def is seen to end and every match to be
+  covered, and Bend's checker confirms it. Where termination is a theorem
+  beyond the checker, the def says `unsafe def`.
+* **Laws state what defs promise.** The compiler proves the mechanical
+  ones, property-tests the rest, and hands them to Bend as claims.
 
 > [!WARNING]
-> This is an experimental proof of concept, not production-ready software.
+> Fire is an experimental proof of concept.
 
 ## Install and run
 
-You need Rust, [Bend](https://bend-lang.com) (`curl -fsSL https://bend-lang.com/install.sh | sh`)
-and clang; `node` for the JavaScript lane.
+Fire needs Rust, [Bend](https://bend-lang.com) and clang (`node` for the
+JavaScript target):
 
 ```bash
+curl -fsSL https://bend-lang.com/install.sh | sh
 cargo install --path .
 
-fire examples/word_stats.fire                # compile and run
-fire examples/word_stats.fire -o out.bend    # write the Bend source
-fire examples/word_stats.fire -o word_stats  # build a native binary with bend
-fire examples/word_stats.fire -o out.js      # build for node
-fire examples/word_stats.fire --types        # every def's type, effects and termination argument
-fire examples/types_and_laws.fire --check    # Bend's checker: laws proven or open, unsafe code
-fire examples/types_and_laws.fire --test     # every law checked on generated values
-fire examples/sorting.fire --total           # reject a program with unsafe code
+fire examples/basics.fire                  # compile and run
+fire examples/basics.fire -o basics.bend   # write the Bend source
+fire examples/basics.fire -o basics        # build a native binary
+fire examples/basics.fire -o basics.js     # build for node
+fire examples/totality.fire --types        # each def's type, effects and termination argument
+fire examples/types_and_laws.fire --check  # Bend's verdict on laws and unsafe code
+fire examples/types_and_laws.fire --test   # check every law on generated values
+fire examples/sorting.fire --total         # reject a program with unsafe code
 ```
 
-`BEND_LANE=js` runs through the JavaScript lane instead of a native binary.
+`BEND_LANE=js` runs programs through node instead of a native binary.
 
 ## A tour
 
@@ -60,33 +57,26 @@ x = 42                                    # bindings are immutable
 var y = 1                                 # unless declared var
 y += 1
 
-def fib(n)                                # functions; the last expression is the value
-    if n <= 1 do 1 else fib(n - 1) + fib(n - 2)   # total: n counts down under the guard
+def fib(n)                                # the last expression is the value
+    if n <= 1 do 1 else fib(n - 1) + fib(n - 2)
 
 double = n => n * 2                       # lambdas
-greet = (name = "world") => "hi {name}"   # defaults, strings interpolate
+greet = (name = "world") => "hi {name}"   # defaults; strings interpolate
 
 def Counter(start = 0)                    # a def with public members is a class
     public var count = start
-    public increment = () => count += 1   # methods see members as locals
+    public increment = () => count += 1
 
 var c = Counter()
-c.increment()                             # objects are values: this rebinds c
+c.increment()                             # rebinds c: objects are values
 print(c.count)                            # 1
 
-def Dog(name)                             # inheritance: adopt a parent, override
-    parent = Animal(name)
-    self.{...} = parent
-    public speak = () => parent.speak() + " Woof!"
-
-match xs.first()                          # pattern matching, typed: T | nothing
+match xs.first()                          # T | nothing, matched
     nothing => print("empty")
     n => print("starts with {n}")
 
 [first, ...rest] = [1, 2, 3]              # destructuring
-{name, age} = person
-{sqrt, pi} = $math                        # modules are records:
-text = $io.read_file("data.txt") !> ""    # $math $strings $lists $io $time
+{sqrt, pi} = $math                        # builtin modules are records
 
 for i, word in 0.., ["a", "b", "c"]       # lockstep; the list ends the loop
     print("{i}: {word}")
@@ -95,11 +85,11 @@ port = read_config()                      # results ride the pipeline:
     |> $.parse_int()                      # skipped when the input is an err
     !> 8080                               # and this is the recovery
 
-type Tree                                 # declared data: alternatives, recursion
+type Tree                                 # declared data
     Leaf
     Node(left: Tree, value, right: Tree)  # an untyped field is a type parameter
 
-def size(t)                               # recursion on a piece: always ends
+def size(t)                               # recursion on a piece always ends
     match t
         Leaf => 0
         Node(l, _, r) => size(l) + 1 + size(r)
@@ -107,30 +97,32 @@ def size(t)                               # recursion on a piece: always ends
 law size_of_leaf                          # proven when the program is built
     size(Leaf) == 0
 
-unsafe def gcd(a, b)                      # a theorem the checker cannot follow
+unsafe def gcd(a, b)                      # termination the checker cannot see
     if b == 0 do a else gcd(b, a % b)
 ```
 
-The full reference is [`docs/language.md`](docs/language.md); how the
-compiler turns this into Bend is in [`docs/compiler.md`](docs/compiler.md).
-Why it is built this way, with every claim about Bend backed by a checked
-program, is [`docs/design.md`](docs/design.md).
+## Examples
 
-## Layout
-
-| Path | What it is |
+| program | shows |
 |---|---|
-| `grammar/fire.pest` | the grammar (pest, indentation-aware) |
-| `src/ast.rs` | AST and its construction from parse trees |
-| `src/check/` | names, type and effect inference, termination, laws; produces Core |
-| `src/core.rs` | Core: the typed, resolved program |
-| `src/lower/` | lowering to Bend IR in forms Bend's checker can certify |
-| `src/ir.rs` | the IR and its printer |
-| `src/prelude.bend` | runtime library; the part a program uses is emitted with it |
-| `src/testgen.rs` | laws as property tests (`--test`) |
-| `examples/` | programs with their expected output (`.out`) |
-| `docs/design/` | the Bend shapes the compiler emits, each checked by `bend` in the tests |
-| `tests/cases/` | one small program per language rule or fixed bug |
+| [`basics`](examples/basics.fire) | bindings, functions, pipelines, closures, records, dictionaries, strings |
+| [`objects`](examples/objects.fire) | classes, value semantics, inheritance, custom operators |
+| [`results`](examples/results.fire) | `T \| nothing`, results, `!>`, pattern matching |
+| [`totality`](examples/totality.fire) | what terminates, and `unsafe def` |
+| [`types_and_laws`](examples/types_and_laws.fire) | declared types and laws |
+| [`slices`](examples/slices.fire) | indexing and slicing |
+| [`sorting`](examples/sorting.fire), [`strings`](examples/strings.fire), [`numeric`](examples/numeric.fire) | classic algorithms |
+| [`word_freq`](examples/word_freq.fire), [`csv_records`](examples/csv_records.fire), [`report`](examples/report.fire) | text processing and formatting |
+| [`bank_ledger`](examples/bank_ledger.fire), [`money_utils`](examples/money_utils.fire), [`template`](examples/template.fire), [`dungeon_sim`](examples/dungeon_sim.fire) | larger programs built from objects |
+
+Each program's output is in the `.out` file next to it.
+
+## Documentation
+
+* [`docs/language.md`](docs/language.md): the language reference.
+* [`docs/compiler.md`](docs/compiler.md): how Fire compiles to Bend, and
+  why, with each Bend form backed by a program under
+  [`docs/shapes/`](docs/shapes).
 
 ## Testing
 
@@ -138,8 +130,7 @@ program, is [`docs/design.md`](docs/design.md).
 cargo test
 ```
 
-Every program under `examples/` and `tests/cases/` is compiled to Bend and,
-when `bend` is on `PATH`, checked by Bend (including its laws), built, run
-and compared with its `.out` file.
-`BEND_TESTS=skip` only checks compilation; `BEND_TESTS=require` fails when
-`bend` is missing (CI runs this way).
+Every program under `examples/` and `tests/cases/` (one small program per
+language rule) is compiled and, when `bend` is on `PATH`, checked, built,
+run and compared with its `.out` file. `BEND_TESTS=skip` only compiles;
+`BEND_TESTS=require` fails when `bend` is missing, as CI does.

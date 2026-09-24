@@ -108,19 +108,7 @@ impl Checker {
                 Pat::Con(tid, ci, ps)
             }
             ast::Pattern::List(items) => {
-                let elem = match &st {
-                    Type::List(e) => (**e).clone(),
-                    // said, and the names bound anyway
-                    Type::Data(PAIR, _) => {
-                        self.error(line, ENTRY_NOT_A_LIST);
-                        self.fresh()
-                    }
-                    _ => {
-                        let e = self.fresh();
-                        self.unify(subject, &Type::list(e.clone()), line);
-                        e
-                    }
-                };
+                let elem = self.list_pattern_elem(subject);
                 let mut ps = Vec::new();
                 let mut rest = None;
                 for it in items {
@@ -139,15 +127,7 @@ impl Checker {
             ast::Pattern::Object(entries) => {
                 // {ok} / {err} on a result
                 if entries.len() == 1 && (entries[0].0 == "ok" || entries[0].0 == "err") {
-                    let (e, a) = match &st {
-                        Type::Data(RESULT, args) => (args[0].clone(), args[1].clone()),
-                        _ => {
-                            let e = self.fresh();
-                            let a = self.fresh();
-                            self.unify(subject, &Type::result(e.clone(), a.clone()), line);
-                            (e, a)
-                        }
-                    };
+                    let (e, a) = self.result_parts(subject);
                     let (ci, inner_ty) = if entries[0].0 == "ok" { (1, a) } else { (0, e) };
                     let sub = self.check_pattern(&entries[0].1, &inner_ty, false);
                     return Pat::Con(RESULT, ci, vec![sub]);
@@ -224,19 +204,7 @@ impl Checker {
                 let tmp = self.temp("d");
                 let vt = value.ty.clone();
                 let mut out = vec![Stmt { kind: StmtKind::Let { name: tmp.clone(), value }, line }];
-                let st = self.shallow(&vt);
-                let elem = match &st {
-                    Type::List(e) => (**e).clone(),
-                    Type::Data(PAIR, _) => {
-                        self.error(line, ENTRY_NOT_A_LIST);
-                        self.fresh()
-                    }
-                    _ => {
-                        let e = self.fresh();
-                        self.unify(&vt, &Type::list(e.clone()), line);
-                        e
-                    }
-                };
+                let elem = self.list_pattern_elem(&vt);
                 let fixed = items.iter().filter(|i| !matches!(i, ast::Pattern::Rest(_))).count();
                 let has_rest = items.iter().any(|i| matches!(i, ast::Pattern::Rest(_)));
                 // the list must be long enough: an abort otherwise
@@ -271,15 +239,7 @@ impl Checker {
             ast::Pattern::Object(entries) => {
                 // {ok} = result: unwrap or abort
                 if entries.len() == 1 && (entries[0].0 == "ok" || entries[0].0 == "err") {
-                    let (e, a) = match self.shallow(&value.ty) {
-                        Type::Data(RESULT, args) => (args[0].clone(), args[1].clone()),
-                        _ => {
-                            let e = self.fresh();
-                            let a = self.fresh();
-                            self.unify(&value.ty, &Type::result(e.clone(), a.clone()), line);
-                            (e, a)
-                        }
-                    };
+                    let (e, a) = self.result_parts(&value.ty);
                     self.effect(Effect::ABORT);
                     let (b, t) = if entries[0].0 == "ok" { ("result.unwrap_ok", a) } else { ("result.unwrap_err", e) };
                     let x = self.expr(ExprKind::Builtin(b.into(), vec![value]), t);
@@ -310,16 +270,47 @@ impl Checker {
         }
     }
 
-    /// A destructuring parameter (`{age} => ...`): bind its names from the
-    /// synthetic parameter.
-    pub(crate) fn destructure_param(&mut self, p: &Param, pat: &ast::Pattern) -> Vec<Stmt> {
-        match pat {
-            ast::Pattern::Identifier(_) => vec![],
-            ast::Pattern::Typed { pattern, .. } if matches!(**pattern, ast::Pattern::Identifier(_)) => vec![],
-            other => {
-                let v = self.var(&p.name, p.ty.clone());
-                self.bind_pattern(other, v, false)
+    /// The element type a list pattern binds from a value of type `t`: a
+    /// `{key, value}` entry is said not to be a list (the names are bound
+    /// anyway).
+    fn list_pattern_elem(&mut self, t: &Type) -> Type {
+        match self.shallow(t) {
+            Type::List(e) => *e,
+            Type::Data(PAIR, _) => {
+                self.error(self.line, ENTRY_NOT_A_LIST);
+                self.fresh()
+            }
+            _ => {
+                let e = self.fresh();
+                self.unify(t, &Type::list(e.clone()), self.line);
+                e
             }
         }
+    }
+
+    /// The error and value types of a result of type `t`.
+    fn result_parts(&mut self, t: &Type) -> (Type, Type) {
+        match self.shallow(t) {
+            Type::Data(RESULT, args) => (args[0].clone(), args[1].clone()),
+            _ => {
+                let e = self.fresh();
+                let a = self.fresh();
+                self.unify(t, &Type::result(e.clone(), a.clone()), self.line);
+                (e, a)
+            }
+        }
+    }
+
+    /// Destructuring parameters (`{age} => ...`): statements binding their
+    /// names from the synthetic parameters.
+    pub(crate) fn destructure_params(&mut self, params: &[Param], ast_params: &[ast::Param]) -> Vec<Stmt> {
+        let mut out = Vec::new();
+        for (p, ast_p) in params.iter().zip(ast_params) {
+            if plain_name(&ast_p.pattern).is_none() {
+                let v = self.var(&p.name, p.ty.clone());
+                out.extend(self.bind_pattern(&ast_p.pattern, v, false));
+            }
+        }
+        out
     }
 }
